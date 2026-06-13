@@ -1,0 +1,102 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using PropSeekr.DTOs.Auth;
+using PropSeekr.Services.Interfaces;
+
+namespace PropSeekr.Controllers;
+
+[ApiController]
+[Route("api/v1/auth")]
+public class AuthController : ControllerBase
+{
+    private readonly IAuthService _authService;
+
+    public AuthController(IAuthService authService)
+    {
+        _authService = authService;
+    }
+
+    [HttpPost("register")]
+    public async Task<IActionResult> Register(
+        [FromBody] RegisterRequestDto request)
+    {
+        try
+        {
+            var response = await _authService.RegisterAsync(request);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new
+            {
+                message = ex.Message
+            });
+        }
+    }
+
+    [HttpPost("send-otp")]
+    public async Task<IActionResult> SendOtp(
+        [FromBody] SendOtpRequestDto request)
+    {
+        try
+        {
+            var response = await _authService.SendOtpAsync(request);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new
+            {
+                message = ex.Message
+            });
+        }
+    }
+
+    [HttpPost("verify-otp")]
+    public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequestDto request)
+    {
+        try
+        {
+            var response = await _authService.VerifyOtpAsync(request);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new
+            {
+                message = ex.Message
+            });
+        }
+    }
+
+    [HttpPost("resend-otp")]
+    public async Task<IActionResult> ResendOtp(
+        [FromBody] SendOtpRequestDto request)
+    {
+        try
+        {
+            var response = await _authService.ResendOtpAsync(request);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new
+            {
+                message = ex.Message
+            });
+        }
+    }
+
+    [Authorize]
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout()
+    {
+        var response = await _authService.LogoutAsync();
+
+        return Ok(response);
+    }
+}

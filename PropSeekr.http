@@ -1,0 +1,6 @@
+@PropSeekr_HostAddress = http://localhost:5150
+
+GET {{PropSeekr_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

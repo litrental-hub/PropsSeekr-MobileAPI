@@ -1,0 +1,20 @@
+{
+  "Version": 1,
+  "Hash": "j31eDo+iiFJRNGWkeBxE2221jNKg9X8GErShjbDckLI=",
+  "Source": "PropSeekr",
+  "BasePath": "_content/PropSeekr",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [
+    {
+      "Name": "PropSeekr\\wwwroot",
+      "Source": "PropSeekr",
+      "ContentRoot": "C:\\Users\\csabh\\Desktop\\workspace\\litrentalsapi\\PropSeekr\\wwwroot\\",
+      "BasePath": "_content/PropSeekr",
+      "Pattern": "**"
+    }
+  ],
+  "Assets": [],
+  "Endpoints": []
+}
