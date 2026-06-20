@@ -12,7 +12,7 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260607165808_InitialCreate")]
+    [Migration("20260614152816_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -56,7 +56,7 @@ namespace PropSeekr.Migrations
 
                     b.HasIndex("MobileNumber", "OtpCode");
 
-                    b.ToTable("OTPVerification", (string)null);
+                    b.ToTable("OtpVerifications", (string)null);
                 });
 
             modelBuilder.Entity("PropSeekr.Models.User", b =>

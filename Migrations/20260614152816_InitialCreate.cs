@@ -12,7 +12,7 @@ namespace PropSeekr.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.CreateTable(
-                name: "OTPVerification",
+                name: "OtpVerifications",
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
@@ -24,7 +24,7 @@ namespace PropSeekr.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_OTPVerification", x => x.Id);
+                    table.PrimaryKey("PK_OtpVerifications", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -50,13 +50,13 @@ namespace PropSeekr.Migrations
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_OTPVerification_MobileNumber",
-                table: "OTPVerification",
+                name: "IX_OtpVerifications_MobileNumber",
+                table: "OtpVerifications",
                 column: "MobileNumber");
 
             migrationBuilder.CreateIndex(
-                name: "IX_OTPVerification_MobileNumber_OtpCode",
-                table: "OTPVerification",
+                name: "IX_OtpVerifications_MobileNumber_OtpCode",
+                table: "OtpVerifications",
                 columns: new[] { "MobileNumber", "OtpCode" });
 
             migrationBuilder.CreateIndex(
@@ -82,7 +82,7 @@ namespace PropSeekr.Migrations
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.DropTable(
-                name: "OTPVerification");
+                name: "OtpVerifications");
 
             migrationBuilder.DropTable(
                 name: "Users");
