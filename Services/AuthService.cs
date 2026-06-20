@@ -76,6 +76,38 @@ public class AuthService : IAuthService
         };
     }
 
+    public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
+    {
+        if (string.IsNullOrWhiteSpace(request.UserName) || string.IsNullOrWhiteSpace(request.Password))
+        {
+            throw new Exception("Invalid username or password.");
+        }
+
+        var userName = request.UserName.Trim();
+        var admin = await _dbContext.AdminUsers
+            .FirstOrDefaultAsync(x => x.UserName == userName && x.IsActive);
+
+        if (admin == null || !VerifyPassword(request.Password, admin.PasswordHash))
+        {
+            throw new Exception("Invalid username or password.");
+        }
+
+        var token = GenerateJwtToken(
+            admin.Id,
+            admin.UserName,
+            role: "Admin",
+            mobileNumber: null,
+            out var expiresAt);
+
+        return new AdminLoginResponseDto
+        {
+            Token = token,
+            ExpiresAt = expiresAt,
+            AdminId = admin.Id,
+            UserName = admin.UserName
+        };
+    }
+
     public async Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request)
     {
         return await CreateOtpAsync(request.MobileNumber, invalidateExistingOtps: false, "OTP sent successfully.");
@@ -186,17 +218,38 @@ public class AuthService : IAuthService
 
     private string GenerateJwtToken(User user, out DateTime expiresAt)
     {
+        return GenerateJwtToken(
+            user.Id,
+            user.Name,
+            role: "User",
+            mobileNumber: user.MobileNumber,
+            out expiresAt);
+    }
+
+    private string GenerateJwtToken(
+        Guid subjectId,
+        string userName,
+        string role,
+        string? mobileNumber,
+        out DateTime expiresAt)
+    {
         var key = _configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is not configured.");
         var expiresMinutes = _configuration.GetValue<int>("Jwt:ExpiresMinutes", 60);
         expiresAt = DateTime.UtcNow.AddMinutes(expiresMinutes);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
-            new Claim(JwtRegisteredClaimNames.UniqueName, user.Name),
-            new Claim(ClaimTypes.MobilePhone, user.MobileNumber),
-            new Claim("mobile", user.MobileNumber)
+            new(JwtRegisteredClaimNames.Sub, subjectId.ToString()),
+            new(JwtRegisteredClaimNames.UniqueName, userName),
+            new(ClaimTypes.Role, role),
+            new("role", role)
         };
+
+        if (!string.IsNullOrWhiteSpace(mobileNumber))
+        {
+            claims.Add(new Claim(ClaimTypes.MobilePhone, mobileNumber));
+            claims.Add(new Claim("mobile", mobileNumber));
+        }
 
         var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
         var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
@@ -209,6 +262,38 @@ public class AuthService : IAuthService
             signingCredentials: credentials);
 
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static bool VerifyPassword(string password, string storedHash)
+    {
+        var hashParts = storedHash.Split('$');
+        if (hashParts.Length != 4 ||
+            hashParts[0] != "PBKDF2-SHA256" ||
+            !int.TryParse(hashParts[1], out var iterations))
+        {
+            return false;
+        }
+
+        byte[] salt;
+        byte[] expectedHash;
+        try
+        {
+            salt = Convert.FromBase64String(hashParts[2]);
+            expectedHash = Convert.FromBase64String(hashParts[3]);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        using var deriveBytes = new Rfc2898DeriveBytes(
+            password,
+            salt,
+            iterations,
+            HashAlgorithmName.SHA256);
+        var actualHash = deriveBytes.GetBytes(expectedHash.Length);
+
+        return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
     }
 
     private static string GenerateOtp()
