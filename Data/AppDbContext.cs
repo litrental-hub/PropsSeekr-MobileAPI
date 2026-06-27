@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using NetTopologySuite.Geometries;
 using PropSeekr.Models;
 
 namespace PropSeekr.Data;
@@ -17,6 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
+    public DbSet<PropertyRequest> PropertyRequests => Set<PropertyRequest>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -56,5 +58,47 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<OtpVerification>()
             .HasIndex(o => o.MobileNumber);
+
+        // Configure PropertyRequest relationships and indexes
+        modelBuilder.Entity<PropertyRequest>()
+            .HasOne(p => p.User)
+            .WithMany()
+            .HasForeignKey(p => p.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.UserId);
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.TransactionType);
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.Category);
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => new { p.City, p.Locality });
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.PostedAt)
+            .IsDescending();
+        
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.BudgetMin);
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.BudgetMax);
+
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.PropertyTypesJson);
+
+        // Configure the PostGIS geography point column for spatial distance queries
+        modelBuilder.Entity<PropertyRequest>()
+            .Property(p => p.Location)
+            .HasColumnType("geography (point)");
+
+        // Spatial index for fast distance filtering
+        modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.Location)
+            .HasMethod("GIST");
     }
 }

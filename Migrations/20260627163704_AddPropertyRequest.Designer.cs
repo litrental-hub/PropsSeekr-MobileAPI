@@ -2,8 +2,8 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using PropSeekr.Data;
 
@@ -12,16 +12,17 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260627163704_AddPropertyRequest")]
+    partial class AddPropertyRequest
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
                 .HasAnnotation("ProductVersion", "9.0.16")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
-            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "postgis");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
             modelBuilder.Entity("PropSeekr.Models.OtpVerification", b =>
@@ -68,12 +69,6 @@ namespace PropSeekr.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<long?>("BudgetMax")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("BudgetMin")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("Category")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -92,13 +87,16 @@ namespace PropSeekr.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<double>("Latitude")
+                        .HasColumnType("double precision");
+
                     b.Property<string>("Locality")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<Point>("Location")
-                        .HasColumnType("geography (point)");
+                    b.Property<double>("Longitude")
+                        .HasColumnType("double precision");
 
                     b.Property<DateTime>("ModifiedDate")
                         .HasColumnType("timestamp with time zone");
@@ -107,10 +105,6 @@ namespace PropSeekr.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PreferredLocationsJson")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("PropertyTypesJson")
                         .IsRequired()
                         .HasColumnType("text");
 
@@ -146,20 +140,10 @@ namespace PropSeekr.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("BudgetMax");
-
-                    b.HasIndex("BudgetMin");
-
                     b.HasIndex("Category");
-
-                    b.HasIndex("Location");
-
-                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Location"), "GIST");
 
                     b.HasIndex("PostedAt")
                         .IsDescending();
-
-                    b.HasIndex("PropertyTypesJson");
 
                     b.HasIndex("TransactionType");
 
