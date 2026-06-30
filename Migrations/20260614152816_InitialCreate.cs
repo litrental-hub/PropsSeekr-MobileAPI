@@ -11,46 +11,78 @@ namespace PropSeekr.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.Sql(@"CREATE TABLE IF NOT EXISTS ""OTPVerification"" (
-    ""Id"" uuid PRIMARY KEY,
-    ""MobileNumber"" character varying(10) NOT NULL,
-    ""OtpCode"" character varying(6) NOT NULL,
-    ""ExpiresAt"" timestamp with time zone NOT NULL,
-    ""IsUsed"" boolean NOT NULL,
-    ""CreatedDate"" timestamp with time zone NOT NULL
-);");
+            migrationBuilder.CreateTable(
+                name: "OtpVerifications",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    MobileNumber = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    OtpCode = table.Column<string>(type: "character varying(6)", maxLength: 6, nullable: false),
+                    ExpiresAt = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    IsUsed = table.Column<bool>(type: "boolean", nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_OtpVerifications", x => x.Id);
+                });
 
-            migrationBuilder.Sql(@"CREATE TABLE IF NOT EXISTS ""Users"" (
-    ""Id"" uuid PRIMARY KEY,
-    ""Name"" character varying(100) NOT NULL,
-    ""MobileNumber"" character varying(10) NOT NULL,
-    ""Email"" character varying(255),
-    ""AadharNumber"" character varying(12) NOT NULL,
-    ""PanCard"" character varying(10) NOT NULL,
-    ""GSTNumber"" character varying(20),
-    ""ReraRegistrationNumber"" character varying(50),
-    ""ProfilePhotoUrl"" text,
-    ""IsMobileVerified"" boolean NOT NULL,
-    ""CreatedDate"" timestamp with time zone NOT NULL,
-    ""ModifiedDate"" timestamp with time zone NOT NULL
-);");
+            migrationBuilder.CreateTable(
+                name: "Users",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    Name = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    MobileNumber = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    Email = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
+                    AadharNumber = table.Column<string>(type: "character varying(12)", maxLength: 12, nullable: false),
+                    PanCard = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    GSTNumber = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    ReraRegistrationNumber = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    ProfilePhotoUrl = table.Column<string>(type: "text", nullable: true),
+                    IsMobileVerified = table.Column<bool>(type: "boolean", nullable: false),
+                    CreatedDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    ModifiedDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Users", x => x.Id);
+                });
 
-            migrationBuilder.Sql("CREATE INDEX IF NOT EXISTS \"IX_OTPVerification_MobileNumber\" ON \"OTPVerification\" (\"MobileNumber\");");
+            migrationBuilder.CreateIndex(
+                name: "IX_OtpVerifications_MobileNumber",
+                table: "OtpVerifications",
+                column: "MobileNumber");
 
-            migrationBuilder.Sql("CREATE INDEX IF NOT EXISTS \"IX_OTPVerification_MobileNumber_OtpCode\" ON \"OTPVerification\" (\"MobileNumber\", \"OtpCode\");");
+            migrationBuilder.CreateIndex(
+                name: "IX_OtpVerifications_MobileNumber_OtpCode",
+                table: "OtpVerifications",
+                columns: new[] { "MobileNumber", "OtpCode" });
 
-            migrationBuilder.Sql("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_Users_AadharNumber\" ON \"Users\" (\"AadharNumber\");");
+            migrationBuilder.CreateIndex(
+                name: "IX_Users_AadharNumber",
+                table: "Users",
+                column: "AadharNumber",
+                unique: true);
 
-            migrationBuilder.Sql("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_Users_MobileNumber\" ON \"Users\" (\"MobileNumber\");");
+            migrationBuilder.CreateIndex(
+                name: "IX_Users_MobileNumber",
+                table: "Users",
+                column: "MobileNumber",
+                unique: true);
 
-            migrationBuilder.Sql("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_Users_PanCard\" ON \"Users\" (\"PanCard\");");
+            migrationBuilder.CreateIndex(
+                name: "IX_Users_PanCard",
+                table: "Users",
+                column: "PanCard",
+                unique: true);
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.DropTable(
-                name: "OTPVerification");
+                name: "OtpVerifications");
 
             migrationBuilder.DropTable(
                 name: "Users");
