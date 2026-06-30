@@ -2,8 +2,8 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using PropSeekr.Data;
 
@@ -12,61 +12,18 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260627164337_AddPropertyRequestFields")]
+    partial class AddPropertyRequestFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
                 .HasAnnotation("ProductVersion", "9.0.16")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
-            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "postgis");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
-
-            modelBuilder.Entity("PropSeekr.Models.AdminUser", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedDate")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<DateTime>("ModifiedDate")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("PasswordHash")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<string>("UserName")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserName")
-                        .IsUnique();
-
-                    b.ToTable("AdminUsers");
-
-                    b.HasData(
-                        new
-                        {
-                            Id = new Guid("b0ef71c1-13ab-4070-9d85-86571adf59c8"),
-                            CreatedDate = new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc),
-                            IsActive = true,
-                            ModifiedDate = new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc),
-                            PasswordHash = "PBKDF2-SHA256$100000$LVJ7kAGk7zNsEMneVYpBfyC8ZPENOZviao1yEc2gT1s=$hjnNN2d8W2s5SBkDGTAb+ct2M9qD+Csk7rNkZs9hlaM=",
-                            UserName = "admin"
-                        });
-                });
 
             modelBuilder.Entity("PropSeekr.Models.OtpVerification", b =>
                 {
@@ -136,13 +93,16 @@ namespace PropSeekr.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<double>("Latitude")
+                        .HasColumnType("double precision");
+
                     b.Property<string>("Locality")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<Point>("Location")
-                        .HasColumnType("geography (point)");
+                    b.Property<double>("Longitude")
+                        .HasColumnType("double precision");
 
                     b.Property<DateTime>("ModifiedDate")
                         .HasColumnType("timestamp with time zone");
@@ -195,10 +155,6 @@ namespace PropSeekr.Migrations
                     b.HasIndex("BudgetMin");
 
                     b.HasIndex("Category");
-
-                    b.HasIndex("Location");
-
-                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Location"), "GIST");
 
                     b.HasIndex("PostedAt")
                         .IsDescending();
