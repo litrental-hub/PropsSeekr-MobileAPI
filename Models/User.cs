@@ -15,6 +15,14 @@ public class User
   [MaxLength(255)]
   public string? Email { get; set; }
 
+  [MaxLength(255)]
+  public string PasswordHash { get; set; } = string.Empty;
+
+  [MaxLength(255)]
+  public string? RefreshTokenHash { get; set; }
+
+  public DateTime? RefreshTokenExpiresAt { get; set; }
+
   [MaxLength(12)]
   public string AadharNumber { get; set; } = string.Empty;
 

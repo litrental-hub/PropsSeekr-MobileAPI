@@ -13,6 +13,13 @@ public class RegisterRequestDto
         ErrorMessage = "Mobile number must be 10 digits")]
     public string Mobile { get; set; } = string.Empty;
 
+    [EmailAddress]
+    public string? Email { get; set; }
+
+    [Required]
+    [MinLength(8)]
+    public string Password { get; set; } = string.Empty;
+
     [Required]
     [RegularExpression(@"^\d{12}$",
         ErrorMessage = "Aadhar number must be 12 digits")]

@@ -22,6 +22,10 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 // Services
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
+builder.Services.AddHttpClient<IOtpDeliveryService, Msg91OtpDeliveryService>(client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["Msg91:BaseUrl"] ?? "https://control.msg91.com/");
+});
 
 builder.Services.AddAuthorization();
 

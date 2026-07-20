@@ -32,6 +32,11 @@ public class AppDbContext : DbContext
             .HasIndex(u => u.PanCard)
             .IsUnique();
 
+        modelBuilder.Entity<User>()
+            .HasIndex(u => u.Email)
+            .IsUnique()
+            .HasFilter("\"Email\" IS NOT NULL");
+
         modelBuilder.Entity<AdminUser>()
             .HasIndex(a => a.UserName)
             .IsUnique();
