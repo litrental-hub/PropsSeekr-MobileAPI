@@ -21,9 +21,12 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         o => o.UseNetTopologySuite()));
 
 // Services
+builder.Services.AddHttpClient();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
+builder.Services.AddScoped<IRazorpayService, RazorpayService>();
+builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 
 builder.Services.AddAuthorization();
 
