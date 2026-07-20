@@ -14,6 +14,10 @@ namespace PropSeekr.Services;
 
 public class AuthService : IAuthService
 {
+    private const int PasswordHashIterations = 100000;
+    private const int PasswordSaltSize = 16;
+    private const int PasswordHashSize = 32;
+
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly IWebHostEnvironment _environment;
@@ -33,46 +37,56 @@ public class AuthService : IAuthService
 
     public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
     {
-        if (await _dbContext.Users.AnyAsync(x =>
-                x.MobileNumber == request.Mobile))
-        {
-            throw new Exception("Mobile number already registered.");
-        }
+        var name = NormalizeRequired(request.Name, "Name");
+        var mobile = NormalizeRequired(request.Mobile, "Mobile number");
+        var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
+        var password = request.Password;
+        var addressLine1 = NormalizeRequired(request.AddressLine1, "Address line 1");
+        var addressLine2 = NormalizeOptional(request.AddressLine2);
+        var city = NormalizeRequired(request.City, "City");
+        var state = NormalizeRequired(request.State, "State");
+        var pincode = NormalizeRequired(request.Pincode, "Pincode");
+        var aadharNumber = NormalizeRequired(request.AadharNumber, "Aadhar number");
+        var panCard = NormalizeRequired(request.PanCard, "PAN card").ToUpperInvariant();
+        var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
+        var reraRegistrationNumber = NormalizeOptional(request.ReraRegistrationNumber);
 
-        if (await _dbContext.Users.AnyAsync(x =>
-                x.AadharNumber == request.AadharNumber))
-        {
-            throw new Exception("Aadhar number already registered.");
-        }
+        await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
 
-        if (await _dbContext.Users.AnyAsync(x =>
-                x.PanCard == request.PanCard))
-        {
-            throw new Exception("PAN card already registered.");
-        }
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
 
         var user = new User
         {
             Id = Guid.NewGuid(),
-            Name = request.Name,
-            MobileNumber = request.Mobile,
-            AadharNumber = request.AadharNumber,
-            PanCard = request.PanCard,
-            GSTNumber = request.GstNumber,
-            ReraRegistrationNumber = request.ReraRegistrationNumber,
+            Name = name,
+            MobileNumber = mobile,
+            Email = email,
+            PasswordHash = HashPassword(password),
+            AddressLine1 = addressLine1,
+            AddressLine2 = addressLine2,
+            City = city,
+            State = state,
+            Pincode = pincode,
+            AadharNumber = aadharNumber,
+            PanCard = panCard,
+            GSTNumber = gstNumber,
+            ReraRegistrationNumber = reraRegistrationNumber,
             IsMobileVerified = false,
             CreatedDate = DateTime.UtcNow,
             ModifiedDate = DateTime.UtcNow
         };
 
         _dbContext.Users.Add(user);
-
         await _dbContext.SaveChangesAsync();
+
+        await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
+
+        await transaction.CommitAsync();
 
         return new RegisterResponseDto
         {
             UserId = user.Id,
-            Message = "Registration successful."
+            Message = "Registration successful. OTP verification is pending."
         };
     }
 
@@ -110,12 +124,12 @@ public class AuthService : IAuthService
 
     public async Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request)
     {
-        return await CreateOtpAsync(request.MobileNumber, invalidateExistingOtps: false, "OTP sent successfully.");
+        return await CreateOtpAsync(request.MobileNumber, "OTP sent successfully.");
     }
 
     public async Task<OtpResponseDto> ResendOtpAsync(SendOtpRequestDto request)
     {
-        return await CreateOtpAsync(request.MobileNumber, invalidateExistingOtps: true, "OTP resent successfully.");
+        return await CreateOtpAsync(request.MobileNumber, "OTP resent successfully.");
     }
 
     public Task<LogoutResponseDto> LogoutAsync()
@@ -126,9 +140,35 @@ public class AuthService : IAuthService
         });
     }
 
+    private async Task EnsureRegistrationIsUniqueAsync(
+        string mobileNumber,
+        string email,
+        string aadharNumber,
+        string panCard)
+    {
+        if (await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber))
+        {
+            throw new Exception("Mobile number already registered.");
+        }
+
+        if (await _dbContext.Users.AnyAsync(x => x.Email != null && x.Email.ToLower() == email))
+        {
+            throw new Exception("Email already registered.");
+        }
+
+        if (await _dbContext.Users.AnyAsync(x => x.AadharNumber == aadharNumber))
+        {
+            throw new Exception("Aadhar number already registered.");
+        }
+
+        if (await _dbContext.Users.AnyAsync(x => x.PanCard == panCard))
+        {
+            throw new Exception("PAN card already registered.");
+        }
+    }
+
     private async Task<OtpResponseDto> CreateOtpAsync(
         string mobileNumber,
-        bool invalidateExistingOtps,
         string message)
     {
         if (!await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber))
@@ -138,18 +178,15 @@ public class AuthService : IAuthService
 
         var now = DateTime.UtcNow;
 
-        if (invalidateExistingOtps)
-        {
-            var activeOtps = await _dbContext.OtpVerifications
-                .Where(x =>
-                    x.MobileNumber == mobileNumber &&
-                    !x.IsUsed)
-                .ToListAsync();
+        var activeOtps = await _dbContext.OtpVerifications
+            .Where(x =>
+                x.MobileNumber == mobileNumber &&
+                !x.IsUsed)
+            .ToListAsync();
 
-            foreach (var activeOtp in activeOtps)
-            {
-                activeOtp.IsUsed = true;
-            }
+        foreach (var activeOtp in activeOtps)
+        {
+            activeOtp.IsUsed = true;
         }
 
         var otp = GenerateOtp();
@@ -182,38 +219,65 @@ public class AuthService : IAuthService
 
     public async Task<VerifyOtpResponseDto> VerifyOtpAsync(VerifyOtpRequestDto request)
     {
-        var otp = await _dbContext.OtpVerifications
-            .Where(o => o.MobileNumber == request.Mobile && !o.IsUsed)
-            .OrderByDescending(o => o.CreatedDate)
-            .FirstOrDefaultAsync();
+        var mobileNumber = NormalizeRequired(request.Mobile, "Mobile number");
+        var otpCode = NormalizeRequired(request.Otp, "OTP");
 
-        if (otp == null || otp.OtpCode != request.Otp || otp.ExpiresAt < DateTime.UtcNow)
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
+
+        try
         {
-            throw new Exception("Invalid or expired OTP.");
+            var otp = await _dbContext.OtpVerifications
+                .Where(o =>
+                    o.MobileNumber == mobileNumber &&
+                    o.OtpCode == otpCode &&
+                    !o.IsUsed &&
+                    o.ExpiresAt >= DateTime.UtcNow)
+                .OrderByDescending(o => o.CreatedDate)
+                .FirstOrDefaultAsync();
+
+            if (otp == null)
+            {
+                throw new Exception("Invalid or expired OTP.");
+            }
+
+            var claimed = await _dbContext.OtpVerifications
+                .Where(o => o.Id == otp.Id && !o.IsUsed)
+                .ExecuteUpdateAsync(setters =>
+                    setters.SetProperty(o => o.IsUsed, true));
+
+            if (claimed == 0)
+            {
+                throw new Exception("Invalid or expired OTP.");
+            }
+
+            var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
+
+            if (user == null)
+            {
+                throw new Exception("User not found for the provided mobile number.");
+            }
+
+            user.IsMobileVerified = true;
+            user.ModifiedDate = DateTime.UtcNow;
+
+            await _dbContext.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            var token = GenerateJwtToken(user, out var expiresAt);
+
+            return new VerifyOtpResponseDto
+            {
+                Token = token,
+                ExpiresAt = expiresAt,
+                UserId = user.Id,
+                UserName = user.Name
+            };
         }
-
-        otp.IsUsed = true;
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == request.Mobile);
-
-        if (user == null)
+        catch
         {
-            throw new Exception("User not found for the provided mobile number.");
+            await transaction.RollbackAsync();
+            throw;
         }
-
-        user.IsMobileVerified = true;
-        user.ModifiedDate = DateTime.UtcNow;
-
-        await _dbContext.SaveChangesAsync();
-
-        var token = GenerateJwtToken(user, out var expiresAt);
-
-        return new VerifyOtpResponseDto
-        {
-            Token = token,
-            ExpiresAt = expiresAt,
-            UserId = user.Id,
-            UserName = user.Name
-        };
     }
 
     private string GenerateJwtToken(User user, out DateTime expiresAt)
@@ -264,6 +328,25 @@ public class AuthService : IAuthService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
+    private static string HashPassword(string password)
+    {
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            throw new Exception("Password is required.");
+        }
+
+        var salt = RandomNumberGenerator.GetBytes(PasswordSaltSize);
+        using var deriveBytes = new Rfc2898DeriveBytes(
+            password,
+            salt,
+            PasswordHashIterations,
+            HashAlgorithmName.SHA256);
+
+        var hash = deriveBytes.GetBytes(PasswordHashSize);
+
+        return $"PBKDF2-SHA256${PasswordHashIterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
+    }
+
     private static bool VerifyPassword(string password, string storedHash)
     {
         var hashParts = storedHash.Split('$');
@@ -299,5 +382,22 @@ public class AuthService : IAuthService
     private static string GenerateOtp()
     {
         return RandomNumberGenerator.GetInt32(0, 1000000).ToString("D6");
+    }
+
+    private static string NormalizeRequired(string? value, string fieldName)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new Exception($"{fieldName} is required.");
+        }
+
+        return normalized;
+    }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
     }
 }

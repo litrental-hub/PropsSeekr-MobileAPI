@@ -1,6 +1,23 @@
 @PropSeekr_HostAddress = http://localhost:5150
 
-GET {{PropSeekr_HostAddress}}/weatherforecast/
-Accept: application/json
+### Register a new user
+POST {{PropSeekr_HostAddress}}/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "name": "Asha Sharma",
+  "mobile": "9876543210",
+  "email": "asha.sharma@example.com",
+  "password": "Password@123",
+  "addressLine1": "42 Green Park",
+  "addressLine2": "Apt 5B",
+  "city": "Jaipur",
+  "state": "Rajasthan",
+  "pincode": "302001",
+  "aadharNumber": "123456789012",
+  "panCard": "ABCDE1234F",
+  "gstNumber": "08ABCDE1234F1Z5",
+  "reraRegistrationNumber": "RAJ-RERA-12345"
+}
 
 ###

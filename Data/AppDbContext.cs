@@ -27,6 +27,10 @@ public class AppDbContext : DbContext
             .IsUnique();
 
         modelBuilder.Entity<User>()
+            .HasIndex(u => u.Email)
+            .IsUnique();
+
+        modelBuilder.Entity<User>()
             .HasIndex(u => u.AadharNumber)
             .IsUnique();
 
@@ -102,3 +106,4 @@ public class AppDbContext : DbContext
             .HasMethod("GIST");
     }
 }
+

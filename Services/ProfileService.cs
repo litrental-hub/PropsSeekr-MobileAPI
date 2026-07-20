@@ -47,11 +47,21 @@ public class ProfileService : IProfileService
     public async Task<ProfileResponseDto> UpdateProfileAsync(Guid userId, UpdateProfileRequestDto request)
     {
         var user = await GetUserAsync(userId);
+        var normalizedEmail = NormalizeOptionalEmail(request.Email);
 
-        user.Name = request.Name;
-        user.Email = request.Email;
-        user.GSTNumber = request.GstNumber;
-        user.ReraRegistrationNumber = request.ReraRegistrationNumber;
+        if (normalizedEmail != null)
+        {
+            var emailInUse = await _dbContext.Users.AnyAsync(x => x.Id != userId && x.Email != null && x.Email.ToLower() == normalizedEmail);
+            if (emailInUse)
+            {
+                throw new Exception("Email already registered.");
+            }
+        }
+
+        user.Name = request.Name.Trim();
+        user.Email = normalizedEmail;
+        user.GSTNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
+        user.ReraRegistrationNumber = NormalizeOptional(request.ReraRegistrationNumber);
         user.ModifiedDate = DateTime.UtcNow;
 
         await _dbContext.SaveChangesAsync();
@@ -146,4 +156,17 @@ public class ProfileService : IProfileService
             ModifiedDate = user.ModifiedDate
         };
     }
+
+    private static string? NormalizeOptionalEmail(string? value)
+    {
+        var normalized = NormalizeOptional(value);
+        return normalized?.ToLowerInvariant();
+    }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
 }
+

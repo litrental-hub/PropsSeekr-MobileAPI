@@ -17,7 +17,7 @@ builder.Logging.AddDebug();
 // Database
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection"),
+        ConnectionStringHelper.Build(builder.Configuration),
         o => o.UseNetTopologySuite()));
 
 // Services
@@ -134,3 +134,4 @@ app.MapGet("/hello", () =>
 });
 
 app.Run();
+
