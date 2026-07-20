@@ -19,6 +19,8 @@ public class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
     public DbSet<PropertyRequest> PropertyRequests => Set<PropertyRequest>();
+    public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
+    public DbSet<UnlockedProperty> UnlockedProperties => Set<UnlockedProperty>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -103,5 +105,37 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<PropertyRequest>()
             .HasIndex(p => p.Location)
             .HasMethod("GIST");
+
+        // Configure PaymentTransaction relationships and indexes
+        modelBuilder.Entity<PaymentTransaction>()
+            .HasOne(p => p.User)
+            .WithMany()
+            .HasForeignKey(p => p.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<PaymentTransaction>()
+            .HasIndex(p => p.RazorpayOrderId)
+            .IsUnique();
+
+        modelBuilder.Entity<PaymentTransaction>()
+            .HasIndex(p => p.Receipt)
+            .IsUnique();
+
+        // Configure UnlockedProperty relationships and unique index
+        modelBuilder.Entity<UnlockedProperty>()
+            .HasOne(u => u.User)
+            .WithMany()
+            .HasForeignKey(u => u.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UnlockedProperty>()
+            .HasOne(u => u.PropertyRequest)
+            .WithMany()
+            .HasForeignKey(u => u.PropertyRequestId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UnlockedProperty>()
+            .HasIndex(u => new { u.UserId, u.PropertyRequestId })
+            .IsUnique();
     }
 }

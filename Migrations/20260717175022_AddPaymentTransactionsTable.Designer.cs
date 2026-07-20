@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -12,9 +13,11 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260717175022_AddPaymentTransactionsTable")]
+    partial class AddPaymentTransactionsTable
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -210,11 +213,6 @@ namespace PropSeekr.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("ListingType")
-                        .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
-
                     b.Property<string>("Locality")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -274,8 +272,6 @@ namespace PropSeekr.Migrations
                     b.HasIndex("BudgetMin");
 
                     b.HasIndex("Category");
-
-                    b.HasIndex("ListingType");
 
                     b.HasIndex("Location");
 
