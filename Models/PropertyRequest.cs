@@ -12,6 +12,9 @@ public class PropertyRequest
     public string Status { get; set; } = "LOOKING"; // LOOKING, ACTIVE, etc.
 
     [MaxLength(50)]
+    public string ListingType { get; set; } = string.Empty; // SUPPLY or DEMAND
+
+    [MaxLength(50)]
     public string TransactionType { get; set; } = string.Empty; // BUY_SELL or RENTAL
 
     [MaxLength(50)]

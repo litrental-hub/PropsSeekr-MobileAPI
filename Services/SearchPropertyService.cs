@@ -27,29 +27,33 @@ public class SearchPropertyService : ISearchPropertyService
         try
         {
             var query = _dbContext.PropertyRequests.AsQueryable();
+            var centre = BuildSearchCentre(request.Location);
 
             // Filter by transaction type
-            if (!string.IsNullOrEmpty(request.TransactionType))
+            if (!string.IsNullOrWhiteSpace(request.TransactionType))
             {
                 query = query.Where(p => p.TransactionType == request.TransactionType);
             }
 
+            // Filter by supply / demand listing type
+            if (!string.IsNullOrWhiteSpace(request.ListingType))
+            {
+                query = ApplyListingTypeFilter(query, request.ListingType);
+            }
+
             // Filter by location (city and locality)
-            if (!string.IsNullOrEmpty(request.Location.City))
+            if (!string.IsNullOrWhiteSpace(request.Location.City))
             {
                 query = query.Where(p => p.City.ToLower() == request.Location.City.ToLower());
             }
 
-            if (!string.IsNullOrEmpty(request.Location.Locality))
+            if (!string.IsNullOrWhiteSpace(request.Location.Locality))
             {
                 query = query.Where(p => p.Locality.ToLower() == request.Location.Locality.ToLower());
             }
 
-            if (request.Location.RadiusKm > 0)
+            if (centre != null && request.Location.RadiusKm > 0)
             {
-                // Build a PostGIS geography point from the search centre.
-                // NTS Point uses (X = Longitude, Y = Latitude) — WGS84 SRID 4326.
-                var centre = new Point(request.Location.Lng, request.Location.Lat) { SRID = 4326 };
                 var radiusMetres = request.Location.RadiusKm * 1000.0;
 
                 query = query.Where(p =>
@@ -79,7 +83,7 @@ public class SearchPropertyService : ISearchPropertyService
             }
 
             // Filter by search query (title and user info)
-            if (!string.IsNullOrEmpty(request.SearchQuery))
+            if (!string.IsNullOrWhiteSpace(request.SearchQuery))
             {
                 var searchQuery = request.SearchQuery.ToLower();
                 query = query.Where(p =>
@@ -97,13 +101,27 @@ public class SearchPropertyService : ISearchPropertyService
 
             var propertyRequests = await query
                 .Include(p => p.User)
-                .OrderByDescending(p => p.PostedAt)
-                .Skip(skip)
-                .Take(limit)
                 .ToListAsync();
 
+            if (centre != null)
+            {
+                propertyRequests = propertyRequests
+                    .OrderBy(p => p.Location != null ? GetDistanceKm(p.Location, centre) : double.MaxValue)
+                    .Skip(skip)
+                    .Take(limit)
+                    .ToList();
+            }
+            else
+            {
+                propertyRequests = propertyRequests
+                    .OrderByDescending(p => p.PostedAt)
+                    .Skip(skip)
+                    .Take(limit)
+                    .ToList();
+            }
+
             // Map to response DTOs
-            var responseItems = propertyRequests.Select(pr => MapToResponseDto(pr)).ToList();
+            var responseItems = propertyRequests.Select(pr => MapToResponseDto(pr, centre)).ToList();
 
             return new SearchPropertyResponseDto
             {
@@ -122,6 +140,35 @@ public class SearchPropertyService : ISearchPropertyService
             _logger.LogError($"Error searching properties: {ex.Message}");
             throw;
         }
+    }
+
+    private static Point? BuildSearchCentre(LocationDto location)
+    {
+        if (location == null)
+            return null;
+
+        if (location.Lat == 0 && location.Lng == 0 && location.RadiusKm <= 0)
+            return null;
+
+        return new Point(location.Lng, location.Lat) { SRID = 4326 };
+    }
+
+    private static IQueryable<Models.PropertyRequest> ApplyListingTypeFilter(
+        IQueryable<Models.PropertyRequest> query,
+        string listingType)
+    {
+        var normalized = listingType.Trim().ToUpperInvariant();
+
+        return normalized switch
+        {
+            "SUPPLY" => query.Where(p =>
+                p.ListingType.ToLower() == "supply" ||
+                (string.IsNullOrWhiteSpace(p.ListingType) && p.Status.ToLower() == "active")),
+            "DEMAND" => query.Where(p =>
+                p.ListingType.ToLower() == "demand" ||
+                (string.IsNullOrWhiteSpace(p.ListingType) && p.Status.ToLower() == "looking")),
+            _ => query
+        };
     }
 
     private IQueryable<Models.PropertyRequest> FilterByBudget(
@@ -144,16 +191,24 @@ public class SearchPropertyService : ISearchPropertyService
         return query;
     }
 
-    private PropertySearchResponseItemDto MapToResponseDto(Models.PropertyRequest pr)
+    private PropertySearchResponseItemDto MapToResponseDto(
+        Models.PropertyRequest pr,
+        Point? centre = null)
     {
         var responseItem = new PropertySearchResponseItemDto
         {
             Id = pr.Id.ToString(),
             Status = pr.Status,
+            IsAvailable = string.Equals(pr.Status?.Trim(), "ACTIVE", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(pr.ListingType?.Trim(), "SUPPLY", StringComparison.OrdinalIgnoreCase),
+            ListingType = GetListingType(pr.Status, pr.ListingType),
             Category = pr.Category,
             PostedAt = pr.PostedAt,
             PostedTimeAgo = GetTimeAgoText(pr.PostedAt),
             Title = pr.Title,
+            DistanceKm = centre != null && pr.Location != null
+                ? Math.Round(GetDistanceKm(pr.Location, centre), 2)
+                : null,
             PreferredLocations = DeserializeJson<List<PreferredLocationDto>>(
                 pr.PreferredLocationsJson) ?? new(),
             Budget = DeserializeJson<BudgetResponseDto>(pr.BudgetJson),
@@ -204,6 +259,39 @@ public class SearchPropertyService : ISearchPropertyService
             return null;
         }
     }
+
+    private static string GetListingType(string status, string? listingType)
+    {
+        if (!string.IsNullOrWhiteSpace(listingType))
+            return listingType.Trim().ToUpperInvariant();
+
+        if (string.IsNullOrWhiteSpace(status))
+            return string.Empty;
+
+        return status.Trim().ToUpperInvariant() switch
+        {
+            "LOOKING" => "DEMAND",
+            "ACTIVE" => "SUPPLY",
+            _ => status.Trim().ToUpperInvariant()
+        };
+    }
+
+    private static double GetDistanceKm(Point location, Point centre)
+    {
+        var lat1 = ToRadians(location.Y);
+        var lat2 = ToRadians(centre.Y);
+        var dLat = ToRadians(centre.Y - location.Y);
+        var dLng = ToRadians(centre.X - location.X);
+
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(lat1) * Math.Cos(lat2) *
+                Math.Sin(dLng / 2) * Math.Sin(dLng / 2);
+
+        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        return 6371.0 * c;
+    }
+
+    private static double ToRadians(double value) => value * Math.PI / 180.0;
 
     private string GetTimeAgoText(DateTime postedAt)
     {

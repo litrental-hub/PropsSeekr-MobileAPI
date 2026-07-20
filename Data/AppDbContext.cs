@@ -73,6 +73,9 @@ public class AppDbContext : DbContext
             .HasIndex(p => p.TransactionType);
 
         modelBuilder.Entity<PropertyRequest>()
+            .HasIndex(p => p.ListingType);
+
+        modelBuilder.Entity<PropertyRequest>()
             .HasIndex(p => p.Category);
 
         modelBuilder.Entity<PropertyRequest>()
