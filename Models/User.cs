@@ -31,6 +31,8 @@ public class User
 
   public bool IsMobileVerified { get; set; } = false;
 
+  public int Credits { get; set; } = 0;
+
   public DateTime CreatedDate { get; set; } = DateTime.UtcNow;
   public DateTime ModifiedDate { get; set; } = DateTime.UtcNow;
 
