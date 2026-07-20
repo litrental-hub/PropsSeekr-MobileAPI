@@ -210,15 +210,8 @@ public class AuthService : IAuthService
                 throw new Exception("Invalid or expired OTP.");
             }
 
-            var claimed = await _dbContext.OtpVerifications
-                .Where(o => o.Id == otp.Id && !o.IsUsed)
-                .ExecuteUpdateAsync(setters =>
-                    setters.SetProperty(o => o.IsUsed, true));
-
-            if (claimed == 0)
-            {
-                throw new Exception("Invalid or expired OTP.");
-            }
+            otp.IsUsed = true;
+            await _dbContext.SaveChangesAsync();
 
             var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
 
