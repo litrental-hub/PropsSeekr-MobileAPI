@@ -1,134 +1,147 @@
-using System.Security.Cryptography;
-using Microsoft.EntityFrameworkCore;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
-using Microsoft.Extensions.Configuration;
 
 namespace PropSeekr.Services;
 
 public class AuthService : IAuthService
 {
+    private const int PasswordSaltSize = 16;
+    private const int PasswordHashSize = 32;
+    private const int PasswordHashIterations = 100000;
+
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
-    private readonly IWebHostEnvironment _environment;
-    private readonly ILogger<AuthService> _logger;
 
-    public AuthService(
-        AppDbContext dbContext,
-        IConfiguration configuration,
-        IWebHostEnvironment environment,
-        ILogger<AuthService> logger)
+    public AuthService(AppDbContext dbContext, IConfiguration configuration)
     {
         _dbContext = dbContext;
         _configuration = configuration;
-        _environment = environment;
-        _logger = logger;
-    }
-
-    public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
-    {
-        if (await _dbContext.Users.AnyAsync(x =>
-                x.MobileNumber == request.Mobile))
-        {
-            throw new Exception("Mobile number already registered.");
-        }
-
-        if (await _dbContext.Users.AnyAsync(x =>
-                x.AadharNumber == request.AadharNumber))
-        {
-            throw new Exception("Aadhar number already registered.");
-        }
-
-        if (await _dbContext.Users.AnyAsync(x =>
-                x.PanCard == request.PanCard))
-        {
-            throw new Exception("PAN card already registered.");
-        }
-
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Name = request.Name,
-            MobileNumber = request.Mobile,
-            AadharNumber = request.AadharNumber,
-            PanCard = request.PanCard,
-            GSTNumber = request.GstNumber,
-            ReraRegistrationNumber = request.ReraRegistrationNumber,
-            IsMobileVerified = false,
-            CreatedDate = DateTime.UtcNow,
-            ModifiedDate = DateTime.UtcNow
-        };
-
-        _dbContext.Users.Add(user);
-
-        await _dbContext.SaveChangesAsync();
-
-        return new RegisterResponseDto
-        {
-            UserId = user.Id,
-            Message = "Registration successful."
-        };
     }
 
     public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
     {
-        if (string.IsNullOrWhiteSpace(request.UserName) || string.IsNullOrWhiteSpace(request.Password))
+        var userName = NormalizeRequired(request.UserName, "Username");
+        var password = request.Password;
+
+        var admin = await _dbContext.AdminUsers.FirstOrDefaultAsync(a => a.UserName == userName && a.IsActive);
+        if (admin == null || !VerifyPassword(password, admin.PasswordHash))
         {
             throw new Exception("Invalid username or password.");
         }
 
-        var userName = request.UserName.Trim();
-        var admin = await _dbContext.AdminUsers
-            .FirstOrDefaultAsync(x => x.UserName == userName && x.IsActive);
-
-        if (admin == null || !VerifyPassword(request.Password, admin.PasswordHash))
-        {
-            throw new Exception("Invalid username or password.");
-        }
-
-        var token = GenerateJwtToken(
-            admin.Id,
-            admin.UserName,
-            role: "Admin",
-            mobileNumber: null,
-            out var expiresAt);
+        var token = GenerateAdminJwtToken(admin, out var expiresAt);
 
         return new AdminLoginResponseDto
         {
             Token = token,
             ExpiresAt = expiresAt,
-            AdminId = admin.Id,
             UserName = admin.UserName
+        };
+    }
+
+    public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
+    {
+        var mobile = NormalizeRequired(request.Mobile, "Mobile number");
+        var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
+        var name = NormalizeRequired(request.Name, "Name");
+        var password = request.Password;
+        var aadharNumber = NormalizeRequired(request.AadharNumber, "Aadhar number");
+        var panCard = NormalizeRequired(request.PanCard, "PAN card").ToUpperInvariant();
+        var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
+        var reraNumber = NormalizeOptional(request.ReraRegistrationNumber)?.ToUpperInvariant();
+
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
+
+        await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
+
+        var passwordHash = HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            MobileNumber = mobile,
+            Email = email,
+            PasswordHash = passwordHash,
+            AadharNumber = aadharNumber,
+            PanCard = panCard,
+            GSTNumber = gstNumber,
+            ReraRegistrationNumber = reraNumber,
+            IsMobileVerified = false,
+            Credits = 0,
+            CreatedDate = DateTime.UtcNow,
+            ModifiedDate = DateTime.UtcNow
+        };
+
+        _dbContext.Users.Add(user);
+        await _dbContext.SaveChangesAsync();
+
+        await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
+
+        await transaction.CommitAsync();
+
+        return new RegisterResponseDto
+        {
+            UserId = user.Id,
+            Message = "Registration successful. OTP verification is pending."
         };
     }
 
     public async Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request)
     {
-        return await CreateOtpAsync(request.MobileNumber, invalidateExistingOtps: false, "OTP sent successfully.");
+        return await CreateOtpAsync(request.MobileNumber, "OTP sent successfully.");
     }
 
     public async Task<OtpResponseDto> ResendOtpAsync(SendOtpRequestDto request)
     {
-        return await CreateOtpAsync(request.MobileNumber, invalidateExistingOtps: true, "OTP resent successfully.");
+        return await CreateOtpAsync(request.MobileNumber, "OTP resent successfully.");
     }
 
     public Task<LogoutResponseDto> LogoutAsync()
     {
         return Task.FromResult(new LogoutResponseDto
         {
-            Message = "Logout successful. Token blacklist is not implemented; please discard the JWT on the client."
+            Message = "Logout successful."
         });
+    }
+
+    private async Task EnsureRegistrationIsUniqueAsync(
+        string mobileNumber,
+        string email,
+        string aadharNumber,
+        string panCard)
+    {
+        if (await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber))
+        {
+            throw new Exception("Mobile number already registered.");
+        }
+
+        if (await _dbContext.Users.AnyAsync(x => x.Email != null && x.Email.ToLower() == email))
+        {
+            throw new Exception("Email already registered.");
+        }
+
+        if (await _dbContext.Users.AnyAsync(x => x.AadharNumber == aadharNumber))
+        {
+            throw new Exception("Aadhar number already registered.");
+        }
+
+        if (await _dbContext.Users.AnyAsync(x => x.PanCard == panCard))
+        {
+            throw new Exception("PAN card already registered.");
+        }
     }
 
     private async Task<OtpResponseDto> CreateOtpAsync(
         string mobileNumber,
-        bool invalidateExistingOtps,
         string message)
     {
         if (!await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber))
@@ -138,121 +151,126 @@ public class AuthService : IAuthService
 
         var now = DateTime.UtcNow;
 
-        if (invalidateExistingOtps)
-        {
-            var activeOtps = await _dbContext.OtpVerifications
-                .Where(x =>
-                    x.MobileNumber == mobileNumber &&
-                    !x.IsUsed)
-                .ToListAsync();
+        var activeOtps = await _dbContext.OtpVerifications
+            .Where(x =>
+                x.MobileNumber == mobileNumber &&
+                !x.IsUsed)
+            .ToListAsync();
 
-            foreach (var activeOtp in activeOtps)
-            {
-                activeOtp.IsUsed = true;
-            }
+        foreach (var activeOtp in activeOtps)
+        {
+            activeOtp.IsUsed = true;
         }
 
         var otp = GenerateOtp();
-        var expiresAt = now.AddMinutes(_configuration.GetValue<int>("Otp:ExpiryMinutes", 5));
+        var expiryMinutes = _configuration.GetValue<int>("Otp:ExpiryMinutes", 5);
 
-        _dbContext.OtpVerifications.Add(new OtpVerification
+        var otpEntity = new OtpVerification
         {
             Id = Guid.NewGuid(),
             MobileNumber = mobileNumber,
             OtpCode = otp,
-            ExpiresAt = expiresAt,
             IsUsed = false,
-            CreatedDate = now
-        });
+            CreatedDate = now,
+            ExpiresAt = now.AddMinutes(expiryMinutes)
+        };
 
+        _dbContext.OtpVerifications.Add(otpEntity);
         await _dbContext.SaveChangesAsync();
-
-        if (_environment.IsDevelopment() &&
-            string.IsNullOrWhiteSpace(_configuration["Sms:Provider"]))
-        {
-            _logger.LogInformation("Development OTP for {MobileNumber}: {Otp}", mobileNumber, otp);
-        }
 
         return new OtpResponseDto
         {
+            Status = "SUCCESS",
             Message = message,
-            ExpiresAt = expiresAt
+            ExpiryMinutes = expiryMinutes,
+            ExpiresAt = otpEntity.ExpiresAt
         };
     }
 
     public async Task<VerifyOtpResponseDto> VerifyOtpAsync(VerifyOtpRequestDto request)
     {
-        var otp = await _dbContext.OtpVerifications
-            .Where(o => o.MobileNumber == request.Mobile && !o.IsUsed)
-            .OrderByDescending(o => o.CreatedDate)
-            .FirstOrDefaultAsync();
+        var mobileNumber = NormalizeRequired(request.Mobile, "Mobile number");
+        var otpCode = NormalizeRequired(request.Otp, "OTP");
 
-        if (otp == null || otp.OtpCode != request.Otp || otp.ExpiresAt < DateTime.UtcNow)
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
+
+        try
         {
-            throw new Exception("Invalid or expired OTP.");
+            var otp = await _dbContext.OtpVerifications
+                .Where(o =>
+                    o.MobileNumber == mobileNumber &&
+                    o.OtpCode == otpCode &&
+                    !o.IsUsed &&
+                    o.ExpiresAt >= DateTime.UtcNow)
+                .OrderByDescending(o => o.CreatedDate)
+                .FirstOrDefaultAsync();
+
+            if (otp == null)
+            {
+                throw new Exception("Invalid or expired OTP.");
+            }
+
+            var claimed = await _dbContext.OtpVerifications
+                .Where(o => o.Id == otp.Id && !o.IsUsed)
+                .ExecuteUpdateAsync(setters =>
+                    setters.SetProperty(o => o.IsUsed, true));
+
+            if (claimed == 0)
+            {
+                throw new Exception("Invalid or expired OTP.");
+            }
+
+            var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
+
+            if (user == null)
+            {
+                throw new Exception("User not found for the provided mobile number.");
+            }
+
+            user.IsMobileVerified = true;
+            user.ModifiedDate = DateTime.UtcNow;
+
+            await _dbContext.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            var token = GenerateJwtToken(user, out var expiresAt);
+
+            return new VerifyOtpResponseDto
+            {
+                Token = token,
+                ExpiresAt = expiresAt,
+                UserId = user.Id,
+                UserName = user.Name
+            };
         }
-
-        otp.IsUsed = true;
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == request.Mobile);
-
-        if (user == null)
+        catch
         {
-            throw new Exception("User not found for the provided mobile number.");
+            await transaction.RollbackAsync();
+            throw;
         }
-
-        user.IsMobileVerified = true;
-        user.ModifiedDate = DateTime.UtcNow;
-
-        await _dbContext.SaveChangesAsync();
-
-        var token = GenerateJwtToken(user, out var expiresAt);
-
-        return new VerifyOtpResponseDto
-        {
-            Token = token,
-            ExpiresAt = expiresAt,
-            UserId = user.Id,
-            UserName = user.Name
-        };
     }
 
     private string GenerateJwtToken(User user, out DateTime expiresAt)
     {
-        return GenerateJwtToken(
-            user.Id,
-            user.Name,
-            role: "User",
-            mobileNumber: user.MobileNumber,
-            out expiresAt);
-    }
+        var jwtKey = _configuration["Jwt:Key"];
+        if (string.IsNullOrEmpty(jwtKey))
+        {
+            throw new InvalidOperationException("Jwt:Key is not configured.");
+        }
 
-    private string GenerateJwtToken(
-        Guid subjectId,
-        string userName,
-        string role,
-        string? mobileNumber,
-        out DateTime expiresAt)
-    {
-        var key = _configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is not configured.");
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
         var expiresMinutes = _configuration.GetValue<int>("Jwt:ExpiresMinutes", 60);
         expiresAt = DateTime.UtcNow.AddMinutes(expiresMinutes);
 
-        var claims = new List<Claim>
+        var claims = new[]
         {
-            new(JwtRegisteredClaimNames.Sub, subjectId.ToString()),
-            new(JwtRegisteredClaimNames.UniqueName, userName),
-            new(ClaimTypes.Role, role),
-            new("role", role)
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim(ClaimTypes.Name, user.Name),
+            new Claim(ClaimTypes.MobilePhone, user.MobileNumber),
+            new Claim(ClaimTypes.Email, user.Email ?? string.Empty)
         };
-
-        if (!string.IsNullOrWhiteSpace(mobileNumber))
-        {
-            claims.Add(new Claim(ClaimTypes.MobilePhone, mobileNumber));
-            claims.Add(new Claim("mobile", mobileNumber));
-        }
-
-        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
-        var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
         var token = new JwtSecurityToken(
             issuer: _configuration["Jwt:Issuer"],
@@ -264,33 +282,78 @@ public class AuthService : IAuthService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
+    private string GenerateAdminJwtToken(AdminUser admin, out DateTime expiresAt)
+    {
+        var jwtKey = _configuration["Jwt:Key"];
+        if (string.IsNullOrEmpty(jwtKey))
+        {
+            throw new InvalidOperationException("Jwt:Key is not configured.");
+        }
+
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+        var expiresMinutes = _configuration.GetValue<int>("Jwt:ExpiresMinutes", 60);
+        expiresAt = DateTime.UtcNow.AddMinutes(expiresMinutes);
+
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, admin.Id.ToString()),
+            new Claim(ClaimTypes.Name, admin.UserName),
+            new Claim(ClaimTypes.Role, "Admin")
+        };
+
+        var token = new JwtSecurityToken(
+            issuer: _configuration["Jwt:Issuer"],
+            audience: _configuration["Jwt:Audience"],
+            claims: claims,
+            expires: expiresAt,
+            signingCredentials: credentials);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static string HashPassword(string password)
+    {
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            throw new Exception("Password is required.");
+        }
+
+        var salt = RandomNumberGenerator.GetBytes(PasswordSaltSize);
+        using var deriveBytes = new Rfc2898DeriveBytes(
+            password,
+            salt,
+            PasswordHashIterations,
+            HashAlgorithmName.SHA256);
+
+        var hash = deriveBytes.GetBytes(PasswordHashSize);
+
+        return $"PBKDF2-SHA256${PasswordHashIterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
+    }
+
     private static bool VerifyPassword(string password, string storedHash)
     {
         var hashParts = storedHash.Split('$');
-        if (hashParts.Length != 4 ||
-            hashParts[0] != "PBKDF2-SHA256" ||
-            !int.TryParse(hashParts[1], out var iterations))
+        if (hashParts.Length != 4 || hashParts[0] != "PBKDF2-SHA256")
         {
             return false;
         }
 
-        byte[] salt;
-        byte[] expectedHash;
-        try
-        {
-            salt = Convert.FromBase64String(hashParts[2]);
-            expectedHash = Convert.FromBase64String(hashParts[3]);
-        }
-        catch (FormatException)
+        if (!int.TryParse(hashParts[1], out var iterations))
         {
             return false;
         }
+
+        var salt = Convert.FromBase64String(hashParts[2]);
+        var expectedHash = Convert.FromBase64String(hashParts[3]);
 
         using var deriveBytes = new Rfc2898DeriveBytes(
             password,
             salt,
             iterations,
             HashAlgorithmName.SHA256);
+
         var actualHash = deriveBytes.GetBytes(expectedHash.Length);
 
         return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
@@ -299,5 +362,22 @@ public class AuthService : IAuthService
     private static string GenerateOtp()
     {
         return RandomNumberGenerator.GetInt32(0, 1000000).ToString("D6");
+    }
+
+    private static string NormalizeRequired(string? value, string fieldName)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new Exception($"{fieldName} is required.");
+        }
+
+        return normalized;
+    }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
     }
 }
