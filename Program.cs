@@ -1,12 +1,13 @@
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using PropSeekr.Data;
 using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
-using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +23,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Services
 builder.Services.AddHttpClient();
+builder.Services.AddScoped<IOtpDeliveryService, Msg91OtpDeliveryService>();
+builder.Services.AddScoped<IEmailService, AmazonSesEmailService>();
+builder.Services.AddScoped<IEmailOtpService, EmailOtpService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
@@ -29,6 +33,18 @@ builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 
 builder.Services.AddAuthorization();
+
+// Rate Limiter for OTP Endpoints
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("OtpPolicy", opt =>
+    {
+        opt.PermitLimit = 5;
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.QueueLimit = 0;
+    });
+});
 
 // Controllers
 builder.Services.AddControllers();
@@ -124,16 +140,14 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseCors("AllowAll");
 app.UseStaticFiles();
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
 // Routes
 app.MapControllers();
 
-// Temporary test endpoint
-app.MapGet("/hello", () =>
-{
-    return "Hello World";
-});
+// Health check endpoint
+app.MapGet("/hello", () => "Hello World");
 
 app.Run();
