@@ -116,6 +116,13 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Auto-apply database migrations on startup
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    dbContext.Database.Migrate();
+}
+
 var webRootPath = app.Environment.WebRootPath;
 if (string.IsNullOrWhiteSpace(webRootPath))
 {
