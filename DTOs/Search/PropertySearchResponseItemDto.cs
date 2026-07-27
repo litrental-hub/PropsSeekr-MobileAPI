@@ -10,7 +10,6 @@ public class PropertySearchResponseItemDto
     /// Normalized listing classification returned to the client. Values: SUPPLY or DEMAND.
     /// </summary>
     public string ListingType { get; set; } = string.Empty;
-
     public string Category { get; set; } = string.Empty;
     public DateTime PostedAt { get; set; }
     public string PostedTimeAgo { get; set; } = string.Empty;

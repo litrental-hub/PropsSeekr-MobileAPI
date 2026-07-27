@@ -19,11 +19,16 @@ public class AuthService : IAuthService
 
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
+    private readonly IOtpDeliveryService _otpDeliveryService;
 
-    public AuthService(AppDbContext dbContext, IConfiguration configuration)
+    public AuthService(
+        AppDbContext dbContext,
+        IConfiguration configuration,
+        IOtpDeliveryService otpDeliveryService)
     {
         _dbContext = dbContext;
         _configuration = configuration;
+        _otpDeliveryService = otpDeliveryService;
     }
 
     public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
@@ -92,6 +97,43 @@ public class AuthService : IAuthService
         {
             UserId = user.Id,
             Message = "Registration successful. OTP verification is pending."
+        };
+    }
+
+    public async Task<LoginResponseDto> LoginAsync(LoginRequestDto request)
+    {
+        var identifier = NormalizeRequired(request.Identifier, "Mobile number or Email").ToLowerInvariant();
+        var password = request.Password;
+
+        // Find user by Mobile Number OR Email Address
+        var user = await _dbContext.Users.FirstOrDefaultAsync(u =>
+            u.MobileNumber == identifier ||
+            (u.Email != null && u.Email.ToLower() == identifier));
+
+        if (user == null || !VerifyPassword(password, user.PasswordHash))
+        {
+            throw new Exception("Invalid mobile number/email or password.");
+        }
+
+        var token = GenerateJwtToken(user, out var expiresAt);
+        var refreshToken = GenerateRefreshToken();
+
+        return new LoginResponseDto
+        {
+            Success = true,
+            Message = "Login successful.",
+            Token = token,
+            RefreshToken = refreshToken,
+            ExpiresAt = expiresAt,
+            User = new AuthenticatedUserDto
+            {
+                Id = user.Id,
+                Name = user.Name,
+                MobileNumber = user.MobileNumber,
+                Email = user.Email,
+                IsMobileVerified = user.IsMobileVerified,
+                Credits = user.Credits
+            }
         };
     }
 
@@ -177,6 +219,9 @@ public class AuthService : IAuthService
 
         _dbContext.OtpVerifications.Add(otpEntity);
         await _dbContext.SaveChangesAsync();
+
+        // Send OTP via SMS service (MSG91 if configured, or local fallback)
+        await _otpDeliveryService.SendOtpAsync(mobileNumber, otp);
 
         return new OtpResponseDto
         {
@@ -355,6 +400,11 @@ public class AuthService : IAuthService
     private static string GenerateOtp()
     {
         return RandomNumberGenerator.GetInt32(0, 1000000).ToString("D6");
+    }
+
+    private static string GenerateRefreshToken()
+    {
+        return Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
     }
 
     private static string NormalizeRequired(string? value, string fieldName)

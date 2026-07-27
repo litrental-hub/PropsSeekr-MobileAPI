@@ -1,28 +1,22 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using NetTopologySuite.Geometries;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Search;
 using PropSeekr.Services.Interfaces;
-using System.Text.Json;
 
 namespace PropSeekr.Services;
 
 public class SearchPropertyService : ISearchPropertyService
 {
     private readonly AppDbContext _dbContext;
-    private readonly ILogger<SearchPropertyService> _logger;
 
-    public SearchPropertyService(
-        AppDbContext dbContext,
-        ILogger<SearchPropertyService> logger)
+    public SearchPropertyService(AppDbContext dbContext)
     {
         _dbContext = dbContext;
-        _logger = logger;
     }
 
-    public async Task<SearchPropertyResponseDto> SearchPropertiesAsync(
-        SearchPropertyRequestDto request,
-        Guid userId)
+    public async Task<SearchPropertyResponseDto> SearchPropertiesAsync(SearchPropertyRequestDto request, Guid userId)
     {
         try
         {
@@ -58,28 +52,19 @@ public class SearchPropertyService : ISearchPropertyService
 
                 query = query.Where(p =>
                     p.Location != null &&
-                    p.Location.IsWithinDistance(centre, radiusMetres)
-                );
+                    p.Location.Distance(centre) <= radiusMetres);
             }
 
-            // Filter by categories
-            if (request.Filters.Categories.Count > 0)
+            // Filter by Category
+            if (!string.IsNullOrWhiteSpace(request.Category))
             {
-                var categories = request.Filters.Categories.Select(c => c.ToLower()).ToList();
-                query = query.Where(p => categories.Contains(p.Category.ToLower()));
-            }
-
-            // Filter by property types (stored in PropertyTypesJson)
-            if (request.Filters.PropertyTypes.Count > 0)
-            {
-                var types = request.Filters.PropertyTypes.Select(t => t.ToLower()).ToList();
-                query = query.Where(p => types.Any(t => p.PropertyTypesJson.ToLower().Contains(t)));
+                query = query.Where(p => p.Category.ToLower() == request.Category.ToLower());
             }
 
             // Filter by budget
-            if (request.Filters.Budget.Min.HasValue || request.Filters.Budget.Max.HasValue)
+            if (request.Budget != null)
             {
-                query = FilterByBudget(query, request.Filters.Budget);
+                query = FilterByBudget(query, request.Budget);
             }
 
             // Filter by search query (title and user info)
@@ -87,40 +72,41 @@ public class SearchPropertyService : ISearchPropertyService
             {
                 var searchQuery = request.SearchQuery.ToLower();
                 query = query.Where(p =>
-                    p.Title.ToLower().Contains(searchQuery)
-                );
+                    p.Title.ToLower().Contains(searchQuery) ||
+                    (p.User != null && p.User.Name.ToLower().Contains(searchQuery)));
             }
 
-            // Get total count before pagination
+            // Apply custom filters if present
+            if (request.Filters != null)
+            {
+                query = ApplyCustomFilters(query, request.Filters);
+            }
+
+            // Calculate pagination
+            var pageNumber = request.Pagination.Page > 0 ? request.Pagination.Page : 1;
+            var limit = request.Pagination.Limit > 0 ? request.Pagination.Limit : 10;
+            var skip = (pageNumber - 1) * limit;
+
+            // Total count from database query
             var totalCount = await query.CountAsync();
 
-            // Apply pagination
-            var page = request.Pagination.Page <= 0 ? 1 : request.Pagination.Page;
-            var limit = request.Pagination.Limit <= 0 ? 20 : request.Pagination.Limit;
-            var skip = (page - 1) * limit;
-
-            var propertyRequests = await query
-                .Include(p => p.User)
-                .ToListAsync();
-
+            // Production Database Sorting & Pagination (Skip/Take executed before ToListAsync)
             if (centre != null)
             {
-                propertyRequests = propertyRequests
-                    .OrderBy(p => p.Location != null ? GetDistanceKm(p.Location, centre) : double.MaxValue)
-                    .Skip(skip)
-                    .Take(limit)
-                    .ToList();
+                query = query.OrderBy(p => p.Location != null ? p.Location.Distance(centre) : double.MaxValue);
             }
             else
             {
-                propertyRequests = propertyRequests
-                    .OrderByDescending(p => p.PostedAt)
-                    .Skip(skip)
-                    .Take(limit)
-                    .ToList();
+                query = query.OrderByDescending(p => p.PostedAt);
             }
 
-            // Map to response DTOs
+            var propertyRequests = await query
+                .Include(p => p.User)
+                .Skip(skip)
+                .Take(limit)
+                .ToListAsync();
+
+            // Map to response DTOs with calculated distance
             var responseItems = propertyRequests.Select(pr => MapToResponseDto(pr, centre)).ToList();
 
             return new SearchPropertyResponseDto
@@ -129,7 +115,7 @@ public class SearchPropertyService : ISearchPropertyService
                 Metadata = new MetadataDto
                 {
                     TotalCount = totalCount,
-                    Page = page,
+                    Page = pageNumber,
                     Limit = limit
                 },
                 Data = responseItems
@@ -137,8 +123,7 @@ public class SearchPropertyService : ISearchPropertyService
         }
         catch (Exception ex)
         {
-            _logger.LogError($"Error searching properties: {ex.Message}");
-            throw;
+            throw new Exception($"Error searching property requests: {ex.Message}", ex);
         }
     }
 
@@ -175,17 +160,27 @@ public class SearchPropertyService : ISearchPropertyService
         IQueryable<Models.PropertyRequest> query,
         BudgetFilterDto budget)
     {
-        if (budget == null)
-            return query;
-
         if (budget.Min.HasValue)
         {
-            query = query.Where(p => !p.BudgetMax.HasValue || p.BudgetMax >= budget.Min.Value);
+            query = query.Where(p => p.BudgetMax >= budget.Min.Value);
         }
 
         if (budget.Max.HasValue)
         {
-            query = query.Where(p => !p.BudgetMin.HasValue || p.BudgetMin <= budget.Max.Value);
+            query = query.Where(p => p.BudgetMin <= budget.Max.Value);
+        }
+
+        return query;
+    }
+
+    private IQueryable<Models.PropertyRequest> ApplyCustomFilters(
+        IQueryable<Models.PropertyRequest> query,
+        FiltersDto filters)
+    {
+        if (filters.PropertyTypes != null && filters.PropertyTypes.Any())
+        {
+            var propertyTypesLower = filters.PropertyTypes.Select(pt => pt.ToLower()).ToList();
+            query = query.Where(p => propertyTypesLower.Any(pt => p.PropertyTypesJson.ToLower().Contains(pt)));
         }
 
         return query;
@@ -216,51 +211,26 @@ public class SearchPropertyService : ISearchPropertyService
             Urgency = DeserializeJson<UrgencyDto>(pr.UrgencyJson),
             ClientPreferences = DeserializeJson<List<ClientPreferenceDto>>(
                 pr.ClientPreferencesJson) ?? new(),
-            Actions = new ActionsDto
+            PostedBy = pr.User != null ? new PostedByDto
             {
-                CanContact = true,
-                ContactCreditsRequired = 5
-            }
-        };
-
-        // Map posted by info from User
-        if (pr.User != null)
-        {
-            responseItem.PostedBy = new PostedByDto
-            {
-                UserId = pr.UserId.ToString(),
+                UserId = pr.User.Id.ToString(),
                 Name = pr.User.Name,
                 Initials = GetInitials(pr.User.Name),
                 Locality = pr.Locality,
                 Role = "PropSeekr",
                 AvatarUrl = pr.User.ProfilePhotoUrl
-            };
-        }
+            } : null,
+            Actions = new ActionsDto
+            {
+                CanContact = true,
+                ContactCreditsRequired = 1
+            }
+        };
 
         return responseItem;
     }
 
-    private T? DeserializeJson<T>(string json) where T : class
-    {
-        try
-        {
-            if (string.IsNullOrEmpty(json) || json == "{}" || json == "[]")
-                return null;
-
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
-
-            return JsonSerializer.Deserialize<T>(json, options);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string GetListingType(string status, string? listingType)
+    private static string GetListingType(string? status, string? listingType)
     {
         if (!string.IsNullOrWhiteSpace(listingType))
             return listingType.Trim().ToUpperInvariant();
@@ -274,6 +244,18 @@ public class SearchPropertyService : ISearchPropertyService
             "ACTIVE" => "SUPPLY",
             _ => status.Trim().ToUpperInvariant()
         };
+    }
+
+    private static string GetInitials(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "PS";
+
+        var parts = name.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1)
+            return parts[0][..1].ToUpper();
+
+        return (parts[0][..1] + parts[^1][..1]).ToUpper();
     }
 
     private static double GetDistanceKm(Point location, Point centre)
@@ -298,29 +280,32 @@ public class SearchPropertyService : ISearchPropertyService
         var timeSpan = DateTime.UtcNow - postedAt;
 
         if (timeSpan.TotalMinutes < 1)
-            return "Abhi dala";
-        if (timeSpan.TotalHours < 1)
-            return $"{(int)timeSpan.TotalMinutes}m pehle";
-        if (timeSpan.TotalDays < 1)
-            return $"{(int)timeSpan.TotalHours}h pehle";
-        if (timeSpan.TotalDays == 1)
-            return "Kal dala";
-        if (timeSpan.TotalDays < 7)
-            return $"{(int)timeSpan.TotalDays}d pehle";
+            return "Just now";
+        if (timeSpan.TotalMinutes < 60)
+            return $"{(int)timeSpan.TotalMinutes} mins ago";
+        if (timeSpan.TotalHours < 24)
+            return $"{(int)timeSpan.TotalHours} hours ago";
+        if (timeSpan.TotalDays < 30)
+            return $"{(int)timeSpan.TotalDays} days ago";
 
-        return postedAt.ToString("dd MMM");
+        return postedAt.ToString("MMM dd, yyyy");
     }
 
-    private string GetInitials(string name)
+    private T? DeserializeJson<T>(string json) where T : class
     {
-        if (string.IsNullOrEmpty(name))
-            return "";
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
 
-        var parts = name.Split(' ');
-        var initials = parts[0][0].ToString().ToUpper();
-        if (parts.Length > 1)
-            initials += parts[^1][0].ToString().ToUpper();
-
-        return initials;
+        try
+        {
+            return JsonSerializer.Deserialize<T>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

@@ -18,6 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
+    public DbSet<EmailOtpRecord> EmailOtpRecords => Set<EmailOtpRecord>();
     public DbSet<PropertyRequest> PropertyRequests => Set<PropertyRequest>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<UnlockedProperty> UnlockedProperties => Set<UnlockedProperty>();
@@ -60,6 +61,12 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<OtpVerification>()
             .HasIndex(o => o.MobileNumber);
+
+        modelBuilder.Entity<EmailOtpRecord>()
+            .HasIndex(e => new { e.Email, e.Purpose, e.IsUsed, e.ExpiresAt });
+
+        modelBuilder.Entity<EmailOtpRecord>()
+            .HasIndex(e => e.ExpiresAt);
 
         // Configure PropertyRequest relationships and indexes
         modelBuilder.Entity<PropertyRequest>()
