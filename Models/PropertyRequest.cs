@@ -55,6 +55,8 @@ public class PropertyRequest
     /// </summary>
     public Point? Location { get; set; }
 
+    public double RadiusKm { get; set; }
+
     // Timestamps
     public DateTime PostedAt { get; set; } = DateTime.UtcNow;
     public DateTime ModifiedDate { get; set; } = DateTime.UtcNow;

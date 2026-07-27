@@ -26,14 +26,6 @@ namespace PropSeekr.Migrations
                 nullable: false,
                 defaultValue: "");
 
-            migrationBuilder.AddColumn<string>(
-                name: "ListingType",
-                table: "PropertyRequests",
-                type: "character varying(50)",
-                maxLength: 50,
-                nullable: false,
-                defaultValue: "");
-
             migrationBuilder.CreateTable(
                 name: "EmailOtpRecords",
                 columns: table => new
@@ -118,10 +110,6 @@ namespace PropSeekr.Migrations
             migrationBuilder.DropColumn(
                 name: "PasswordHash",
                 table: "Users");
-
-            migrationBuilder.DropColumn(
-                name: "ListingType",
-                table: "PropertyRequests");
         }
     }
 }
