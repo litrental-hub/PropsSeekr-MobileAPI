@@ -29,6 +29,7 @@ builder.Services.AddScoped<IEmailOtpService, EmailOtpService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
+builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>();
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 
