@@ -30,6 +30,7 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
 builder.Services.AddScoped<IRequirementService, RequirementService>();
+builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>();
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 
