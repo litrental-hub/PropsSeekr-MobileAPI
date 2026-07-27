@@ -1,10 +1,14 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using Amazon;
+using Amazon.SecretsManager;
+using Amazon.SecretsManager.Model;
 using PropSeekr.Data;
 using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
@@ -16,9 +20,75 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 // Database
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+
+if (connectionString != null)
+{
+    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "0!UK9b)yl_1F]|S:#um7R1<G1nrk");
+}
+
+var secretName = builder.Configuration["AWS:DatabaseSecretName"];
+if (!string.IsNullOrWhiteSpace(secretName))
+{
+    try
+    {
+        var region = builder.Configuration["AWS:Region"] ?? "ap-south-1";
+        var accessKey = builder.Configuration["AWS:AccessKeyId"];
+        var secretKey = builder.Configuration["AWS:SecretAccessKey"];
+
+        IAmazonSecretsManager secretsClient;
+        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
+        {
+            secretsClient = new AmazonSecretsManagerClient(accessKey, secretKey, RegionEndpoint.GetBySystemName(region));
+        }
+        else
+        {
+            secretsClient = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
+        }
+
+        var request = new GetSecretValueRequest { SecretId = secretName };
+        var response = secretsClient.GetSecretValueAsync(request).GetAwaiter().GetResult();
+        if (response?.SecretString != null)
+        {
+            var secretString = response.SecretString;
+            string? dbPassword = null;
+            try
+            {
+                using var doc = JsonDocument.Parse(secretString);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("password", out var pwdProp))
+                {
+                    dbPassword = pwdProp.GetString();
+                }
+                else if (root.TryGetProperty("ConnectionString", out var connProp))
+                {
+                    connectionString = connProp.GetString();
+                }
+            }
+            catch
+            {
+                dbPassword = secretString;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dbPassword) && connectionString != null)
+            {
+                var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString)
+                {
+                    Password = dbPassword
+                };
+                connectionString = connBuilder.ToString();
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Secrets Manager Error] Failed to fetch database credentials: {ex.Message}");
+    }
+}
+
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection"),
+        connectionString,
         o => o.UseNetTopologySuite()));
 
 // Services
@@ -136,14 +206,10 @@ var uploadFolder = app.Configuration["Uploads:ProfilePhotoFolder"] ?? "uploads/p
 Directory.CreateDirectory(Path.Combine(webRootPath, uploadFolder.TrimStart('/', '\\')));
 app.Environment.WebRootFileProvider = new PhysicalFileProvider(webRootPath);
 
-// Development Middleware
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// Enable Swagger globally for testing and API documentation
+app.MapOpenApi();
+app.UseSwagger();
+app.UseSwaggerUI();
 
 // Middleware
 app.UseHttpsRedirection();

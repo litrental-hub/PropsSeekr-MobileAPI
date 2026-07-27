@@ -125,13 +125,23 @@ public class EmailOtpService : IEmailOtpService
             var now = DateTime.UtcNow;
 
             var otpRecord = await _dbContext.EmailOtpRecords
-                .Where(x => x.Email == email && x.Purpose == purpose && !x.IsUsed && x.ExpiresAt >= now)
+                .Where(x => x.Email == email && x.Purpose == purpose)
                 .OrderByDescending(x => x.CreatedAt)
                 .FirstOrDefaultAsync(cancellationToken);
 
             if (otpRecord == null)
             {
-                throw new InvalidOperationException("Invalid or expired verification code.");
+                throw new InvalidOperationException("No verification request found for this email.");
+            }
+
+            if (otpRecord.IsUsed)
+            {
+                throw new InvalidOperationException("This verification code has already been used.");
+            }
+
+            if (otpRecord.ExpiresAt < now)
+            {
+                throw new InvalidOperationException("Verification code has expired. Please request a new one.");
             }
 
             if (otpRecord.AttemptCount >= MaxVerificationAttempts)
@@ -155,7 +165,7 @@ public class EmailOtpService : IEmailOtpService
 
                 await _dbContext.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
-                throw new InvalidOperationException("Invalid or expired verification code.");
+                throw new InvalidOperationException("Invalid verification code. Please try again.");
             }
 
             // OTP verified successfully
@@ -217,7 +227,14 @@ public class EmailOtpService : IEmailOtpService
         }
         catch
         {
-            await transaction.RollbackAsync(cancellationToken);
+            try
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+            catch
+            {
+                // Ignore rollback exceptions if the transaction was already committed in the try block
+            }
             throw;
         }
     }

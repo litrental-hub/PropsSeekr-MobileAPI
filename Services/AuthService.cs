@@ -8,6 +8,7 @@ using PropSeekr.Data;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace PropSeekr.Services;
 
@@ -20,15 +21,18 @@ public class AuthService : IAuthService
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly IOtpDeliveryService _otpDeliveryService;
+    private readonly IServiceProvider _serviceProvider;
 
     public AuthService(
         AppDbContext dbContext,
         IConfiguration configuration,
-        IOtpDeliveryService otpDeliveryService)
+        IOtpDeliveryService otpDeliveryService,
+        IServiceProvider serviceProvider)
     {
         _dbContext = dbContext;
         _configuration = configuration;
         _otpDeliveryService = otpDeliveryService;
+        _serviceProvider = serviceProvider;
     }
 
     public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
@@ -92,6 +96,28 @@ public class AuthService : IAuthService
         await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
 
         await transaction.CommitAsync();
+
+        // Automatically trigger Email OTP in the background
+        var serviceProvider = _serviceProvider;
+        _ = Task.Run(async () =>
+        {
+            using (var scope = serviceProvider.CreateScope())
+            {
+                try
+                {
+                    var emailOtpService = scope.ServiceProvider.GetRequiredService<IEmailOtpService>();
+                    await emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
+                    {
+                        Email = email,
+                        Purpose = "EmailVerification"
+                    }, clientIp: null);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Email Error] Failed to send registration email to {email}: {ex}");
+                }
+            }
+        });
 
         return new RegisterResponseDto
         {

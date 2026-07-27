@@ -26,7 +26,7 @@ public class RequirementService : IRequirementService
 
         var query = _dbContext.PropertyRequests
             .AsNoTracking()
-            .Where(p => p.UserId == userId && (p.ListingType.ToUpper() == "DEMAND" || p.Status.ToUpper() == "LOOKING"));
+            .Where(p => p.UserId == userId && p.ListingType == "DEMAND");
 
         var totalCount = await query.CountAsync();
 
@@ -36,36 +36,39 @@ public class RequirementService : IRequirementService
             .Take(limit)
             .ToListAsync();
 
-        var responseItems = requirements.Select(p => new RequirementListItemDto
-        {
-            RequirementId = p.Id.ToString(),
-            Description = p.Title,
-            TransactionType = p.TransactionType,
-            Category = p.Category,
-            Budget = new BudgetResponseDto
+        var responseItems = requirements.Select(p => {
+            var requiredArea = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson) : null;
+            return new RequirementListItemDto
             {
-                Min = p.BudgetMin ?? 0,
-                Max = p.BudgetMax ?? 0,
-                DisplayValue = p.BudgetMax.HasValue ? $"₹{p.BudgetMin ?? 0} - ₹{p.BudgetMax.Value}" : "",
-                Currency = "INR"
-            },
-            PreferredLocation = new LocationDto
-            {
-                City = p.City,
-                Locality = p.Locality,
-                Lat = p.Location?.Y ?? 0,
-                Lng = p.Location?.X ?? 0,
-                RadiusKm = p.RadiusKm
-            },
-            RequiredArea = new RequiredAreaDto
-            {
-                Min = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson)?.Min ?? 0 : 0,
-                Max = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson)?.Max ?? 0 : 0,
-                DisplayValue = DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson)?.DisplayValue ?? string.Empty,
-                Unit = DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson)?.Unit ?? "SQFT"
-            },
-            PostedAt = p.PostedAt,
-            Status = p.Status
+                RequirementId = p.Id.ToString(),
+                Description = p.Title,
+                TransactionType = p.TransactionType,
+                Category = p.Category,
+                Budget = new BudgetResponseDto
+                {
+                    Min = p.BudgetMin ?? 0,
+                    Max = p.BudgetMax ?? 0,
+                    DisplayValue = p.BudgetMax.HasValue ? $"₹{p.BudgetMin ?? 0} - ₹{p.BudgetMax.Value}" : "",
+                    Currency = "INR"
+                },
+                PreferredLocation = new LocationDto
+                {
+                    City = p.City,
+                    Locality = p.Locality,
+                    Lat = p.Location?.Y ?? 0,
+                    Lng = p.Location?.X ?? 0,
+                    RadiusKm = p.RadiusKm
+                },
+                RequiredArea = new RequiredAreaDto
+                {
+                    Min = requiredArea?.Min ?? 0,
+                    Max = requiredArea?.Max ?? 0,
+                    DisplayValue = requiredArea?.DisplayValue ?? string.Empty,
+                    Unit = requiredArea?.Unit ?? "SQFT"
+                },
+                PostedAt = p.PostedAt,
+                Status = p.Status
+            };
         }).ToList();
 
         return new MyRequirementsResponseDto

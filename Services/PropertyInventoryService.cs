@@ -26,7 +26,7 @@ public class PropertyInventoryService : IPropertyInventoryService
 
         var query = _dbContext.PropertyRequests
             .AsNoTracking()
-            .Where(p => p.UserId == userId)
+            .Where(p => p.UserId == userId && p.ListingType == "SUPPLY")
             .OrderByDescending(p => p.PostedAt);
 
         var totalCount = await query.CountAsync();
@@ -81,8 +81,8 @@ public class PropertyInventoryService : IPropertyInventoryService
             BudgetMin = Convert.ToInt64(Math.Round(request.AskingPrice, 0)),
             BudgetMax = Convert.ToInt64(Math.Round(request.AskingPrice, 0)),
             PreferredLocationsJson = "[]",
-            BudgetJson = $"{{\"min\":{request.AskingPrice},\"max\":{request.AskingPrice}}}",
-            RequiredAreaJson = $"{{\"min\":{request.BuiltUpSize},\"max\":{request.BuiltUpSize}}}",
+            BudgetJson = System.Text.Json.JsonSerializer.Serialize(new { min = request.AskingPrice, max = request.AskingPrice }),
+            RequiredAreaJson = System.Text.Json.JsonSerializer.Serialize(new { min = request.BuiltUpSize, max = request.BuiltUpSize }),
             FiltersJson = "{}",
             SearchQueryJson = "{}",
             PropertyTypesJson = "[]",

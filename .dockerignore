@@ -1,0 +1,10 @@
+# Exclude build output folders to prevent container compilation corruption
+bin/
+obj/
+.git/
+scratch/
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/

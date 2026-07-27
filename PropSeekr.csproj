@@ -24,6 +24,7 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.0.1" />
     <PackageReference Include="AWSSDK.SimpleEmail" Version="3.7.401" />
+    <PackageReference Include="AWSSDK.SecretsManager" Version="3.7.400.27" />
   </ItemGroup>
 
   <ItemGroup>
