@@ -47,6 +47,10 @@ public class User
 
   public string? ProfilePhotoUrl { get; set; }
 
+  public int RemainingCreditBalance { get; set; } = 0;
+
+  public bool IsEmailVerified { get; set; } = false;
+
   public bool IsMobileVerified { get; set; } = false;
 
   public DateTime CreatedDate { get; set; } = DateTime.UtcNow;

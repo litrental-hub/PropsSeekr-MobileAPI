@@ -71,6 +71,8 @@ public class AuthService : IAuthService
             PanCard = panCard,
             GSTNumber = gstNumber,
             ReraRegistrationNumber = reraRegistrationNumber,
+            RemainingCreditBalance = 0,
+            IsEmailVerified = false,
             IsMobileVerified = false,
             CreatedDate = DateTime.UtcNow,
             ModifiedDate = DateTime.UtcNow

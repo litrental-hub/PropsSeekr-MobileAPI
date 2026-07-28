@@ -12,9 +12,6 @@ public class UpdateProfileRequestDto
     [MaxLength(255)]
     public string? Email { get; set; }
 
-    [MaxLength(20)]
-    public string? GstNumber { get; set; }
-
-    [MaxLength(50)]
-    public string? ReraRegistrationNumber { get; set; }
+    [MaxLength(2048)]
+    public string? ProfilePhotoUrl { get; set; }
 }

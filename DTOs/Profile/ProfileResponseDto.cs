@@ -12,19 +12,11 @@ public class ProfileResponseDto
 
     public string? Email { get; set; }
 
-    public string AadharNumber { get; set; } = string.Empty;
-
-    public string PanCard { get; set; } = string.Empty;
-
-    public string? GSTNumber { get; set; }
-
-    public string? ReraRegistrationNumber { get; set; }
-
     public string? ProfilePhotoUrl { get; set; }
 
+    public int RemainingCreditBalance { get; set; }
+
+    public bool IsEmailVerified { get; set; }
+
     public bool IsMobileVerified { get; set; }
-
-    public DateTime CreatedDate { get; set; }
-
-    public DateTime ModifiedDate { get; set; }
 }
