@@ -65,6 +65,10 @@ public class PropertyInventoryService : IPropertyInventoryService
         ValidateRequest(request);
 
         var normalizedTransactionType = NormalizeValue(request.TransactionType);
+        if (normalizedTransactionType == "BUY_SELL" || normalizedTransactionType == "SALE")
+        {
+            normalizedTransactionType = "SELL";
+        }
         var normalizedCategory = NormalizeValue(request.Category);
         var normalizedStatus = NormalizeValue(request.Status);
 
@@ -167,12 +171,12 @@ public class PropertyInventoryService : IPropertyInventoryService
 
         var allowedTransactionTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "BUY_SELL", "RENTAL"
+            "BUY_SELL", "SALE", "SELL", "RENTAL"
         };
 
         if (!allowedTransactionTypes.Contains(request.TransactionType.Trim()))
         {
-            throw new ValidationException("Transaction type must be either BUY_SELL or RENTAL.");
+            throw new ValidationException("Transaction type must be SELL, SALE, or RENTAL.");
         }
 
         var allowedStatuses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)

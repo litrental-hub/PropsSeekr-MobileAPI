@@ -35,41 +35,25 @@ public class AuthService : IAuthService
         _serviceProvider = serviceProvider;
     }
 
-    public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
-    {
-        var userName = NormalizeRequired(request.UserName, "Username");
-        var password = request.Password;
-
-        var admin = await _dbContext.AdminUsers.FirstOrDefaultAsync(a => a.UserName == userName && a.IsActive);
-        if (admin == null || !VerifyPassword(password, admin.PasswordHash))
-        {
-            throw new Exception("Invalid username or password.");
-        }
-
-        var token = GenerateAdminJwtToken(admin, out var expiresAt);
-
-        return new AdminLoginResponseDto
-        {
-            Token = token,
-            ExpiresAt = expiresAt,
-            UserName = admin.UserName
-        };
-    }
-
     public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
     {
+        var name = NormalizeRequired(request.Name, "Name");
         var mobile = NormalizeRequired(request.Mobile, "Mobile number");
         var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
-        var name = NormalizeRequired(request.Name, "Name");
         var password = request.Password;
+        var addressLine1 = NormalizeRequired(request.AddressLine1, "Address line 1");
+        var addressLine2 = NormalizeOptional(request.AddressLine2);
+        var city = NormalizeRequired(request.City, "City");
+        var state = NormalizeRequired(request.State, "State");
+        var pincode = NormalizeRequired(request.Pincode, "Pincode");
         var aadharNumber = NormalizeRequired(request.AadharNumber, "Aadhar number");
         var panCard = NormalizeRequired(request.PanCard, "PAN card").ToUpperInvariant();
         var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
-        var reraNumber = NormalizeOptional(request.ReraRegistrationNumber)?.ToUpperInvariant();
-
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
+        var reraRegistrationNumber = NormalizeOptional(request.ReraRegistrationNumber);
 
         await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
+
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
 
         var passwordHash = HashPassword(password);
 
@@ -80,11 +64,17 @@ public class AuthService : IAuthService
             MobileNumber = mobile,
             Email = email,
             PasswordHash = passwordHash,
+            AddressLine1 = addressLine1,
+            AddressLine2 = addressLine2,
+            City = city,
+            State = state,
+            Pincode = pincode,
             AadharNumber = aadharNumber,
             PanCard = panCard,
             GSTNumber = gstNumber,
-            ReraRegistrationNumber = reraNumber,
+            ReraRegistrationNumber = reraRegistrationNumber,
             IsMobileVerified = false,
+            IsEmailVerified = false,
             Credits = 0,
             CreatedDate = DateTime.UtcNow,
             ModifiedDate = DateTime.UtcNow
@@ -123,6 +113,27 @@ public class AuthService : IAuthService
         {
             UserId = user.Id,
             Message = "Registration successful. OTP verification is pending."
+        };
+    }
+
+    public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
+    {
+        var userName = NormalizeRequired(request.UserName, "Username");
+        var password = request.Password;
+
+        var admin = await _dbContext.AdminUsers.FirstOrDefaultAsync(a => a.UserName == userName && a.IsActive);
+        if (admin == null || !VerifyPassword(password, admin.PasswordHash))
+        {
+            throw new Exception("Invalid username or password.");
+        }
+
+        var token = GenerateAdminJwtToken(admin, out var expiresAt);
+
+        return new AdminLoginResponseDto
+        {
+            Token = token,
+            ExpiresAt = expiresAt,
+            UserName = admin.UserName
         };
     }
 
@@ -281,8 +292,15 @@ public class AuthService : IAuthService
                 throw new Exception("Invalid or expired OTP.");
             }
 
-            otp.IsUsed = true;
-            await _dbContext.SaveChangesAsync();
+            var claimed = await _dbContext.OtpVerifications
+                .Where(o => o.Id == otp.Id && !o.IsUsed)
+                .ExecuteUpdateAsync(setters =>
+                    setters.SetProperty(o => o.IsUsed, true));
+
+            if (claimed == 0)
+            {
+                throw new Exception("Invalid or expired OTP.");
+            }
 
             var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
 
@@ -376,7 +394,6 @@ public class AuthService : IAuthService
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
-
     private static string HashPassword(string password)
     {
         if (string.IsNullOrWhiteSpace(password))
@@ -432,7 +449,6 @@ public class AuthService : IAuthService
     {
         return Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
     }
-
     private static string NormalizeRequired(string? value, string fieldName)
     {
         var normalized = value?.Trim();

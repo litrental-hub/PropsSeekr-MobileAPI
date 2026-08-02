@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Linq;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -24,7 +25,7 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 
 if (connectionString != null)
 {
-    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "0!UK9b)yl_1F]|S:#um7R1<G1nrk");
+    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
 }
 
 var secretName = builder.Configuration["AWS:DatabaseSecretName"];
@@ -103,6 +104,7 @@ builder.Services.AddScoped<IRequirementService, RequirementService>();
 builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>();
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
+builder.Services.AddScoped<INotificationService, NotificationService>();
 
 builder.Services.AddAuthorization();
 
@@ -226,3 +228,4 @@ app.MapControllers();
 app.MapGet("/hello", () => "Hello World");
 
 app.Run();
+

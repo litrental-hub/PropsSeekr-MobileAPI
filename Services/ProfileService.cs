@@ -47,11 +47,28 @@ public class ProfileService : IProfileService
     public async Task<ProfileResponseDto> UpdateProfileAsync(Guid userId, UpdateProfileRequestDto request)
     {
         var user = await GetUserAsync(userId);
+        var normalizedEmail = NormalizeOptionalEmail(request.Email);
+        var normalizedProfilePhotoUrl = NormalizeOptional(request.ProfilePhotoUrl);
 
-        user.Name = request.Name;
-        user.Email = request.Email;
-        user.GSTNumber = request.GstNumber;
-        user.ReraRegistrationNumber = request.ReraRegistrationNumber;
+        ValidateProfilePhotoUrl(normalizedProfilePhotoUrl);
+
+        if (normalizedEmail != null)
+        {
+            var emailInUse = await _dbContext.Users.AnyAsync(x => x.Id != userId && x.Email != null && x.Email.ToLower() == normalizedEmail);
+            if (emailInUse)
+            {
+                throw new Exception("Email already registered.");
+            }
+        }
+
+        if (!string.Equals(user.Email, normalizedEmail, StringComparison.OrdinalIgnoreCase))
+        {
+            user.IsEmailVerified = false;
+        }
+
+        user.Name = request.Name.Trim();
+        user.Email = normalizedEmail;
+        user.ProfilePhotoUrl = normalizedProfilePhotoUrl;
         user.ModifiedDate = DateTime.UtcNow;
 
         await _dbContext.SaveChangesAsync();
@@ -136,14 +153,44 @@ public class ProfileService : IProfileService
             Name = user.Name,
             MobileNumber = user.MobileNumber,
             Email = user.Email,
-            AadharNumber = user.AadharNumber,
-            PanCard = user.PanCard,
-            GSTNumber = user.GSTNumber,
-            ReraRegistrationNumber = user.ReraRegistrationNumber,
             ProfilePhotoUrl = user.ProfilePhotoUrl,
-            IsMobileVerified = user.IsMobileVerified,
-            CreatedDate = user.CreatedDate,
-            ModifiedDate = user.ModifiedDate
+            RemainingCreditBalance = user.Credits,
+            IsEmailVerified = user.IsEmailVerified,
+            IsMobileVerified = user.IsMobileVerified
         };
     }
+
+    private static void ValidateProfilePhotoUrl(string? value)
+    {
+        if (value == null)
+        {
+            return;
+        }
+
+        if (Uri.TryCreate(value, UriKind.Absolute, out var absoluteUri) &&
+            (absoluteUri.Scheme == Uri.UriSchemeHttp || absoluteUri.Scheme == Uri.UriSchemeHttps))
+        {
+            return;
+        }
+
+        if (Uri.TryCreate(value, UriKind.Relative, out _) && value.StartsWith('/'))
+        {
+            return;
+        }
+
+        throw new Exception("Profile photo URL must be an absolute HTTP(S) URL or an app-relative path.");
+    }
+
+    private static string? NormalizeOptionalEmail(string? value)
+    {
+        var normalized = NormalizeOptional(value);
+        return normalized?.ToLowerInvariant();
+    }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
 }
+

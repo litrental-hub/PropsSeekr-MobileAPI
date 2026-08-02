@@ -1,3 +1,4 @@
+using System;
 using System.ComponentModel.DataAnnotations;
 
 namespace PropSeekr.Models;
@@ -17,6 +18,21 @@ public class User
 
     [MaxLength(255)]
     public string PasswordHash { get; set; } = string.Empty;
+
+    [MaxLength(255)]
+    public string? AddressLine1 { get; set; }
+
+    [MaxLength(255)]
+    public string? AddressLine2 { get; set; }
+
+    [MaxLength(100)]
+    public string? City { get; set; }
+
+    [MaxLength(100)]
+    public string? State { get; set; }
+
+    [MaxLength(10)]
+    public string? Pincode { get; set; }
 
     [MaxLength(12)]
     public string AadharNumber { get; set; } = string.Empty;

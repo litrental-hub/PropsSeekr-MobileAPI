@@ -23,7 +23,7 @@ public class UserMatchesController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetUserMatches()
+    public async Task<IActionResult> GetUserMatches([FromQuery] string? type, [FromQuery] string? transactionType)
     {
         if (!TryGetCurrentUserId(out var userId))
         {
@@ -32,7 +32,8 @@ public class UserMatchesController : ControllerBase
 
         try
         {
-            var response = await _userMatchesService.GetUserMatchesAsync(userId);
+            var txType = type ?? transactionType;
+            var response = await _userMatchesService.GetUserMatchesAsync(userId, txType);
             return Ok(response);
         }
         catch (KeyNotFoundException ex)

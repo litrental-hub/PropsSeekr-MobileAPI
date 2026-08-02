@@ -22,11 +22,29 @@ public class AppDbContext : DbContext
     public DbSet<PropertyRequest> PropertyRequests => Set<PropertyRequest>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<UnlockedProperty> UnlockedProperties => Set<UnlockedProperty>();
+    public DbSet<Notification> Notifications => Set<Notification>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<Notification>()
+            .HasOne(n => n.User)
+            .WithMany()
+            .HasForeignKey(n => n.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Notification>()
+            .HasIndex(n => n.UserId);
+
+        modelBuilder.Entity<Notification>()
+            .HasIndex(n => n.CreatedAt)
+            .IsDescending();
+
         modelBuilder.Entity<User>()
             .HasIndex(u => u.MobileNumber)
+            .IsUnique();
+
+        modelBuilder.Entity<User>()
+            .HasIndex(u => u.Email)
             .IsUnique();
 
         modelBuilder.Entity<User>()
@@ -146,3 +164,4 @@ public class AppDbContext : DbContext
             .IsUnique();
     }
 }
+

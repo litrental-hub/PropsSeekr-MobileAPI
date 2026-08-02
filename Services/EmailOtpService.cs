@@ -241,7 +241,12 @@ public class EmailOtpService : IEmailOtpService
 
     private string ComputeOtpHash(string rawOtp, string email, string purpose)
     {
-        var secretKey = _configuration["Jwt:Key"] ?? "PropseekSecretOtpKey123456789";
+        var secretKey = _configuration["Jwt:Key"];
+        if (string.IsNullOrWhiteSpace(secretKey))
+        {
+            throw new InvalidOperationException("Jwt:Key is not configured.");
+        }
+
         var payload = $"{email}:{purpose}:{rawOtp}";
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secretKey));
         var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(payload));

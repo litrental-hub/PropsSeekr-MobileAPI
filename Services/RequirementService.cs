@@ -101,11 +101,21 @@ public class RequirementService : IRequirementService
         if (request.RadiusKm <= 0)
             throw new ArgumentException("Search radius must be greater than zero.");
 
+        var normalizedTransactionType = string.IsNullOrWhiteSpace(request.TransactionType) ? string.Empty : request.TransactionType.Trim().ToUpperInvariant();
+        if (normalizedTransactionType == "BUY_SELL" || normalizedTransactionType == "BUY" || normalizedTransactionType == "PURCHASE")
+        {
+            normalizedTransactionType = "BUY";
+        }
+        else if (normalizedTransactionType != "RENTAL")
+        {
+            throw new ArgumentException("Transaction type must be BUY, BUY_SELL, or RENTAL.");
+        }
+
         var propertyRequest = new PropertyRequest
         {
             UserId = userId,
             ListingType = "DEMAND",
-            TransactionType = request.TransactionType,
+            TransactionType = normalizedTransactionType,
             Category = request.Category,
             Title = request.Description,
             Status = "LOOKING",
