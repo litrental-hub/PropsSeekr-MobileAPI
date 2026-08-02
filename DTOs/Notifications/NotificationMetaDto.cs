@@ -31,4 +31,16 @@ public class NotificationMetaDto
     [JsonPropertyName("matchPercentage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? MatchPercentage { get; set; }
+
+    [JsonPropertyName("initiatorUserId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? InitiatorUserId { get; set; }
+
+    [JsonPropertyName("initiatorPropertyRequestId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? InitiatorPropertyRequestId { get; set; }
+
+    [JsonPropertyName("targetPropertyRequestId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TargetPropertyRequestId { get; set; }
 }

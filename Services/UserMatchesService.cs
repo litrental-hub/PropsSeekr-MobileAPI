@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Npgsql;
+using System.Text.Json;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
@@ -108,8 +110,7 @@ public class UserMatchesService : IUserMatchesService
                     LEFT JOIN public.brokers br ON br.brokerid = r.broker_id
                     WHERE m.status = 'MATCHED'
                     {sqlFilter}
-                    ORDER BY m.match_score DESC, m.created_at DESC
-                    LIMIT 100;";
+                    ORDER BY m.match_score DESC, m.created_at DESC;";
 
                 using var reader = await cmd.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
@@ -173,7 +174,8 @@ public class UserMatchesService : IUserMatchesService
                     adminItems.Add(new UserMatchItemDto
                     {
                         Id = reader["matchid"]?.ToString() ?? Guid.NewGuid().ToString(),
-                        Title = string.IsNullOrWhiteSpace(lText) ? $"{lConfig} {lPropType} Match - {lArea}" : lText,
+                        Title = propertySide.Title,
+                        Description = requirementSide.Title,
                         TransactionType = mappedTxType,
                         Category = lCategory,
                         City = "Indore",
@@ -184,6 +186,7 @@ public class UserMatchesService : IUserMatchesService
                         PostedTimeAgo = GetTimeAgoText(postedAt),
                         MatchScore = matchScore,
                         IsUnlocked = true, // Admin sees everything unlocked
+                        UnlockStatus = "UNLOCKED",
                         OwnerContact = new ContactDetailsDto
                         {
                             OwnerName = lBrokerName,
@@ -235,7 +238,6 @@ public class UserMatchesService : IUserMatchesService
 
         var otherPropertyRequests = await otherQuery
             .OrderByDescending(p => p.PostedAt)
-            .Take(100)
             .ToListAsync();
 
         // 3. Fetch set of property IDs unlocked by this user
@@ -245,6 +247,44 @@ public class UserMatchesService : IUserMatchesService
             .Select(u => u.PropertyRequestId)
             .ToListAsync())
             .ToHashSet();
+
+        // Fetch all pending BROKER_UNLOCK notifications involving User A (userId)
+        var pendingUnlockNotifications = await _dbContext.Notifications
+            .AsNoTracking()
+            .Where(n => n.Type == "BROKER_UNLOCK" && !n.IsContactUnlocked &&
+                        (n.UserId == userId || (n.MetaJson != null && n.MetaJson.Contains(userId.ToString()))))
+            .ToListAsync();
+
+        var sentPendingPropertyIds = new HashSet<Guid>();
+        var receivedPendingPropertyIds = new HashSet<Guid>();
+
+        foreach (var n in pendingUnlockNotifications)
+        {
+            if (string.IsNullOrEmpty(n.MetaJson)) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(n.MetaJson);
+                var root = doc.RootElement;
+                if ((root.TryGetProperty("initiatorUserId", out var initUserProp) || root.TryGetProperty("InitiatorUserId", out initUserProp)) && 
+                    (root.TryGetProperty("initiatorPropertyRequestId", out var initPropProp) || root.TryGetProperty("InitiatorPropertyRequestId", out initPropProp)) && 
+                    (root.TryGetProperty("targetPropertyRequestId", out var targetPropProp) || root.TryGetProperty("TargetPropertyRequestId", out targetPropProp)))
+                {
+                    var initUserId = Guid.Parse(initUserProp.GetString()!);
+                    var initPropId = Guid.Parse(initPropProp.GetString()!);
+                    var targetPropId = Guid.Parse(targetPropProp.GetString()!);
+
+                    if (initUserId == userId)
+                    {
+                        sentPendingPropertyIds.Add(targetPropId);
+                    }
+                    else if (n.UserId == userId)
+                    {
+                        receivedPendingPropertyIds.Add(initPropId);
+                    }
+                }
+            }
+            catch {}
+        }
 
         // 4. Calculate matches and mask sensitive contact data unless unlocked
         var items = new List<UserMatchItemDto>();
@@ -258,28 +298,41 @@ public class UserMatchesService : IUserMatchesService
             if (matchScore >= 50)
             {
                 var bestMatchingUserRequest = FindBestMatchingUserRequest(propertyRequest, userRequests);
+                if (bestMatchingUserRequest == null) continue; // Require actual matching request to prevent duplication!
+
                 PropertyMatchSideDto propertySide;
                 RequirementMatchSideDto requirementSide;
 
                 if (string.Equals(propertyRequest.ListingType, "SUPPLY", StringComparison.OrdinalIgnoreCase))
                 {
                     propertySide = MapToPropertyMatchSide(propertyRequest);
-                    requirementSide = bestMatchingUserRequest != null
-                        ? MapToRequirementMatchSide(bestMatchingUserRequest)
-                        : MapToRequirementMatchSide(propertyRequest);
+                    requirementSide = MapToRequirementMatchSide(bestMatchingUserRequest);
                 }
                 else
                 {
-                    propertySide = bestMatchingUserRequest != null
-                        ? MapToPropertyMatchSide(bestMatchingUserRequest)
-                        : MapToPropertyMatchSide(propertyRequest);
+                    propertySide = MapToPropertyMatchSide(bestMatchingUserRequest);
                     requirementSide = MapToRequirementMatchSide(propertyRequest);
+                }
+
+                string unlockStatus = "NONE";
+                if (isUnlocked)
+                {
+                    unlockStatus = "UNLOCKED";
+                }
+                else if (sentPendingPropertyIds.Contains(propertyRequest.Id))
+                {
+                    unlockStatus = "PENDING";
+                }
+                else if (receivedPendingPropertyIds.Contains(propertyRequest.Id))
+                {
+                    unlockStatus = "REQUESTED";
                 }
 
                 items.Add(new UserMatchItemDto
                 {
                     Id = propertyRequest.Id.ToString(),
-                    Title = propertyRequest.Title ?? string.Empty,
+                    Title = propertySide.Title,
+                    Description = requirementSide.Title,
                     TransactionType = propertyRequest.TransactionType,
                     Category = propertyRequest.Category,
                     City = propertyRequest.City,
@@ -290,6 +343,7 @@ public class UserMatchesService : IUserMatchesService
                     PostedTimeAgo = GetTimeAgoText(propertyRequest.PostedAt),
                     MatchScore = matchScore,
                     IsUnlocked = isUnlocked,
+                    UnlockStatus = unlockStatus,
                     OwnerContact = isUnlocked ? new ContactDetailsDto
                     {
                         OwnerName = propertyRequest.User?.Name ?? "Property Owner",
@@ -312,6 +366,8 @@ public class UserMatchesService : IUserMatchesService
             Data = items
         };
     }
+
+
 
     public async Task<UnlockPropertyResponseDto> UnlockPropertyAsync(Guid userId, UnlockPropertyRequestDto request)
     {
@@ -368,47 +424,238 @@ public class UserMatchesService : IUserMatchesService
             };
         }
 
-        // Check 3: Sufficient Credit Check (Requires 1 Token / Credit)
-        if (user.Credits < 1)
+        var oppositeListingType = string.Equals(targetProperty.ListingType, "SUPPLY", StringComparison.OrdinalIgnoreCase) ? "DEMAND" : "SUPPLY";
+        Guid? userMatchingRequestId = await _dbContext.PropertyRequests
+            .Where(p => p.UserId == userId && 
+                        p.Status == "ACTIVE" && 
+                        p.ListingType == oppositeListingType &&
+                        p.Category == targetProperty.Category)
+            .Select(p => (Guid?)p.Id)
+            .FirstOrDefaultAsync();
+
+        if (!userMatchingRequestId.HasValue)
         {
-            _logger.LogWarning("User {UserId} attempted to unlock property {PropertyId} but has insufficient credits ({Credits}).", userId, request.PropertyRequestId, user.Credits);
+            userMatchingRequestId = await _dbContext.PropertyRequests
+                .Where(p => p.UserId == userId && p.Status == "ACTIVE")
+                .Select(p => (Guid?)p.Id)
+                .FirstOrDefaultAsync();
+        }
+
+        if (!userMatchingRequestId.HasValue)
+        {
             return new UnlockPropertyResponseDto
             {
                 Success = false,
-                Message = "Insufficient credits. Please purchase a credit package (1 Token = ₹300) to unlock contact details.",
+                Message = "You must have an active property listing or requirement to request an unlock.",
+                CreditsRemaining = user.Credits
+            };
+        }
+
+        var userPropId = userMatchingRequestId.Value;
+        var targetUserId = targetProperty.UserId;
+
+        // Search for a pending notification sent to User A (userId) from User B (targetUserId)
+        var pendingNotificationForUserA = await _dbContext.Notifications
+            .Where(n => n.UserId == userId && n.Type == "BROKER_UNLOCK" && n.RequiresTokenUnlock && !n.IsContactUnlocked)
+            .ToListAsync();
+
+        Notification? matchedNotification = null;
+        foreach (var n in pendingNotificationForUserA)
+        {
+            if (string.IsNullOrEmpty(n.MetaJson)) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(n.MetaJson);
+                var root = doc.RootElement;
+                if ((root.TryGetProperty("initiatorUserId", out var initUserProp) || root.TryGetProperty("InitiatorUserId", out initUserProp)) && 
+                    (root.TryGetProperty("targetPropertyRequestId", out var targetPropProp) || root.TryGetProperty("TargetPropertyRequestId", out targetPropProp)))
+                {
+                    var initUserId = Guid.Parse(initUserProp.GetString()!);
+                    var targetPropId = Guid.Parse(targetPropProp.GetString()!);
+
+                    if (initUserId == targetUserId && targetPropId == userPropId)
+                    {
+                        matchedNotification = n;
+                        break;
+                    }
+                }
+            }
+            catch {}
+        }
+
+        if (matchedNotification != null)
+        {
+            // Proceed to mutual unlock
+            var targetUser = await _dbContext.Users.FindAsync(targetUserId);
+            if (targetUser == null)
+            {
+                throw new KeyNotFoundException("Target owner not found.");
+            }
+
+            if (user.Credits < 1)
+            {
+                return new UnlockPropertyResponseDto
+                {
+                    Success = false,
+                    Message = "Insufficient credits. Please purchase a credit package (1 Token = ₹300) to unlock contact details.",
+                    CreditsRemaining = user.Credits
+                };
+            }
+
+            if (targetUser.Credits < 1)
+            {
+                return new UnlockPropertyResponseDto
+                {
+                    Success = false,
+                    Message = "The matching user has insufficient credits to accept the unlock.",
+                    CreditsRemaining = user.Credits
+                };
+            }
+
+            // Deduct credits
+            user.Credits -= 1;
+            targetUser.Credits -= 1;
+            user.ModifiedDate = DateTime.UtcNow;
+            targetUser.ModifiedDate = DateTime.UtcNow;
+
+            // Save unlock records
+            var unlockForUserA = new UnlockedProperty
+            {
+                UserId = userId,
+                PropertyRequestId = request.PropertyRequestId,
+                UnlockedAt = DateTime.UtcNow
+            };
+
+            var unlockForUserB = new UnlockedProperty
+            {
+                UserId = targetUserId,
+                PropertyRequestId = userPropId,
+                UnlockedAt = DateTime.UtcNow
+            };
+
+            _dbContext.UnlockedProperties.Add(unlockForUserA);
+            _dbContext.UnlockedProperties.Add(unlockForUserB);
+
+            // Update notification
+            matchedNotification.IsContactUnlocked = true;
+
+            // Create notification for User B
+            var successNotificationForUserB = new Notification
+            {
+                Id = Guid.NewGuid(),
+                UserId = targetUserId,
+                Type = "MATCH_UNLOCKED",
+                Title = "Match Contact Unlocked",
+                Body = $"Congratulations! Contact details with {user.Name} are now unlocked.",
+                CreatedAt = DateTime.UtcNow
+            };
+            _dbContext.Notifications.Add(successNotificationForUserB);
+
+            await _dbContext.SaveChangesAsync();
+
+            _logger.LogInformation("Mutual unlock completed for {UserA} and {UserB}.", userId, targetUserId);
+
+            return new UnlockPropertyResponseDto
+            {
+                Success = true,
+                Message = "Contact details unlocked successfully!",
+                CreditsRemaining = user.Credits,
+                UnlockedContact = new ContactDetailsDto
+                {
+                    OwnerName = targetProperty.User?.Name ?? "Property Owner",
+                    OwnerMobile = targetProperty.User?.MobileNumber ?? "N/A",
+                    OwnerEmail = targetProperty.User?.Email
+                }
+            };
+        }
+        else
+        {
+            // Check if User A has already sent an unlock request to User B to avoid duplication
+            var existingSentNotification = await _dbContext.Notifications
+                .Where(n => n.UserId == targetUserId && n.Type == "BROKER_UNLOCK" && n.RequiresTokenUnlock && !n.IsContactUnlocked)
+                .ToListAsync();
+
+            bool alreadyRequested = false;
+            foreach (var n in existingSentNotification)
+            {
+                if (string.IsNullOrEmpty(n.MetaJson)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(n.MetaJson);
+                    var root = doc.RootElement;
+                    if ((root.TryGetProperty("initiatorUserId", out var initUserProp) || root.TryGetProperty("InitiatorUserId", out initUserProp)) && 
+                        (root.TryGetProperty("targetPropertyRequestId", out var targetPropProp) || root.TryGetProperty("TargetPropertyRequestId", out targetPropProp)))
+                    {
+                        var initUserId = Guid.Parse(initUserProp.GetString()!);
+                        var targetPropId = Guid.Parse(targetPropProp.GetString()!);
+
+                        if (initUserId == userId && targetPropId == request.PropertyRequestId)
+                        {
+                            alreadyRequested = true;
+                            break;
+                        }
+                    }
+                }
+                catch {}
+            }
+
+            if (alreadyRequested)
+            {
+                return new UnlockPropertyResponseDto
+                {
+                    Success = true,
+                    Message = "Unlock request is already pending with the owner.",
+                    CreditsRemaining = user.Credits,
+                    UnlockedContact = null
+                };
+            }
+
+            // Check credits of User A before sending a request to verify eligibility
+            if (user.Credits < 1)
+            {
+                return new UnlockPropertyResponseDto
+                {
+                    Success = false,
+                    Message = "Insufficient credits. You need at least 1 credit to request an unlock.",
+                    CreditsRemaining = user.Credits
+                };
+            }
+
+            // Create pending unlock request
+            var initiatorName = user.Name ?? "Another Broker";
+            var metaData = new
+            {
+                initiatorUserId = userId.ToString(),
+                initiatorPropertyRequestId = userPropId.ToString(),
+                targetPropertyRequestId = request.PropertyRequestId.ToString(),
+                brokerId = userId.ToString()
+            };
+
+            var pendingNotificationForUserB = new Notification
+            {
+                Id = Guid.NewGuid(),
+                UserId = targetUserId,
+                Type = "BROKER_UNLOCK",
+                Title = "Unlock Request from Match",
+                Body = $"{initiatorName} wants to unlock contact details for your matching property in {targetProperty.Locality}. Click unlock to reveal their details.",
+                RequiresTokenUnlock = true,
+                IsContactUnlocked = false,
+                TokenCost = 1,
+                MetaJson = JsonSerializer.Serialize(metaData),
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _dbContext.Notifications.Add(pendingNotificationForUserB);
+            await _dbContext.SaveChangesAsync();
+
+            return new UnlockPropertyResponseDto
+            {
+                Success = true,
+                Message = "Unlock request sent to the matching owner. Waiting for their unlock approval.",
                 CreditsRemaining = user.Credits,
                 UnlockedContact = null
             };
         }
-
-        // Process Unlock: Deduct 1 Credit & Record Unlock
-        user.Credits -= 1;
-        user.ModifiedDate = DateTime.UtcNow;
-
-        var unlockRecord = new UnlockedProperty
-        {
-            UserId = userId,
-            PropertyRequestId = request.PropertyRequestId,
-            UnlockedAt = DateTime.UtcNow
-        };
-
-        _dbContext.UnlockedProperties.Add(unlockRecord);
-        await _dbContext.SaveChangesAsync();
-
-        _logger.LogInformation("User {UserId} successfully unlocked property {PropertyId}. 1 Token deducted. Remaining Credits: {Credits}", userId, request.PropertyRequestId, user.Credits);
-
-        return new UnlockPropertyResponseDto
-        {
-            Success = true,
-            Message = "Property contact details unlocked successfully!",
-            CreditsRemaining = user.Credits,
-            UnlockedContact = new ContactDetailsDto
-            {
-                OwnerName = targetProperty.User?.Name ?? "Property Owner",
-                OwnerMobile = targetProperty.User?.MobileNumber ?? "N/A",
-                OwnerEmail = targetProperty.User?.Email
-            }
-        };
     }
 
     public async Task<UserMatchesResponseDto> GetUnlockedPropertiesAsync(Guid userId)
@@ -421,6 +668,11 @@ public class UserMatchesService : IUserMatchesService
             .OrderByDescending(u => u.UnlockedAt)
             .ToListAsync();
 
+        var userRequests = await _dbContext.PropertyRequests
+            .AsNoTracking()
+            .Where(p => p.UserId == userId && p.Status == "ACTIVE")
+            .ToListAsync();
+
         var items = new List<UserMatchItemDto>();
 
         foreach (var record in unlockedRecords)
@@ -430,21 +682,33 @@ public class UserMatchesService : IUserMatchesService
                 PropertyMatchSideDto propertySide;
                 RequirementMatchSideDto requirementSide;
 
-                if (string.Equals(record.PropertyRequest.ListingType, "SUPPLY", StringComparison.OrdinalIgnoreCase))
+                var targetProperty = record.PropertyRequest;
+                var oppositeListingType = string.Equals(targetProperty.ListingType, "SUPPLY", StringComparison.OrdinalIgnoreCase) ? "DEMAND" : "SUPPLY";
+                
+                var userMatchingRequest = userRequests
+                    .FirstOrDefault(p => string.Equals(p.ListingType, oppositeListingType, StringComparison.OrdinalIgnoreCase) && 
+                                         string.Equals(p.Category, targetProperty.Category, StringComparison.OrdinalIgnoreCase));
+
+                if (string.Equals(targetProperty.ListingType, "SUPPLY", StringComparison.OrdinalIgnoreCase))
                 {
-                    propertySide = MapToPropertyMatchSide(record.PropertyRequest);
-                    requirementSide = MapToRequirementMatchSide(record.PropertyRequest);
+                    propertySide = MapToPropertyMatchSide(targetProperty);
+                    requirementSide = userMatchingRequest != null
+                        ? MapToRequirementMatchSide(userMatchingRequest)
+                        : MapToRequirementMatchSide(targetProperty);
                 }
                 else
                 {
-                    propertySide = MapToPropertyMatchSide(record.PropertyRequest);
-                    requirementSide = MapToRequirementMatchSide(record.PropertyRequest);
+                    propertySide = userMatchingRequest != null
+                        ? MapToPropertyMatchSide(userMatchingRequest)
+                        : MapToPropertyMatchSide(targetProperty);
+                    requirementSide = MapToRequirementMatchSide(targetProperty);
                 }
 
-                items.Add(new UserMatchItemDto
+                 items.Add(new UserMatchItemDto
                 {
                     Id = record.PropertyRequest.Id.ToString(),
-                    Title = record.PropertyRequest.Title ?? string.Empty,
+                    Title = propertySide.Title,
+                    Description = requirementSide.Title,
                     TransactionType = record.PropertyRequest.TransactionType,
                     Category = record.PropertyRequest.Category,
                     City = record.PropertyRequest.City,
@@ -455,6 +719,7 @@ public class UserMatchesService : IUserMatchesService
                     PostedTimeAgo = GetTimeAgoText(record.PropertyRequest.PostedAt),
                     MatchScore = 100,
                     IsUnlocked = true,
+                    UnlockStatus = "UNLOCKED",
                     OwnerContact = new ContactDetailsDto
                     {
                         OwnerName = record.PropertyRequest.User?.Name ?? "Property Owner",

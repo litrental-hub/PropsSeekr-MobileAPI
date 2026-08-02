@@ -153,7 +153,6 @@ public class NotificationService : INotificationService
 
         return true;
     }
-
     public async Task<UnlockBrokerResponseDto> UnlockBrokerContactAsync(Guid notificationId, Guid userId)
     {
         var notification = await _dbContext.Notifications
@@ -204,29 +203,122 @@ public class NotificationService : INotificationService
             };
         }
 
-        // Check token balance
+        // Mutual Unlock check if notification type is BROKER_UNLOCK
+        if (notification.Type == "BROKER_UNLOCK")
+        {
+            var meta = !string.IsNullOrEmpty(notification.MetaJson)
+                ? JsonSerializer.Deserialize<NotificationMetaDto>(notification.MetaJson)
+                : null;
+
+            if (meta != null && Guid.TryParse(meta.InitiatorUserId, out var initUserId) && 
+                Guid.TryParse(meta.InitiatorPropertyRequestId, out var initPropId) && 
+                Guid.TryParse(meta.TargetPropertyRequestId, out var targetPropId))
+            {
+                var userB = user; // Current user receiving the notification
+                var userA = await _dbContext.Users.FirstOrDefaultAsync(u => u.Id == initUserId);
+
+                if (userA == null)
+                {
+                    throw new KeyNotFoundException("Requesting user not found.");
+                }
+
+                if (userA.Credits < 1)
+                {
+                    throw new InvalidOperationException("The requesting user has insufficient tokens to complete the unlock.");
+                }
+
+                if (userB.Credits < 1)
+                {
+                    throw new InvalidOperationException("Insufficient tokens. You need at least 1 token to unlock this contact.");
+                }
+
+                using var transaction = await _dbContext.Database.BeginTransactionAsync();
+                try
+                {
+                    // Deduct 1 credit from both
+                    userA.Credits -= 1;
+                    userB.Credits -= 1;
+
+                    notification.IsContactUnlocked = true;
+
+                    // Add unlock records for both
+                    var unlockForUserA = new UnlockedProperty
+                    {
+                        UserId = initUserId,
+                        PropertyRequestId = targetPropId,
+                        UnlockedAt = DateTime.UtcNow
+                    };
+
+                    var unlockForUserB = new UnlockedProperty
+                    {
+                        UserId = userId,
+                        PropertyRequestId = initPropId,
+                        UnlockedAt = DateTime.UtcNow
+                    };
+
+                    _dbContext.UnlockedProperties.Add(unlockForUserA);
+                    _dbContext.UnlockedProperties.Add(unlockForUserB);
+
+                    // Add success notification for User A
+                    var successNotificationForUserA = new Notification
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = initUserId,
+                        Type = "MATCH_UNLOCKED",
+                        Title = "Match Contact Unlocked",
+                        Body = $"Congratulations! Contact details with {userB.Name} are now unlocked.",
+                        CreatedAt = DateTime.UtcNow
+                    };
+                    _dbContext.Notifications.Add(successNotificationForUserA);
+
+                    await _dbContext.SaveChangesAsync();
+                    await transaction.CommitAsync();
+                }
+                catch
+                {
+                    await transaction.RollbackAsync();
+                    throw;
+                }
+
+                meta.BrokerPhone = userA.MobileNumber;
+                meta.BrokerName = userA.Name;
+
+                return new UnlockBrokerResponseDto
+                {
+                    Success = true,
+                    Message = "Broker contact successfully unlocked. 1 Token debited.",
+                    Id = notification.Id.ToString(),
+                    TokensDebited = 1,
+                    RemainingTokens = userB.Credits,
+                    IsContactUnlocked = true,
+                    Meta = meta
+                };
+            }
+        }
+
+        // Fallback to original single-sided unlock logic (for non-BROKER_UNLOCK type notifications)
         if (user.Credits < 1)
         {
             throw new InvalidOperationException("Insufficient tokens. You need at least 1 token to unlock this broker contact.");
         }
 
-        // Debit and unlock inside a database transaction to ensure safety
-        using var transaction = await _dbContext.Database.BeginTransactionAsync();
-        try
+        using (var transaction = await _dbContext.Database.BeginTransactionAsync())
         {
-            user.Credits -= 1;
-            notification.IsContactUnlocked = true;
+            try
+            {
+                user.Credits -= 1;
+                notification.IsContactUnlocked = true;
 
-            await _dbContext.SaveChangesAsync();
-            await transaction.CommitAsync();
-        }
-        catch
-        {
-            await transaction.RollbackAsync();
-            throw;
+                await _dbContext.SaveChangesAsync();
+                await transaction.CommitAsync();
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
         }
 
-        // Fetch target broker details for the unmasked response
         var responseMeta = !string.IsNullOrEmpty(notification.MetaJson)
             ? JsonSerializer.Deserialize<NotificationMetaDto>(notification.MetaJson)
             : new NotificationMetaDto();
@@ -251,5 +343,4 @@ public class NotificationService : INotificationService
             IsContactUnlocked = true,
             Meta = responseMeta
         };
-    }
-}
+    }}

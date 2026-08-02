@@ -33,6 +33,7 @@ public class UserMatchItemDto
 {
     public string Id { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
     public string TransactionType { get; set; } = string.Empty;
     public string Category { get; set; } = string.Empty;
     public string City { get; set; } = string.Empty;
@@ -43,6 +44,7 @@ public class UserMatchItemDto
     public string PostedTimeAgo { get; set; } = string.Empty;
     public int MatchScore { get; set; }
     public bool IsUnlocked { get; set; }
+    public string UnlockStatus { get; set; } = "NONE"; // NONE, PENDING, REQUESTED, UNLOCKED
     
     // Only populated when IsUnlocked == true (Security enforcement)
     public ContactDetailsDto? OwnerContact { get; set; }
