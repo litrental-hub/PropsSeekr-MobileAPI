@@ -24,12 +24,9 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.0.1" />
     <PackageReference Include="AWSSDK.SimpleEmail" Version="3.7.401" />
-<<<<<<< Updated upstream
-=======
     <PackageReference Include="AWSSDK.SecretsManager" Version="3.7.400.27" />
     <PackageReference Include="AWSSDK.ElasticLoadBalancingV2" Version="3.7.401" />
     <PackageReference Include="AWSSDK.CognitoIdentityProvider" Version="3.7.401" />
->>>>>>> Stashed changes
   </ItemGroup>
 
   <ItemGroup>

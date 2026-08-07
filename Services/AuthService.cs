@@ -12,6 +12,7 @@ using PropSeekr.Data;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace PropSeekr.Services;
 
@@ -24,17 +25,17 @@ public class AuthService : IAuthService
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly IOtpDeliveryService _otpDeliveryService;
+    private readonly IServiceProvider _serviceProvider;
 
     public AuthService(
         AppDbContext dbContext,
         IConfiguration configuration,
-        IOtpDeliveryService otpDeliveryService)
+        IOtpDeliveryService otpDeliveryService,
+        IServiceProvider serviceProvider)
     {
         _dbContext = dbContext;
         _configuration = configuration;
         _otpDeliveryService = otpDeliveryService;
-<<<<<<< Updated upstream
-=======
         _serviceProvider = serviceProvider;
     }
 
@@ -46,11 +47,6 @@ public class AuthService : IAuthService
         var cognitoPhone = NormalizePhoneNumber(mobileInput);
         var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
         var password = request.Password;
-        var addressLine1 = NormalizeRequired(request.AddressLine1, "Address line 1");
-        var addressLine2 = NormalizeOptional(request.AddressLine2);
-        var city = NormalizeRequired(request.City, "City");
-        var state = NormalizeRequired(request.State, "State");
-        var pincode = NormalizeRequired(request.Pincode, "Pincode");
         var aadharNumber = NormalizeRequired(request.AadharNumber, "Aadhar number");
         var panCard = NormalizeRequired(request.PanCard, "PAN card").ToUpperInvariant();
         var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
@@ -106,11 +102,6 @@ public class AuthService : IAuthService
                     MobileNumber = mobile,
                     Email = email,
                     PasswordHash = string.Empty,
-                    AddressLine1 = addressLine1,
-                    AddressLine2 = addressLine2,
-                    City = city,
-                    State = state,
-                    Pincode = pincode,
                     AadharNumber = aadharNumber,
                     PanCard = panCard,
                     GSTNumber = gstNumber,
@@ -189,11 +180,6 @@ public class AuthService : IAuthService
             MobileNumber = mobile,
             Email = email,
             PasswordHash = passwordHashFallback,
-            AddressLine1 = addressLine1,
-            AddressLine2 = addressLine2,
-            City = city,
-            State = state,
-            Pincode = pincode,
             AadharNumber = aadharNumber,
             PanCard = panCard,
             GSTNumber = gstNumber,
@@ -217,7 +203,6 @@ public class AuthService : IAuthService
             UserId = localUser.Id,
             Message = "Registration successful (local fallback)."
         };
->>>>>>> Stashed changes
     }
 
     public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
@@ -241,53 +226,6 @@ public class AuthService : IAuthService
         };
     }
 
-    public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
-    {
-        var mobile = NormalizeRequired(request.Mobile, "Mobile number");
-        var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
-        var name = NormalizeRequired(request.Name, "Name");
-        var password = request.Password;
-        var aadharNumber = NormalizeRequired(request.AadharNumber, "Aadhar number");
-        var panCard = NormalizeRequired(request.PanCard, "PAN card").ToUpperInvariant();
-        var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
-        var reraNumber = NormalizeOptional(request.ReraRegistrationNumber)?.ToUpperInvariant();
-
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
-
-        await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
-
-        var passwordHash = HashPassword(password);
-
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Name = name,
-            MobileNumber = mobile,
-            Email = email,
-            PasswordHash = passwordHash,
-            AadharNumber = aadharNumber,
-            PanCard = panCard,
-            GSTNumber = gstNumber,
-            ReraRegistrationNumber = reraNumber,
-            IsMobileVerified = false,
-            Credits = 0,
-            CreatedDate = DateTime.UtcNow,
-            ModifiedDate = DateTime.UtcNow
-        };
-
-        _dbContext.Users.Add(user);
-        await _dbContext.SaveChangesAsync();
-
-        await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
-
-        await transaction.CommitAsync();
-
-        return new RegisterResponseDto
-        {
-            UserId = user.Id,
-            Message = "Registration successful. OTP verification is pending."
-        };
-    }
 
     public async Task<LoginResponseDto> LoginAsync(LoginRequestDto request)
     {

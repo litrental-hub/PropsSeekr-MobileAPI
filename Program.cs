@@ -1,4 +1,8 @@
 using System.Text;
+using System.Text.Json;
+using Amazon;
+using Amazon.SecretsManager;
+using Amazon.SecretsManager.Model;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -16,13 +20,7 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 // Database
-<<<<<<< Updated upstream
-=======
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-Console.WriteLine("=================================");
-Console.WriteLine("Connection String:");
-Console.WriteLine(connectionString);
-Console.WriteLine("=================================");
 if (connectionString != null)
 {
     connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
@@ -60,7 +58,6 @@ if (!string.IsNullOrWhiteSpace(secretName))
                 if (root.TryGetProperty("password", out var pwdProp))
                 {
                     dbPassword = pwdProp.GetString();
-                
                 }
                 else if (root.TryGetProperty("ConnectionString", out var connProp))
                 {
@@ -88,10 +85,9 @@ if (!string.IsNullOrWhiteSpace(secretName))
     }
 }
 
->>>>>>> Stashed changes
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection"),
+        connectionString ?? throw new InvalidOperationException("DefaultConnection is not configured."),
         o => o.UseNetTopologySuite()));
 
 // Services
