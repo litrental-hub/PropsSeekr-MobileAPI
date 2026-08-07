@@ -2,6 +2,10 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
+using Amazon;
+using Amazon.CognitoIdentityProvider;
+using Amazon.CognitoIdentityProvider.Model;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using PropSeekr.Data;
@@ -29,6 +33,191 @@ public class AuthService : IAuthService
         _dbContext = dbContext;
         _configuration = configuration;
         _otpDeliveryService = otpDeliveryService;
+<<<<<<< Updated upstream
+=======
+        _serviceProvider = serviceProvider;
+    }
+
+    public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
+    {
+        var name = NormalizeRequired(request.Name, "Name");
+        var mobileInput = NormalizeRequired(request.Mobile, "Mobile number");
+        var mobile = NormalizeLocalPhoneNumber(mobileInput);
+        var cognitoPhone = NormalizePhoneNumber(mobileInput);
+        var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
+        var password = request.Password;
+        var addressLine1 = NormalizeRequired(request.AddressLine1, "Address line 1");
+        var addressLine2 = NormalizeOptional(request.AddressLine2);
+        var city = NormalizeRequired(request.City, "City");
+        var state = NormalizeRequired(request.State, "State");
+        var pincode = NormalizeRequired(request.Pincode, "Pincode");
+        var aadharNumber = NormalizeRequired(request.AadharNumber, "Aadhar number");
+        var panCard = NormalizeRequired(request.PanCard, "PAN card").ToUpperInvariant();
+        var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
+        var reraRegistrationNumber = NormalizeOptional(request.ReraRegistrationNumber);
+
+        await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
+
+        var useCognito = _configuration.GetValue<bool>("Cognito:UseCognito");
+        var cognitoClientId = _configuration["Cognito:UserPoolClientId"];
+        var cognitoUserPoolId = _configuration["Cognito:UserPoolId"];
+        var cognitoClientSecret = _configuration["Cognito:ClientSecret"];
+
+        if (useCognito)
+        {
+            if (string.IsNullOrWhiteSpace(cognitoClientId) || string.IsNullOrWhiteSpace(cognitoUserPoolId))
+            {
+                throw new InvalidOperationException("Cognito is enabled but UserPoolClientId/UserPoolId is not configured.");
+            }
+
+            try
+            {
+                using var cognito = CreateCognitoClient();
+
+                var signUpRequest = new SignUpRequest
+                {
+                    ClientId = cognitoClientId,
+                    Username = email, // using email as username
+                    Password = password
+                };
+
+                signUpRequest.UserAttributes.Add(new AttributeType { Name = "email", Value = email });
+                if (!string.IsNullOrWhiteSpace(cognitoPhone))
+                {
+                    signUpRequest.UserAttributes.Add(new AttributeType { Name = "phone_number", Value = cognitoPhone });
+                }
+                signUpRequest.UserAttributes.Add(new AttributeType { Name = "name", Value = name });
+
+                if (!string.IsNullOrWhiteSpace(cognitoClientSecret))
+                {
+                    // Compute SECRET_HASH and add to payload
+                    signUpRequest.SecretHash = ComputeSecretHash(email, cognitoClientId, cognitoClientSecret);
+                }
+
+                var signUpResponse = await cognito.SignUpAsync(signUpRequest);
+
+                // Do not store passwords locally. Create a local profile record.
+                await using var transaction = await _dbContext.Database.BeginTransactionAsync();
+
+                var user = new User
+                {
+                    Id = Guid.NewGuid(),
+                    Name = name,
+                    MobileNumber = mobile,
+                    Email = email,
+                    PasswordHash = string.Empty,
+                    AddressLine1 = addressLine1,
+                    AddressLine2 = addressLine2,
+                    City = city,
+                    State = state,
+                    Pincode = pincode,
+                    AadharNumber = aadharNumber,
+                    PanCard = panCard,
+                    GSTNumber = gstNumber,
+                    ReraRegistrationNumber = reraRegistrationNumber,
+                    IsMobileVerified = false,
+                    IsEmailVerified = signUpResponse.UserConfirmed,
+                    Credits = 0,
+                    CreatedDate = DateTime.UtcNow,
+                    ModifiedDate = DateTime.UtcNow
+                };
+
+                _dbContext.Users.Add(user);
+
+                try
+                {
+                    await _dbContext.SaveChangesAsync();
+                    await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
+                    await transaction.CommitAsync();
+                }
+                catch (Exception ex)
+                {
+                    await transaction.RollbackAsync();
+                    await DeleteCognitoUser(email, cognitoClientId, cognitoClientSecret ?? string.Empty);
+                    Console.WriteLine($"[Registration] local persistence failed: {ex.Message}");
+                    throw new Exception("Registration failed while saving profile data. Please try again.");
+                }
+
+                // Trigger background email OTP like before
+                var serviceProvider = _serviceProvider;
+                _ = Task.Run(async () =>
+                {
+                    using (var scope = serviceProvider.CreateScope())
+                    {
+                        try
+                        {
+                            var emailOtpService = scope.ServiceProvider.GetRequiredService<IEmailOtpService>();
+                            await emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
+                            {
+                                Email = email,
+                                Purpose = "EmailVerification"
+                            }, clientIp: null);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Email Error] Failed to send registration email to {email}: {ex}");
+                        }
+                    }
+                });
+
+                return new RegisterResponseDto
+                {
+                    UserId = user.Id,
+                    Message = "Registration successful. Please verify your email/phone as prompted by Cognito."
+                };
+            }
+            catch (UsernameExistsException)
+            {
+                throw new Exception("A user with the same email already exists in Cognito.");
+            }
+            catch (Exception ex)
+            {
+                // Do not create a local user if Cognito registration fails
+                throw new Exception($"Cognito registration failed: {ex.Message}");
+            }
+        }
+
+        // If Cognito is not configured, fall back to legacy local registration
+        await using var tx2 = await _dbContext.Database.BeginTransactionAsync();
+
+        var passwordHashFallback = HashPassword(password);
+
+        var localUser = new User
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            MobileNumber = mobile,
+            Email = email,
+            PasswordHash = passwordHashFallback,
+            AddressLine1 = addressLine1,
+            AddressLine2 = addressLine2,
+            City = city,
+            State = state,
+            Pincode = pincode,
+            AadharNumber = aadharNumber,
+            PanCard = panCard,
+            GSTNumber = gstNumber,
+            ReraRegistrationNumber = reraRegistrationNumber,
+            IsMobileVerified = false,
+            IsEmailVerified = false,
+            Credits = 0,
+            CreatedDate = DateTime.UtcNow,
+            ModifiedDate = DateTime.UtcNow
+        };
+
+        _dbContext.Users.Add(localUser);
+        await _dbContext.SaveChangesAsync();
+
+        await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
+
+        await tx2.CommitAsync();
+
+        return new RegisterResponseDto
+        {
+            UserId = localUser.Id,
+            Message = "Registration successful (local fallback)."
+        };
+>>>>>>> Stashed changes
     }
 
     public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
@@ -105,34 +294,113 @@ public class AuthService : IAuthService
         var identifier = NormalizeRequired(request.Identifier, "Mobile number or Email").ToLowerInvariant();
         var password = request.Password;
 
-        // Find user by Mobile Number OR Email Address
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u =>
-            u.MobileNumber == identifier ||
-            (u.Email != null && u.Email.ToLower() == identifier));
+        var useCognito = _configuration.GetValue<bool>("Cognito:UseCognito");
+        var cognitoClientId = _configuration["Cognito:UserPoolClientId"];
+        var cognitoClientSecret = _configuration["Cognito:ClientSecret"];
 
-        if (user == null || !VerifyPassword(password, user.PasswordHash))
+        if (useCognito)
+        {
+            if (string.IsNullOrWhiteSpace(cognitoClientId))
+            {
+                throw new InvalidOperationException("Cognito login is enabled but UserPoolClientId is not configured.");
+            }
+
+            try
+            {
+                using var cognito = CreateCognitoClient();
+
+                var authRequest = new InitiateAuthRequest
+                {
+                    AuthFlow = AuthFlowType.USER_PASSWORD_AUTH,
+                    ClientId = cognitoClientId,
+                    AuthParameters = new Dictionary<string, string>
+                    {
+                        { "USERNAME", identifier },
+                        { "PASSWORD", password }
+                    }
+                };
+
+                if (!string.IsNullOrWhiteSpace(cognitoClientSecret))
+                {
+                    authRequest.AuthParameters.Add("SECRET_HASH", ComputeSecretHash(identifier, cognitoClientId, cognitoClientSecret));
+                }
+
+                var authResponse = await cognito.InitiateAuthAsync(authRequest);
+
+                var authResult = authResponse.AuthenticationResult;
+                var accessToken = authResult?.AccessToken ?? string.Empty;
+                var idToken = authResult?.IdToken ?? string.Empty;
+                var refreshToken = authResult?.RefreshToken ?? string.Empty;
+                var expiresIn = authResult?.ExpiresIn ?? 0;
+
+                var user = await _dbContext.Users.FirstOrDefaultAsync(u =>
+                    u.MobileNumber == identifier || (u.Email != null && u.Email.ToLower() == identifier));
+
+                return new LoginResponseDto
+                {
+                    Success = true,
+                    Message = "Login successful.",
+                    Token = !string.IsNullOrWhiteSpace(accessToken) ? accessToken : idToken,
+                    RefreshToken = refreshToken,
+                    ExpiresAt = DateTime.UtcNow.AddSeconds(expiresIn),
+                    User = user != null ? new AuthenticatedUserDto
+                    {
+                        Id = user.Id,
+                        Name = user.Name,
+                        MobileNumber = user.MobileNumber,
+                        Email = user.Email,
+                        IsMobileVerified = user.IsMobileVerified,
+                        Credits = user.Credits
+                    } : new AuthenticatedUserDto()
+                };
+            }
+            catch (NotAuthorizedException)
+            {
+                throw new Exception("Invalid username or password.");
+            }
+            catch (UserNotFoundException)
+            {
+                throw new Exception("Invalid username or password.");
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Cognito login failed: {ex.Message}");
+            }
+        }
+
+        // Fallback to legacy local auth if Cognito is not configured
+        var identifierNormalized = identifier;
+        if (Regex.IsMatch(identifier, "^\\+?91\\d{10}$") || Regex.IsMatch(identifier, "^\\d{10}$"))
+        {
+            identifierNormalized = NormalizeLocalPhoneNumber(identifier);
+        }
+
+        var userLocal = await _dbContext.Users.FirstOrDefaultAsync(u =>
+            u.MobileNumber == identifierNormalized || (u.Email != null && u.Email.ToLower() == identifier));
+
+        if (userLocal == null || !VerifyPassword(password, userLocal.PasswordHash))
         {
             throw new Exception("Invalid mobile number/email or password.");
         }
 
-        var token = GenerateJwtToken(user, out var expiresAt);
-        var refreshToken = GenerateRefreshToken();
+        var tokenLocal = GenerateJwtToken(userLocal, out var expiresAtLocal);
+        var refreshTokenLocal = GenerateRefreshToken();
 
         return new LoginResponseDto
         {
             Success = true,
             Message = "Login successful.",
-            Token = token,
-            RefreshToken = refreshToken,
-            ExpiresAt = expiresAt,
+            Token = tokenLocal,
+            RefreshToken = refreshTokenLocal,
+            ExpiresAt = expiresAtLocal,
             User = new AuthenticatedUserDto
             {
-                Id = user.Id,
-                Name = user.Name,
-                MobileNumber = user.MobileNumber,
-                Email = user.Email,
-                IsMobileVerified = user.IsMobileVerified,
-                Credits = user.Credits
+                Id = userLocal.Id,
+                Name = userLocal.Name,
+                MobileNumber = userLocal.MobileNumber,
+                Email = userLocal.Email,
+                IsMobileVerified = userLocal.IsMobileVerified,
+                Credits = userLocal.Credits
             }
         };
     }
@@ -186,7 +454,9 @@ public class AuthService : IAuthService
         string mobileNumber,
         string message)
     {
-        if (!await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber))
+        var normalizedMobile = NormalizeLocalPhoneNumber(mobileNumber);
+
+        if (!await _dbContext.Users.AnyAsync(x => x.MobileNumber == normalizedMobile))
         {
             throw new Exception("Mobile number is not registered.");
         }
@@ -195,7 +465,7 @@ public class AuthService : IAuthService
 
         var activeOtps = await _dbContext.OtpVerifications
             .Where(x =>
-                x.MobileNumber == mobileNumber &&
+                x.MobileNumber == normalizedMobile &&
                 !x.IsUsed)
             .ToListAsync();
 
@@ -210,7 +480,7 @@ public class AuthService : IAuthService
         var otpEntity = new OtpVerification
         {
             Id = Guid.NewGuid(),
-            MobileNumber = mobileNumber,
+            MobileNumber = NormalizeLocalPhoneNumber(mobileNumber),
             OtpCode = otp,
             IsUsed = false,
             CreatedDate = now,
@@ -232,10 +502,60 @@ public class AuthService : IAuthService
         };
     }
 
+    private AmazonCognitoIdentityProviderClient CreateCognitoClient()
+    {
+        var region = _configuration["Cognito:Region"] ?? _configuration["AWS:Region"] ?? "";
+        var accessKey = _configuration["AWS:AccessKeyId"];
+        var secretKey = _configuration["AWS:SecretAccessKey"];
+
+        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
+        {
+            var creds = new Amazon.Runtime.BasicAWSCredentials(accessKey, secretKey);
+            return new AmazonCognitoIdentityProviderClient(creds, RegionEndpoint.GetBySystemName(region));
+        }
+
+        return new AmazonCognitoIdentityProviderClient(RegionEndpoint.GetBySystemName(region));
+    }
+
+    private async Task DeleteCognitoUser(string username, string clientId, string clientSecret)
+    {
+        try
+        {
+            var userPoolId = _configuration["Cognito:UserPoolId"];
+            if (string.IsNullOrWhiteSpace(userPoolId))
+            {
+                return;
+            }
+
+            using var cognito = CreateCognitoClient();
+            var deleteRequest = new AdminDeleteUserRequest
+            {
+                UserPoolId = userPoolId,
+                Username = username
+            };
+
+            await cognito.AdminDeleteUserAsync(deleteRequest);
+        }
+        catch
+        {
+            // best effort cleanup only; do not mask original registration failure
+        }
+    }
+
+    private static string ComputeSecretHash(string username, string clientId, string clientSecret)
+    {
+        var dataString = username + clientId;
+        var key = Encoding.UTF8.GetBytes(clientSecret);
+        using var hmac = new HMACSHA256(key);
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataString));
+        return Convert.ToBase64String(hash);
+    }
+
     public async Task<VerifyOtpResponseDto> VerifyOtpAsync(VerifyOtpRequestDto request)
     {
         var mobileNumber = NormalizeRequired(request.Mobile, "Mobile number");
         var otpCode = NormalizeRequired(request.Otp, "OTP");
+        var normalizedMobile = NormalizeLocalPhoneNumber(mobileNumber);
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync();
 
@@ -243,7 +563,7 @@ public class AuthService : IAuthService
         {
             var otp = await _dbContext.OtpVerifications
                 .Where(o =>
-                    o.MobileNumber == mobileNumber &&
+                    o.MobileNumber == normalizedMobile &&
                     o.OtpCode == otpCode &&
                     !o.IsUsed &&
                     o.ExpiresAt >= DateTime.UtcNow)
@@ -422,5 +742,47 @@ public class AuthService : IAuthService
     {
         var normalized = value?.Trim();
         return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
+
+    private static string NormalizePhoneNumber(string phone)
+    {
+        var digits = Regex.Replace(phone, "[^0-9]", string.Empty);
+        if (digits.StartsWith("0"))
+        {
+            digits = digits.TrimStart('0');
+        }
+
+        if (digits.Length == 10)
+        {
+            return $"+91{digits}";
+        }
+
+        if (digits.StartsWith("91") && digits.Length == 12)
+        {
+            return $"+{digits}";
+        }
+
+        if (phone.StartsWith("+") && digits.Length >= 10)
+        {
+            return $"+{digits}";
+        }
+
+        throw new Exception("Invalid phone number format. Provide a valid 10-digit or E.164 phone number.");
+    }
+
+    private static string NormalizeLocalPhoneNumber(string phone)
+    {
+        var digits = Regex.Replace(phone, "[^0-9]", string.Empty);
+        if (digits.StartsWith("91") && digits.Length == 12)
+        {
+            digits = digits.Substring(2);
+        }
+
+        if (digits.Length == 10)
+        {
+            return digits;
+        }
+
+        throw new Exception("Mobile number must be exactly 10 digits after removing country code.");
     }
 }

@@ -8,7 +8,7 @@ public class RegisterRequestDto
     [MaxLength(100)]
     public string Name { get; set; } = string.Empty;
 
-    [Required]
+    [Required(ErrorMessage = "Mobile number is required")]
     [RegularExpression(@"^\d{10}$", ErrorMessage = "Mobile number must be 10 digits")]
     public string Mobile { get; set; } = string.Empty;
 

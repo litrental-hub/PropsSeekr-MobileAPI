@@ -16,6 +16,79 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 // Database
+<<<<<<< Updated upstream
+=======
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+Console.WriteLine("=================================");
+Console.WriteLine("Connection String:");
+Console.WriteLine(connectionString);
+Console.WriteLine("=================================");
+if (connectionString != null)
+{
+    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
+}
+
+var secretName = builder.Configuration["AWS:DatabaseSecretName"];
+if (!string.IsNullOrWhiteSpace(secretName))
+{
+    try
+    {
+        var region = builder.Configuration["AWS:Region"] ?? "ap-south-1";
+        var accessKey = builder.Configuration["AWS:AccessKeyId"];
+        var secretKey = builder.Configuration["AWS:SecretAccessKey"];
+
+        IAmazonSecretsManager secretsClient;
+        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
+        {
+            secretsClient = new AmazonSecretsManagerClient(accessKey, secretKey, RegionEndpoint.GetBySystemName(region));
+        }
+        else
+        {
+            secretsClient = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
+        }
+
+        var request = new GetSecretValueRequest { SecretId = secretName };
+        var response = secretsClient.GetSecretValueAsync(request).GetAwaiter().GetResult();
+        if (response?.SecretString != null)
+        {
+            var secretString = response.SecretString;
+            string? dbPassword = null;
+            try
+            {
+                using var doc = JsonDocument.Parse(secretString);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("password", out var pwdProp))
+                {
+                    dbPassword = pwdProp.GetString();
+                
+                }
+                else if (root.TryGetProperty("ConnectionString", out var connProp))
+                {
+                    connectionString = connProp.GetString();
+                }
+            }
+            catch
+            {
+                dbPassword = secretString;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dbPassword) && connectionString != null)
+            {
+                var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString)
+                {
+                    Password = dbPassword
+                };
+                connectionString = connBuilder.ToString();
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Secrets Manager Error] Failed to fetch database credentials: {ex.Message}");
+    }
+}
+
+>>>>>>> Stashed changes
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection"),
@@ -81,10 +154,54 @@ builder.Services.AddSwaggerGen(options =>
     });
 });
 
-// JWT Authentication setup
+// JWT / Cognito Authentication setup
+var cognitoAuthority = builder.Configuration["Cognito:Authority"];
+var cognitoClientId = builder.Configuration["Cognito:UserPoolClientId"];
+var useCognito = builder.Configuration.GetValue<bool?>("Cognito:UseCognito") ?? false;
 var jwtKey = builder.Configuration["Jwt:Key"];
-if (!string.IsNullOrEmpty(jwtKey))
+
+if (useCognito && !string.IsNullOrEmpty(cognitoAuthority) && !string.IsNullOrEmpty(cognitoClientId))
 {
+    builder.Services.AddAuthentication(options =>
+    {
+        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    }).AddJwtBearer(options =>
+    {
+        options.Authority = cognitoAuthority;
+        options.Audience = cognitoClientId;
+        options.RequireHttpsMetadata = true;
+
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = cognitoAuthority,
+            ValidateAudience = true,
+            ValidAudience = cognitoClientId,
+            ValidateLifetime = true,
+            RoleClaimType = "cognito:groups",
+            NameClaimType = "cognito:username"
+        };
+
+        options.Events = new JwtBearerEvents
+        {
+            OnAuthenticationFailed = ctx =>
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return Task.CompletedTask;
+            },
+            OnTokenValidated = ctx =>
+            {
+                // Additional app-specific token checks could be done here,
+                // e.g. verify custom claim presence, enforce scopes, etc.
+                return Task.CompletedTask;
+            }
+        };
+    });
+}
+else if (!string.IsNullOrEmpty(jwtKey))
+{
+    // Fallback to legacy symmetric key JWT validation (kept for compatibility/testing)
     builder.Services.AddAuthentication(options =>
     {
         options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
@@ -121,7 +238,14 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    dbContext.Database.Migrate();
+    try
+    {
+        dbContext.Database.Migrate();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "Database migrations failed during startup. The API will continue running, but database-backed endpoints may fail until the database is available.");
+    }
 }
 
 var webRootPath = app.Environment.WebRootPath;
