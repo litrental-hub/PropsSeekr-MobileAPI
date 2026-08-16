@@ -56,16 +56,6 @@ namespace PropSeekr.Migrations
 
                     b.ToTable("AdminUsers");
 
-                    b.HasData(
-                        new
-                        {
-                            Id = new Guid("b0ef71c1-13ab-4070-9d85-86571adf59c8"),
-                            CreatedDate = new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc),
-                            IsActive = true,
-                            ModifiedDate = new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc),
-                            PasswordHash = "PBKDF2-SHA256$100000$LVJ7kAGk7zNsEMneVYpBfyC8ZPENOZviao1yEc2gT1s=$hjnNN2d8W2s5SBkDGTAb+ct2M9qD+Csk7rNkZs9hlaM=",
-                            UserName = "admin"
-                        });
                 });
 
             modelBuilder.Entity("PropSeekr.Models.EmailOtpRecord", b =>
@@ -115,6 +105,47 @@ namespace PropSeekr.Migrations
                     b.HasIndex("Email", "Purpose", "IsUsed", "ExpiresAt");
 
                     b.ToTable("EmailOtpRecords");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.AppAttestationChallenge", b =>
+                {
+                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("uuid");
+                    b.Property<DateTime>("CreatedAt").HasColumnType("timestamp with time zone");
+                    b.Property<DateTime>("ExpiresAt").HasColumnType("timestamp with time zone");
+                    b.Property<string>("Nonce").IsRequired().HasMaxLength(128).HasColumnType("character varying(128)");
+                    b.Property<string>("Platform").IsRequired().HasMaxLength(20).HasColumnType("character varying(20)");
+                    b.Property<string>("Purpose").IsRequired().HasMaxLength(50).HasColumnType("character varying(50)");
+                    b.Property<DateTime?>("UsedAt").HasColumnType("timestamp with time zone");
+                    b.Property<Guid>("UserId").HasColumnType("uuid");
+                    b.Property<DateTime?>("VerifiedAt").HasColumnType("timestamp with time zone");
+                    b.Property<string>("VerifiedPlatform").HasMaxLength(20).HasColumnType("character varying(20)");
+                    b.Property<string>("VerifiedRequestHash").HasMaxLength(64).HasColumnType("character varying(64)");
+                    b.HasKey("Id");
+                    b.HasIndex("Nonce").IsUnique();
+                    b.HasIndex("UserId", "Purpose", "ExpiresAt");
+                    b.ToTable("AppAttestationChallenges");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.TrustedAppInstance", b =>
+                {
+                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("uuid");
+                    b.Property<string>("AppVersion").HasMaxLength(50).HasColumnType("character varying(50)");
+                    b.Property<long>("AssertionCounter").HasColumnType("bigint");
+                    b.Property<DateTime>("CreatedAt").HasColumnType("timestamp with time zone");
+                    b.Property<string>("Environment").HasMaxLength(50).HasColumnType("character varying(50)");
+                    b.Property<bool>("IsRevoked").HasColumnType("boolean");
+                    b.Property<string>("KeyId").IsRequired().HasMaxLength(255).HasColumnType("character varying(255)");
+                    b.Property<DateTime?>("LastSeenAt").HasColumnType("timestamp with time zone");
+                    b.Property<string>("Platform").IsRequired().HasMaxLength(20).HasColumnType("character varying(20)");
+                    b.Property<string>("PublicKeySpkiBase64").HasColumnType("text");
+                    b.Property<DateTime?>("RevokedAt").HasColumnType("timestamp with time zone");
+                    b.Property<string>("Status").IsRequired().HasMaxLength(50).HasColumnType("character varying(50)");
+                    b.Property<DateTime>("UpdatedAt").HasColumnType("timestamp with time zone");
+                    b.Property<Guid>("UserId").HasColumnType("uuid");
+                    b.HasKey("Id");
+                    b.HasIndex("Platform", "KeyId").IsUnique();
+                    b.HasIndex("UserId");
+                    b.ToTable("TrustedAppInstances");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.OtpVerification", b =>
@@ -384,6 +415,10 @@ namespace PropSeekr.Migrations
                     b.Property<int>("Credits")
                         .HasColumnType("integer");
 
+                    b.Property<string>("CognitoSubject")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.Property<string>("Email")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
@@ -431,6 +466,9 @@ namespace PropSeekr.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AadharNumber")
+                        .IsUnique();
+
+                    b.HasIndex("CognitoSubject")
                         .IsUnique();
 
                     b.HasIndex("MobileNumber")

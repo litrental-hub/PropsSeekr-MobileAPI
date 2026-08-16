@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PropSeekr.DTOs.Inventory;
@@ -7,20 +6,23 @@ using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Controllers;
 
-[Authorize]
+[Authorize(Policy = "CustomerPolicy")]
 [ApiController]
 [Route("api/v1/property-inventory")]
 public class PropertyInventoryController : ControllerBase
 {
     private readonly IPropertyInventoryService _propertyInventoryService;
     private readonly ILogger<PropertyInventoryController> _logger;
+    private readonly ICurrentUserContext _currentUser;
 
     public PropertyInventoryController(
         IPropertyInventoryService propertyInventoryService,
-        ILogger<PropertyInventoryController> logger)
+        ILogger<PropertyInventoryController> logger,
+        ICurrentUserContext currentUser)
     {
         _propertyInventoryService = propertyInventoryService;
         _logger = logger;
+        _currentUser = currentUser;
     }
 
     [HttpGet("my-listings")]
@@ -74,7 +76,6 @@ public class PropertyInventoryController : ControllerBase
 
     private bool TryGetCurrentUserId(out Guid userId)
     {
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return Guid.TryParse(userIdClaim, out userId);
+        return _currentUser.TryGetLocalUserId(out userId);
     }
 }

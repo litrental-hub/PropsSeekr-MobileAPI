@@ -1,10 +1,12 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Claims;
 using Amazon;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
@@ -12,6 +14,7 @@ using Microsoft.OpenApi.Models;
 using PropSeekr.Data;
 using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
+using PropSeekr.Authorization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,70 +22,40 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
-// Database
+// Local development can supply ConnectionStrings:DefaultConnection through User Secrets or an
+// environment variable. All other deployments obtain it from AWS Secrets Manager.
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-if (connectionString != null)
+if (string.IsNullOrWhiteSpace(connectionString))
 {
-    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
-}
+    var secretName = builder.Configuration["AWS:DatabaseSecretName"];
+    if (string.IsNullOrWhiteSpace(secretName))
+    {
+        throw new InvalidOperationException(
+            "Configure ConnectionStrings:DefaultConnection through User Secrets/environment for local development, " +
+            "or configure AWS:DatabaseSecretName for AWS Secrets Manager.");
+    }
 
-var secretName = builder.Configuration["AWS:DatabaseSecretName"];
-if (!string.IsNullOrWhiteSpace(secretName))
-{
+    var region = builder.Configuration["AWS:Region"] ?? "ap-south-1";
+    using var secretsClient = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
+    var secretResponse = secretsClient.GetSecretValueAsync(new GetSecretValueRequest { SecretId = secretName }).GetAwaiter().GetResult();
+    var secretString = secretResponse.SecretString ?? throw new InvalidOperationException("The database secret does not contain a SecretString.");
+
     try
     {
-        var region = builder.Configuration["AWS:Region"] ?? "ap-south-1";
-        var accessKey = builder.Configuration["AWS:AccessKeyId"];
-        var secretKey = builder.Configuration["AWS:SecretAccessKey"];
-
-        IAmazonSecretsManager secretsClient;
-        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
-        {
-            secretsClient = new AmazonSecretsManagerClient(accessKey, secretKey, RegionEndpoint.GetBySystemName(region));
-        }
-        else
-        {
-            secretsClient = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
-        }
-
-        var request = new GetSecretValueRequest { SecretId = secretName };
-        var response = secretsClient.GetSecretValueAsync(request).GetAwaiter().GetResult();
-        if (response?.SecretString != null)
-        {
-            var secretString = response.SecretString;
-            string? dbPassword = null;
-            try
-            {
-                using var doc = JsonDocument.Parse(secretString);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("password", out var pwdProp))
-                {
-                    dbPassword = pwdProp.GetString();
-                }
-                else if (root.TryGetProperty("ConnectionString", out var connProp))
-                {
-                    connectionString = connProp.GetString();
-                }
-            }
-            catch
-            {
-                dbPassword = secretString;
-            }
-
-            if (!string.IsNullOrWhiteSpace(dbPassword) && connectionString != null)
-            {
-                var connBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString)
-                {
-                    Password = dbPassword
-                };
-                connectionString = connBuilder.ToString();
-            }
-        }
+        using var document = JsonDocument.Parse(secretString);
+        connectionString = document.RootElement.TryGetProperty("ConnectionString", out var connectionStringProperty)
+            ? connectionStringProperty.GetString()
+            : null;
     }
-    catch (Exception ex)
+    catch (JsonException)
     {
-        Console.WriteLine($"[Secrets Manager Error] Failed to fetch database credentials: {ex.Message}");
+        connectionString = secretString;
     }
+}
+
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException("The database secret must contain a complete connection string.");
 }
 
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -92,6 +65,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Services
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient("PlayIntegrity", client => client.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IOtpDeliveryService, Msg91OtpDeliveryService>();
 builder.Services.AddScoped<IEmailService, AmazonSesEmailService>();
 builder.Services.AddScoped<IEmailOtpService, EmailOtpService>();
@@ -101,8 +76,46 @@ builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
 builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>();
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
+builder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
+builder.Services.AddScoped<IAppAttestationService, AppAttestationService>();
+builder.Services.AddScoped<IAuthorizationHandler, AppAttestationAuthorizationHandler>();
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("CustomerPolicy", policy =>
+    {
+        policy.AddAuthenticationSchemes("Cognito");
+        policy.RequireAuthenticatedUser();
+    });
+
+    options.AddPolicy("AdminPolicy", policy =>
+    {
+        policy.AddAuthenticationSchemes("AdminJwt");
+        policy.RequireAuthenticatedUser();
+        policy.RequireRole("Admin");
+    });
+
+    options.AddPolicy("AppAttestedSensitiveActionPolicy", policy =>
+    {
+        policy.AddAuthenticationSchemes("Cognito");
+        policy.RequireAuthenticatedUser();
+        policy.AddRequirements(new AppAttestationRequirement());
+    });
+});
+
+var attestationMode = builder.Configuration["AppAttestation:EnforcementMode"] ?? "Enforce";
+if (attestationMode is not ("ReportOnly" or "Enforce"))
+{
+    throw new InvalidOperationException("AppAttestation:EnforcementMode must be ReportOnly or Enforce.");
+}
+if (builder.Environment.IsProduction() && !string.Equals(attestationMode, "Enforce", StringComparison.Ordinal))
+{
+    throw new InvalidOperationException("App attestation must be enforced in production.");
+}
+if (builder.Environment.IsProduction() && !builder.Configuration.GetValue<bool>("AppAttestation:Enabled"))
+{
+    throw new InvalidOperationException("App attestation must be enabled in production.");
+}
 
 // Rate Limiter for OTP Endpoints
 builder.Services.AddRateLimiter(options =>
@@ -155,67 +168,122 @@ var cognitoAuthority = builder.Configuration["Cognito:Authority"];
 var cognitoClientId = builder.Configuration["Cognito:UserPoolClientId"];
 var useCognito = builder.Configuration.GetValue<bool?>("Cognito:UseCognito") ?? false;
 var jwtKey = builder.Configuration["Jwt:Key"];
+var jwtIssuer = builder.Configuration["Jwt:Issuer"];
+var jwtAudience = builder.Configuration["Jwt:Audience"];
 
-if (useCognito && !string.IsNullOrEmpty(cognitoAuthority) && !string.IsNullOrEmpty(cognitoClientId))
+if (!useCognito || string.IsNullOrWhiteSpace(cognitoAuthority) || string.IsNullOrWhiteSpace(cognitoClientId))
 {
-    builder.Services.AddAuthentication(options =>
-    {
-        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-    }).AddJwtBearer(options =>
-    {
-        options.Authority = cognitoAuthority;
-        options.Audience = cognitoClientId;
-        options.RequireHttpsMetadata = true;
+    throw new InvalidOperationException("Cognito customer authentication must be enabled and configured with Authority and UserPoolClientId.");
+}
 
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuer = cognitoAuthority,
-            ValidateAudience = true,
-            ValidAudience = cognitoClientId,
-            ValidateLifetime = true,
-            RoleClaimType = "cognito:groups",
-            NameClaimType = "cognito:username"
-        };
+if (!Uri.TryCreate(cognitoAuthority, UriKind.Absolute, out var cognitoAuthorityUri) || cognitoAuthorityUri.Scheme != Uri.UriSchemeHttps)
+{
+    throw new InvalidOperationException("Cognito:Authority must be an HTTPS absolute URI.");
+}
 
-        options.Events = new JwtBearerEvents
+if (string.IsNullOrWhiteSpace(jwtKey) || string.IsNullOrWhiteSpace(jwtIssuer) || string.IsNullOrWhiteSpace(jwtAudience))
+{
+    throw new InvalidOperationException("Jwt:Key, Jwt:Issuer, and Jwt:Audience must be configured for AdminJwt authentication.");
+}
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = "Cognito";
+    options.DefaultChallengeScheme = "Cognito";
+})
+.AddJwtBearer("Cognito", options =>
+{
+    options.Authority = cognitoAuthority;
+    options.RequireHttpsMetadata = true;
+    options.MapInboundClaims = false;
+
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidIssuer = cognitoAuthority,
+        ValidateAudience = false,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        RoleClaimType = "cognito:groups",
+        NameClaimType = "cognito:username"
+    };
+
+    options.Events = new JwtBearerEvents
+    {
+        OnAuthenticationFailed = ctx =>
         {
-            OnAuthenticationFailed = ctx =>
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        },
+        OnTokenValidated = async ctx =>
+        {
+            var clientId = ctx.Principal?.FindFirst("client_id")?.Value;
+            if (string.IsNullOrWhiteSpace(clientId) || !string.Equals(clientId, cognitoClientId, StringComparison.Ordinal))
             {
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                return Task.CompletedTask;
-            },
-            OnTokenValidated = ctx =>
-            {
-                // Additional app-specific token checks could be done here,
-                // e.g. verify custom claim presence, enforce scopes, etc.
-                return Task.CompletedTask;
+                ctx.Fail("Token was not issued for this client.");
+                return;
             }
-        };
-    });
-}
-else if (!string.IsNullOrEmpty(jwtKey))
+
+            var tokenUse = ctx.Principal?.FindFirst("token_use")?.Value;
+            if (!string.Equals(tokenUse, "access", StringComparison.Ordinal))
+            {
+                ctx.Fail("Only access tokens are accepted.");
+                return;
+            }
+
+            var subject = ctx.Principal?.FindFirst("sub")?.Value;
+            var username = ctx.Principal?.FindFirst("username")?.Value;
+            if (string.IsNullOrWhiteSpace(subject) || string.IsNullOrWhiteSpace(username))
+            {
+                ctx.Fail("Cognito access token does not contain the required subject or username claim.");
+                return;
+            }
+
+            var dbContext = ctx.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+            var user = await dbContext.Users.FirstOrDefaultAsync(user => user.CognitoSubject == subject);
+            if (user == null)
+            {
+                user = await dbContext.Users.FirstOrDefaultAsync(user => user.Email != null && user.Email.ToLower() == username.ToLower());
+                if (user != null && string.IsNullOrWhiteSpace(user.CognitoSubject))
+                {
+                    user.CognitoSubject = subject;
+                    user.ModifiedDate = DateTime.UtcNow;
+                    await dbContext.SaveChangesAsync();
+                }
+            }
+
+            if (user == null)
+            {
+                ctx.Fail("No local profile is associated with this Cognito subject.");
+                return;
+            }
+
+            ((ClaimsIdentity)ctx.Principal!.Identity!).AddClaim(new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()));
+        }
+    };
+})
+.AddJwtBearer("AdminJwt", options =>
 {
-    // Fallback to legacy symmetric key JWT validation (kept for compatibility/testing)
-    builder.Services.AddAuthentication(options =>
+    options.TokenValidationParameters = new TokenValidationParameters
     {
-        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-    }).AddJwtBearer(options =>
+        ValidateIssuer = true,
+        ValidIssuer = jwtIssuer,
+        ValidateAudience = true,
+        ValidAudience = jwtAudience,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey ?? string.Empty))
+    };
+
+    options.Events = new JwtBearerEvents
     {
-        options.TokenValidationParameters = new TokenValidationParameters
+        OnAuthenticationFailed = ctx =>
         {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-        };
-    });
-}
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        }
+    };
+});
 
 // CORS setup for frontend
 builder.Services.AddCors(options =>

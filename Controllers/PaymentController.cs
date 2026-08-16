@@ -1,8 +1,8 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PropSeekr.DTOs.Payment;
 using PropSeekr.Services.Interfaces;
+using PropSeekr.Authorization;
 
 namespace PropSeekr.Controllers;
 
@@ -12,16 +12,21 @@ public class PaymentController : ControllerBase
 {
     private readonly IRazorpayService _razorpayService;
     private readonly ILogger<PaymentController> _logger;
+    private readonly ICurrentUserContext _currentUser;
 
     public PaymentController(
         IRazorpayService razorpayService,
-        ILogger<PaymentController> logger)
+        ILogger<PaymentController> logger,
+        ICurrentUserContext currentUser)
     {
         _razorpayService = razorpayService;
         _logger = logger;
+        _currentUser = currentUser;
     }
 
-    [Authorize]
+    [Authorize(Policy = "CustomerPolicy")]
+    [Authorize(Policy = "AppAttestedSensitiveActionPolicy")]
+    [AppAttestationPurpose("PaymentOrder")]
     [HttpPost("order")]
     public async Task<IActionResult> CreateOrder([FromBody] CreateOrderRequestDto request)
     {
@@ -46,7 +51,9 @@ public class PaymentController : ControllerBase
         }
     }
 
-    [Authorize]
+    [Authorize(Policy = "CustomerPolicy")]
+    [Authorize(Policy = "AppAttestedSensitiveActionPolicy")]
+    [AppAttestationPurpose("PaymentVerify")]
     [HttpPost("verify")]
     public async Task<IActionResult> VerifyPayment([FromBody] VerifyPaymentRequestDto request)
     {
@@ -107,7 +114,6 @@ public class PaymentController : ControllerBase
 
     private bool TryGetCurrentUserId(out Guid userId)
     {
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return Guid.TryParse(userIdClaim, out userId);
+        return _currentUser.TryGetLocalUserId(out userId);
     }
 }

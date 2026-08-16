@@ -59,16 +59,6 @@ namespace PropSeekr.Migrations
 
                     b.ToTable("AdminUsers");
 
-                    b.HasData(
-                        new
-                        {
-                            Id = new Guid("b0ef71c1-13ab-4070-9d85-86571adf59c8"),
-                            CreatedDate = new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc),
-                            IsActive = true,
-                            ModifiedDate = new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc),
-                            PasswordHash = "PBKDF2-SHA256$100000$LVJ7kAGk7zNsEMneVYpBfyC8ZPENOZviao1yEc2gT1s=$hjnNN2d8W2s5SBkDGTAb+ct2M9qD+Csk7rNkZs9hlaM=",
-                            UserName = "admin"
-                        });
                 });
 
             modelBuilder.Entity("PropSeekr.Models.EmailOtpRecord", b =>

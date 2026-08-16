@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Services.Interfaces;
 
@@ -48,6 +49,7 @@ public class AuthController : ControllerBase
         }
     }
 
+    [EnableRateLimiting("OtpPolicy")]
     [HttpPost("send-email-otp")]
     public async Task<IActionResult> SendEmailOtp([FromBody] SendEmailOtpRequestDto request)
     {
@@ -63,6 +65,7 @@ public class AuthController : ControllerBase
         }
     }
 
+    [EnableRateLimiting("OtpPolicy")]
     [HttpPost("verify-email-otp")]
     public async Task<IActionResult> VerifyEmailOtp([FromBody] VerifyEmailOtpRequestDto request)
     {
@@ -78,6 +81,7 @@ public class AuthController : ControllerBase
         }
     }
 
+    [EnableRateLimiting("OtpPolicy")]
     [HttpPost("send-otp")]
     public async Task<IActionResult> SendOtp([FromBody] SendOtpRequestDto request)
     {
@@ -92,6 +96,7 @@ public class AuthController : ControllerBase
         }
     }
 
+    [EnableRateLimiting("OtpPolicy")]
     [HttpPost("verify-otp")]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequestDto request)
     {
@@ -106,6 +111,7 @@ public class AuthController : ControllerBase
         }
     }
 
+    [EnableRateLimiting("OtpPolicy")]
     [HttpPost("resend-otp")]
     public async Task<IActionResult> ResendOtp([FromBody] SendOtpRequestDto request)
     {
@@ -120,7 +126,7 @@ public class AuthController : ControllerBase
         }
     }
 
-    [Authorize]
+    [Authorize(Policy = "CustomerPolicy")]
     [HttpPost("logout")]
     public async Task<IActionResult> Logout()
     {

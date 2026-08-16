@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PropSeekr.DTOs.Profile;
@@ -6,16 +5,18 @@ using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Controllers;
 
-[Authorize]
+[Authorize(Policy = "CustomerPolicy")]
 [ApiController]
 [Route("api/v1/profile")]
 public class ProfileController : ControllerBase
 {
     private readonly IProfileService _profileService;
+    private readonly ICurrentUserContext _currentUser;
 
-    public ProfileController(IProfileService profileService)
+    public ProfileController(IProfileService profileService, ICurrentUserContext currentUser)
     {
         _profileService = profileService;
+        _currentUser = currentUser;
     }
 
     [HttpGet]
@@ -101,8 +102,6 @@ public class ProfileController : ControllerBase
 
     private bool TryGetCurrentUserId(out Guid userId)
     {
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-        return Guid.TryParse(userIdClaim, out userId);
+        return _currentUser.TryGetLocalUserId(out userId);
     }
 }

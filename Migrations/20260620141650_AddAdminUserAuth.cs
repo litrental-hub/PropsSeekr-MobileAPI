@@ -27,11 +27,6 @@ namespace PropSeekr.Migrations
                     table.PrimaryKey("PK_AdminUsers", x => x.Id);
                 });
 
-            migrationBuilder.InsertData(
-                table: "AdminUsers",
-                columns: new[] { "Id", "CreatedDate", "IsActive", "ModifiedDate", "PasswordHash", "UserName" },
-                values: new object[] { new Guid("b0ef71c1-13ab-4070-9d85-86571adf59c8"), new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc), true, new DateTime(2026, 6, 20, 0, 0, 0, 0, DateTimeKind.Utc), "PBKDF2-SHA256$100000$LVJ7kAGk7zNsEMneVYpBfyC8ZPENOZviao1yEc2gT1s=$hjnNN2d8W2s5SBkDGTAb+ct2M9qD+Csk7rNkZs9hlaM=", "admin" });
-
             migrationBuilder.CreateIndex(
                 name: "IX_AdminUsers_UserName",
                 table: "AdminUsers",

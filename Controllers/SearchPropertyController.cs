@@ -12,24 +12,26 @@ public class SearchPropertyController : ControllerBase
 {
     private readonly ISearchPropertyService _searchPropertyService;
     private readonly ILogger<SearchPropertyController> _logger;
+    private readonly ICurrentUserContext _currentUser;
 
     public SearchPropertyController(
         ISearchPropertyService searchPropertyService,
-        ILogger<SearchPropertyController> logger)
+        ILogger<SearchPropertyController> logger,
+        ICurrentUserContext currentUser)
     {
         _searchPropertyService = searchPropertyService;
         _logger = logger;
+        _currentUser = currentUser;
     }
 
     [HttpPost("properties")]
-    [Authorize]
+    [Authorize(Policy = "CustomerPolicy")]
     public async Task<IActionResult> SearchProperties(
         [FromBody] SearchPropertyRequestDto request)
     {
         try
         {
-            var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier);
-            if (userIdClaim == null || !Guid.TryParse(userIdClaim.Value, out var userId))
+            if (!_currentUser.TryGetLocalUserId(out var userId))
             {
                 return Unauthorized(new { message = "Invalid user" });
             }

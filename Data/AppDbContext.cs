@@ -6,10 +6,6 @@ namespace PropSeekr.Data;
 
 public class AppDbContext : DbContext
 {
-    private static readonly Guid SeedAdminId = Guid.Parse("b0ef71c1-13ab-4070-9d85-86571adf59c8");
-    private static readonly DateTime SeedAdminCreatedDate = new(2026, 6, 20, 0, 0, 0, DateTimeKind.Utc);
-    private const string SeedAdminPasswordHash = "PBKDF2-SHA256$100000$LVJ7kAGk7zNsEMneVYpBfyC8ZPENOZviao1yEc2gT1s=$hjnNN2d8W2s5SBkDGTAb+ct2M9qD+Csk7rNkZs9hlaM=";
-
     public AppDbContext(DbContextOptions<AppDbContext> options)
         : base(options)
     {
@@ -22,6 +18,8 @@ public class AppDbContext : DbContext
     public DbSet<PropertyRequest> PropertyRequests => Set<PropertyRequest>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<UnlockedProperty> UnlockedProperties => Set<UnlockedProperty>();
+    public DbSet<TrustedAppInstance> TrustedAppInstances => Set<TrustedAppInstance>();
+    public DbSet<AppAttestationChallenge> AppAttestationChallenges => Set<AppAttestationChallenge>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -37,20 +35,27 @@ public class AppDbContext : DbContext
             .HasIndex(u => u.PanCard)
             .IsUnique();
 
-        modelBuilder.Entity<AdminUser>()
-            .HasIndex(a => a.UserName)
+        modelBuilder.Entity<User>()
+            .HasIndex(u => u.CognitoSubject)
+            .IsUnique();
+
+        modelBuilder.Entity<TrustedAppInstance>()
+            .HasIndex(instance => new { instance.Platform, instance.KeyId })
+            .IsUnique();
+
+        modelBuilder.Entity<TrustedAppInstance>()
+            .HasIndex(instance => instance.UserId);
+
+        modelBuilder.Entity<AppAttestationChallenge>()
+            .HasIndex(challenge => new { challenge.UserId, challenge.Purpose, challenge.ExpiresAt });
+
+        modelBuilder.Entity<AppAttestationChallenge>()
+            .HasIndex(challenge => challenge.Nonce)
             .IsUnique();
 
         modelBuilder.Entity<AdminUser>()
-            .HasData(new AdminUser
-            {
-                Id = SeedAdminId,
-                UserName = "admin",
-                PasswordHash = SeedAdminPasswordHash,
-                IsActive = true,
-                CreatedDate = SeedAdminCreatedDate,
-                ModifiedDate = SeedAdminCreatedDate
-            });
+            .HasIndex(a => a.UserName)
+            .IsUnique();
 
         modelBuilder.Entity<OtpVerification>()
             .HasIndex(o => new { o.MobileNumber, o.OtpCode });

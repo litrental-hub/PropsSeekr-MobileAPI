@@ -1,25 +1,28 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Services.Interfaces;
+using PropSeekr.Authorization;
 
 namespace PropSeekr.Controllers;
 
-[Authorize]
+[Authorize(Policy = "CustomerPolicy")]
 [ApiController]
 [Route("api/v1/user-matches")]
 public class UserMatchesController : ControllerBase
 {
     private readonly IUserMatchesService _userMatchesService;
     private readonly ILogger<UserMatchesController> _logger;
+    private readonly ICurrentUserContext _currentUser;
 
     public UserMatchesController(
         IUserMatchesService userMatchesService,
-        ILogger<UserMatchesController> logger)
+        ILogger<UserMatchesController> logger,
+        ICurrentUserContext currentUser)
     {
         _userMatchesService = userMatchesService;
         _logger = logger;
+        _currentUser = currentUser;
     }
 
     [HttpGet]
@@ -47,6 +50,8 @@ public class UserMatchesController : ControllerBase
     }
 
     [HttpPost("unlock")]
+    [Authorize(Policy = "AppAttestedSensitiveActionPolicy")]
+    [AppAttestationPurpose("PropertyUnlock")]
     public async Task<IActionResult> UnlockProperty([FromBody] UnlockPropertyRequestDto request)
     {
         if (!TryGetCurrentUserId(out var userId))
@@ -96,7 +101,6 @@ public class UserMatchesController : ControllerBase
 
     private bool TryGetCurrentUserId(out Guid userId)
     {
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return Guid.TryParse(userIdClaim, out userId);
+        return _currentUser.TryGetLocalUserId(out userId);
     }
 }

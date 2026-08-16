@@ -18,10 +18,6 @@ namespace PropSeekr.Services;
 
 public class AuthService : IAuthService
 {
-    private const int PasswordSaltSize = 16;
-    private const int PasswordHashSize = 32;
-    private const int PasswordHashIterations = 100000;
-
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly IOtpDeliveryService _otpDeliveryService;
@@ -168,41 +164,7 @@ public class AuthService : IAuthService
             }
         }
 
-        // If Cognito is not configured, fall back to legacy local registration
-        await using var tx2 = await _dbContext.Database.BeginTransactionAsync();
-
-        var passwordHashFallback = HashPassword(password);
-
-        var localUser = new User
-        {
-            Id = Guid.NewGuid(),
-            Name = name,
-            MobileNumber = mobile,
-            Email = email,
-            PasswordHash = passwordHashFallback,
-            AadharNumber = aadharNumber,
-            PanCard = panCard,
-            GSTNumber = gstNumber,
-            ReraRegistrationNumber = reraRegistrationNumber,
-            IsMobileVerified = false,
-            IsEmailVerified = false,
-            Credits = 0,
-            CreatedDate = DateTime.UtcNow,
-            ModifiedDate = DateTime.UtcNow
-        };
-
-        _dbContext.Users.Add(localUser);
-        await _dbContext.SaveChangesAsync();
-
-        await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
-
-        await tx2.CommitAsync();
-
-        return new RegisterResponseDto
-        {
-            UserId = localUser.Id,
-            Message = "Registration successful (local fallback)."
-        };
+        throw new InvalidOperationException("Cognito customer authentication is required.");
     }
 
     public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
@@ -306,41 +268,7 @@ public class AuthService : IAuthService
             }
         }
 
-        // Fallback to legacy local auth if Cognito is not configured
-        var identifierNormalized = identifier;
-        if (Regex.IsMatch(identifier, "^\\+?91\\d{10}$") || Regex.IsMatch(identifier, "^\\d{10}$"))
-        {
-            identifierNormalized = NormalizeLocalPhoneNumber(identifier);
-        }
-
-        var userLocal = await _dbContext.Users.FirstOrDefaultAsync(u =>
-            u.MobileNumber == identifierNormalized || (u.Email != null && u.Email.ToLower() == identifier));
-
-        if (userLocal == null || !VerifyPassword(password, userLocal.PasswordHash))
-        {
-            throw new Exception("Invalid mobile number/email or password.");
-        }
-
-        var tokenLocal = GenerateJwtToken(userLocal, out var expiresAtLocal);
-        var refreshTokenLocal = GenerateRefreshToken();
-
-        return new LoginResponseDto
-        {
-            Success = true,
-            Message = "Login successful.",
-            Token = tokenLocal,
-            RefreshToken = refreshTokenLocal,
-            ExpiresAt = expiresAtLocal,
-            User = new AuthenticatedUserDto
-            {
-                Id = userLocal.Id,
-                Name = userLocal.Name,
-                MobileNumber = userLocal.MobileNumber,
-                Email = userLocal.Email,
-                IsMobileVerified = userLocal.IsMobileVerified,
-                Credits = userLocal.Credits
-            }
-        };
+        throw new InvalidOperationException("Cognito customer authentication is required.");
     }
 
     public async Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request)
@@ -443,15 +371,6 @@ public class AuthService : IAuthService
     private AmazonCognitoIdentityProviderClient CreateCognitoClient()
     {
         var region = _configuration["Cognito:Region"] ?? _configuration["AWS:Region"] ?? "";
-        var accessKey = _configuration["AWS:AccessKeyId"];
-        var secretKey = _configuration["AWS:SecretAccessKey"];
-
-        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
-        {
-            var creds = new Amazon.Runtime.BasicAWSCredentials(accessKey, secretKey);
-            return new AmazonCognitoIdentityProviderClient(creds, RegionEndpoint.GetBySystemName(region));
-        }
-
         return new AmazonCognitoIdentityProviderClient(RegionEndpoint.GetBySystemName(region));
     }
 
@@ -516,7 +435,7 @@ public class AuthService : IAuthService
             otp.IsUsed = true;
             await _dbContext.SaveChangesAsync();
 
-            var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
+            var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == normalizedMobile);
 
             if (user == null)
             {
@@ -529,12 +448,10 @@ public class AuthService : IAuthService
             await _dbContext.SaveChangesAsync();
             await transaction.CommitAsync();
 
-            var token = GenerateJwtToken(user, out var expiresAt);
-
             return new VerifyOtpResponseDto
             {
-                Token = token,
-                ExpiresAt = expiresAt,
+                Token = string.Empty,
+                ExpiresAt = DateTime.UtcNow,
                 UserId = user.Id,
                 UserName = user.Name
             };
@@ -544,38 +461,6 @@ public class AuthService : IAuthService
             await transaction.RollbackAsync();
             throw;
         }
-    }
-
-    private string GenerateJwtToken(User user, out DateTime expiresAt)
-    {
-        var jwtKey = _configuration["Jwt:Key"];
-        if (string.IsNullOrEmpty(jwtKey))
-        {
-            throw new InvalidOperationException("Jwt:Key is not configured.");
-        }
-
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var expiresMinutes = _configuration.GetValue<int>("Jwt:ExpiresMinutes", 60);
-        expiresAt = DateTime.UtcNow.AddMinutes(expiresMinutes);
-
-        var claims = new[]
-        {
-            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new Claim(ClaimTypes.Name, user.Name),
-            new Claim(ClaimTypes.MobilePhone, user.MobileNumber),
-            new Claim(ClaimTypes.Email, user.Email ?? string.Empty)
-        };
-
-        var token = new JwtSecurityToken(
-            issuer: _configuration["Jwt:Issuer"],
-            audience: _configuration["Jwt:Audience"],
-            claims: claims,
-            expires: expiresAt,
-            signingCredentials: credentials);
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
     private string GenerateAdminJwtToken(AdminUser admin, out DateTime expiresAt)
@@ -609,25 +494,6 @@ public class AuthService : IAuthService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    private static string HashPassword(string password)
-    {
-        if (string.IsNullOrWhiteSpace(password))
-        {
-            throw new Exception("Password is required.");
-        }
-
-        var salt = RandomNumberGenerator.GetBytes(PasswordSaltSize);
-        using var deriveBytes = new Rfc2898DeriveBytes(
-            password,
-            salt,
-            PasswordHashIterations,
-            HashAlgorithmName.SHA256);
-
-        var hash = deriveBytes.GetBytes(PasswordHashSize);
-
-        return $"PBKDF2-SHA256${PasswordHashIterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
-    }
-
     private static bool VerifyPassword(string password, string storedHash)
     {
         var hashParts = storedHash.Split('$');
@@ -658,11 +524,6 @@ public class AuthService : IAuthService
     private static string GenerateOtp()
     {
         return RandomNumberGenerator.GetInt32(0, 1000000).ToString("D6");
-    }
-
-    private static string GenerateRefreshToken()
-    {
-        return Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
     }
 
     private static string NormalizeRequired(string? value, string fieldName)

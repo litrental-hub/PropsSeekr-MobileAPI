@@ -48,8 +48,13 @@ public class ProfileService : IProfileService
     {
         var user = await GetUserAsync(userId);
 
+        if (!string.IsNullOrWhiteSpace(request.Email) && !string.Equals(user.Email, request.Email, StringComparison.OrdinalIgnoreCase))
+        {
+            user.Email = request.Email;
+            user.IsEmailVerified = false;
+        }
+
         user.Name = request.Name;
-        user.Email = request.Email;
         user.GSTNumber = request.GstNumber;
         user.ReraRegistrationNumber = request.ReraRegistrationNumber;
         user.ModifiedDate = DateTime.UtcNow;

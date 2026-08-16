@@ -39,9 +39,9 @@ public class RazorpayService : IRazorpayService
         _httpClientFactory = httpClientFactory;
         _logger = logger;
 
-        _keyId = configuration["Razorpay:KeyId"] ?? throw new ArgumentNullException("Razorpay:KeyId config is missing");
-        _keySecret = configuration["Razorpay:KeySecret"] ?? throw new ArgumentNullException("Razorpay:KeySecret config is missing");
-        _webhookSecret = configuration["Razorpay:WebhookSecret"] ?? string.Empty;
+        _keyId = RequireConfigurationValue(configuration, "Razorpay:KeyId");
+        _keySecret = RequireConfigurationValue(configuration, "Razorpay:KeySecret");
+        _webhookSecret = RequireConfigurationValue(configuration, "Razorpay:WebhookSecret");
     }
 
     public async Task<CreateOrderResponseDto> CreateOrderAsync(Guid userId, CreateOrderRequestDto request)
@@ -149,7 +149,7 @@ public class RazorpayService : IRazorpayService
 
             // Update transaction to Failed if found
             var failedTx = await _context.PaymentTransactions
-                .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId);
+                .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId && t.UserId == userId);
             if (failedTx != null && failedTx.Status == PaymentStatus.Pending.ToString())
             {
                 failedTx.Status = PaymentStatus.Failed.ToString();
@@ -167,7 +167,7 @@ public class RazorpayService : IRazorpayService
 
         // 2. Update Database (Transaction Status & User Credits)
         var transaction = await _context.PaymentTransactions
-            .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId);
+            .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId && t.UserId == userId);
 
         if (transaction == null)
         {
@@ -221,21 +221,18 @@ public class RazorpayService : IRazorpayService
     {
         _logger.LogInformation("Processing Razorpay Webhook notification");
 
-        // 1. Verify Webhook Signature (if WebhookSecret is configured)
-        if (!string.IsNullOrEmpty(_webhookSecret))
+        // 1. Verify every webhook signature before parsing or processing its payload.
+        if (string.IsNullOrEmpty(signatureHeader))
         {
-            if (string.IsNullOrEmpty(signatureHeader))
-            {
-                _logger.LogWarning("Webhook request is missing X-Razorpay-Signature header");
-                throw new UnauthorizedAccessException("Missing webhook signature header");
-            }
+            _logger.LogWarning("Webhook request is missing X-Razorpay-Signature header");
+            throw new UnauthorizedAccessException("Missing webhook signature header");
+        }
 
-            var computedWebhookSig = ComputeHmacSha256(rawJson, _webhookSecret);
-            if (!string.Equals(computedWebhookSig, signatureHeader, StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogWarning("Webhook signature verification failed.");
-                throw new UnauthorizedAccessException("Invalid webhook signature");
-            }
+        var computedWebhookSig = ComputeHmacSha256(rawJson, _webhookSecret);
+        if (!string.Equals(computedWebhookSig, signatureHeader, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Webhook signature verification failed.");
+            throw new UnauthorizedAccessException("Invalid webhook signature");
         }
 
         // 2. Parse Webhook Event
@@ -330,5 +327,12 @@ public class RazorpayService : IRazorpayService
         
         // Convert to lowercase hex string
         return Convert.ToHexString(hashBytes).ToLowerInvariant();
+    }
+
+    private static string RequireConfigurationValue(IConfiguration configuration, string key)
+    {
+        return configuration[key] is { } value && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : throw new InvalidOperationException($"{key} configuration is missing.");
     }
 }

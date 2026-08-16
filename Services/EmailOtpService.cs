@@ -183,17 +183,10 @@ public class EmailOtpService : IEmailOtpService
             await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
-            string? token = null;
-            string? refreshToken = null;
-            DateTime? expiresAt = null;
             AuthenticatedUserDto? userDto = null;
 
             if (user != null)
             {
-                token = GenerateJwtToken(user, out var expDate);
-                refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
-                expiresAt = expDate;
-
                 userDto = new AuthenticatedUserDto
                 {
                     Id = user.Id,
@@ -208,10 +201,7 @@ public class EmailOtpService : IEmailOtpService
             return new VerifyEmailOtpResponseDto
             {
                 Success = true,
-                Message = "Email verification successful.",
-                Token = token,
-                RefreshToken = refreshToken,
-                ExpiresAt = expiresAt,
+                Message = "Email verification successful. Use a Cognito access token to call protected APIs.",
                 User = userDto
             };
         }
@@ -224,7 +214,8 @@ public class EmailOtpService : IEmailOtpService
 
     private string ComputeOtpHash(string rawOtp, string email, string purpose)
     {
-        var secretKey = _configuration["Jwt:Key"] ?? "PropseekSecretOtpKey123456789";
+        var secretKey = _configuration["Jwt:Key"]
+            ?? throw new InvalidOperationException("Jwt:Key is not configured.");
         var payload = $"{email}:{purpose}:{rawOtp}";
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secretKey));
         var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(payload));
@@ -250,38 +241,6 @@ public class EmailOtpService : IEmailOtpService
             "PasswordReset" => "PasswordReset",
             _ => "EmailVerification"
         };
-    }
-
-    private string GenerateJwtToken(User user, out DateTime expiresAt)
-    {
-        var jwtKey = _configuration["Jwt:Key"];
-        if (string.IsNullOrEmpty(jwtKey))
-        {
-            throw new InvalidOperationException("Jwt:Key is not configured.");
-        }
-
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var expiresMinutes = _configuration.GetValue<int>("Jwt:ExpiresMinutes", 60);
-        expiresAt = DateTime.UtcNow.AddMinutes(expiresMinutes);
-
-        var claims = new[]
-        {
-            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new Claim(ClaimTypes.Name, user.Name),
-            new Claim(ClaimTypes.MobilePhone, user.MobileNumber),
-            new Claim(ClaimTypes.Email, user.Email ?? string.Empty)
-        };
-
-        var token = new JwtSecurityToken(
-            issuer: _configuration["Jwt:Issuer"],
-            audience: _configuration["Jwt:Audience"],
-            claims: claims,
-            expires: expiresAt,
-            signingCredentials: credentials);
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
     private static string BuildHtmlTemplate(string otp, int expiryMinutes)

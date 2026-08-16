@@ -16,6 +16,9 @@ public class User
     public string? Email { get; set; }
 
     [MaxLength(255)]
+    public string? CognitoSubject { get; set; }
+
+    [MaxLength(255)]
     public string PasswordHash { get; set; } = string.Empty;
 
     [MaxLength(12)]
