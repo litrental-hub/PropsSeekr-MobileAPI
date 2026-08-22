@@ -24,7 +24,9 @@ public class SearchPropertyController : ControllerBase
     [HttpPost("properties")]
     [Authorize]
     public async Task<IActionResult> SearchProperties(
-        [FromBody] SearchPropertyRequestDto request)
+        [FromBody] SearchPropertyRequestDto request,
+        [FromQuery] int? page,
+        [FromQuery] int? limit)
     {
         try
         {
@@ -32,6 +34,15 @@ public class SearchPropertyController : ControllerBase
             if (userIdClaim == null || !Guid.TryParse(userIdClaim.Value, out var userId))
             {
                 return Unauthorized(new { message = "Invalid user" });
+            }
+
+            if (page.HasValue && page.Value > 0)
+            {
+                request.Pagination.Page = page.Value;
+            }
+            if (limit.HasValue && limit.Value > 0)
+            {
+                request.Pagination.Limit = limit.Value;
             }
 
             var response = await _searchPropertyService.SearchPropertiesAsync(request, userId);

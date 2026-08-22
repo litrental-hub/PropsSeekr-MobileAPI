@@ -4,6 +4,9 @@ using System.Security.Claims;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using PropSeekr.Data;
 using PropSeekr.DTOs.Notifications;
 using PropSeekr.Services.Interfaces;
 
@@ -83,6 +86,42 @@ public class NotificationsController : ControllerBase
             _logger.LogError(ex, "Failed to mark notification {NotificationId} as read for user {UserId}", id, userId);
             return BadRequest(new { success = false, message = ex.Message });
         }
+    }
+
+    [HttpPatch("{id:long}/read")]
+    public async Task<IActionResult> MarkLegacyAsRead([FromRoute] long id)
+    {
+        var dbContext = HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+        
+        var notif = await dbContext.BrokerNotifications.FirstOrDefaultAsync(n => n.Id == id);
+        if (notif == null)
+        {
+            return NotFound(new { success = false, message = "Notification not found." });
+        }
+
+        var tokenUserIdStr = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(tokenUserIdStr, out var tokenUserId))
+        {
+            return Unauthorized();
+        }
+
+        var callerUser = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == tokenUserId);
+        if (callerUser == null || !callerUser.BrokerId.HasValue || callerUser.BrokerId.Value != notif.BrokerId)
+        {
+            return Forbid();
+        }
+
+        notif.ReadAt = DateTime.UtcNow;
+        notif.ChannelStatus = "read";
+        dbContext.BrokerNotifications.Update(notif);
+        await dbContext.SaveChangesAsync();
+
+        return Ok(new
+        {
+            success = true,
+            message = "Notification successfully marked as read",
+            id = id
+        });
     }
 
     [HttpPost("mark-all-read")]

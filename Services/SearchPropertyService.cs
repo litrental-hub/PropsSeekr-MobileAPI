@@ -21,301 +21,280 @@ public class SearchPropertyService : ISearchPropertyService
         try
         {
             var user = await _dbContext.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId);
-            var isAdmin = user != null && (string.Equals(user.Email, "admin@gmail.com", StringComparison.OrdinalIgnoreCase) ||
-                                           string.Equals(user.Email, "propseekr@gmail.com", StringComparison.OrdinalIgnoreCase));
 
-            if (isAdmin)
+            // Determine if request has coordinates
+            bool hasCoords = request.Location.Lat != 0 && request.Location.Lng != 0;
+            double lat = request.Location.Lat;
+            double lng = request.Location.Lng;
+
+            var cityFilter = !string.IsNullOrWhiteSpace(request.Location.City) ? request.Location.City.Trim() : "Indore";
+            var localityFilter = !string.IsNullOrWhiteSpace(request.Location.Locality) ? $"%{request.Location.Locality.Trim()}%" : "";
+            var txTypeFilter = !string.IsNullOrWhiteSpace(request.TransactionType) ? request.TransactionType.Trim().ToUpperInvariant() : "";
+            var categoryFilter = !string.IsNullOrWhiteSpace(request.Category) ? request.Category.Trim() : "";
+            var searchQueryFilter = !string.IsNullOrWhiteSpace(request.SearchQuery) ? $"%{request.SearchQuery.Trim()}%" : "";
+
+            var conn = _dbContext.Database.GetDbConnection();
+            var wasOpen = conn.State == System.Data.ConnectionState.Open;
+            if (!wasOpen) await conn.OpenAsync();
+
+            double radius = request.Location.RadiusKm > 0 ? request.Location.RadiusKm : 15.0;
+            int totalListings = 0;
+            int totalRequirements = 0;
+
+            // 1. Get Listings Count
+            using (var cmd = conn.CreateCommand())
             {
-                var adminPage = request.Pagination.Page > 0 ? request.Pagination.Page : 1;
-                var adminLimit = request.Pagination.Limit > 0 ? request.Pagination.Limit : 20;
-                var adminSkip = (adminPage - 1) * adminLimit;
+                cmd.CommandText = @"
+                    SELECT COUNT(*) 
+                    FROM public.listings l
+                    LEFT JOIN public.master ml ON ml.masterid = l.master_id
+                    LEFT JOIN public.brokers b ON b.brokerid = l.broker_id
+                    WHERE (@city = '' OR LOWER(ml.city) = LOWER(@city))
+                      AND (@locality = '' OR LOWER(ml.area) LIKE LOWER(@locality))
+                      AND (@tx_type = '' OR 
+                           (@tx_type = 'RENTAL' AND l.listing_type IN ('RENT', 'LEASE')) OR
+                           (@tx_type = 'BUY_SELL' AND l.listing_type = 'SELL'))
+                      AND (@category = '' OR 
+                           (@category = 'Plot/Land' AND LOWER(l.property_type) IN ('plot', 'land')) OR
+                           (@category != 'Plot/Land' AND LOWER(l.property_type) NOT IN ('plot', 'land')))
+                      AND (@search_query = '' OR LOWER(l.raw_message_text) LIKE LOWER(@search_query) OR LOWER(b.name) LIKE LOWER(@search_query))
+                      AND (@has_coords = 0 OR 
+                           (ml.lat IS NOT NULL AND ml.lat <> 0 AND ml.lng IS NOT NULL AND ml.lng <> 0 AND
+                            (6371 * acos(LEAST(1.0, GREATEST(-1.0, cos(radians(@lat)) * cos(radians(ml.lat)) * cos(radians(ml.lng) - radians(@lng)) + sin(radians(@lat)) * sin(radians(ml.lat)))))) <= @radius));";
 
-                var supplyResults = new List<PropertySearchResultItemDto>();
-                var demandRequirements = new List<RequirementSearchResultItemDto>();
+                var pCity = cmd.CreateParameter(); pCity.ParameterName = "@city"; pCity.Value = cityFilter; cmd.Parameters.Add(pCity);
+                var pLocality = cmd.CreateParameter(); pLocality.ParameterName = "@locality"; pLocality.Value = localityFilter; cmd.Parameters.Add(pLocality);
+                var pTxType = cmd.CreateParameter(); pTxType.ParameterName = "@tx_type"; pTxType.Value = txTypeFilter; cmd.Parameters.Add(pTxType);
+                var pCategory = cmd.CreateParameter(); pCategory.ParameterName = "@category"; pCategory.Value = categoryFilter; cmd.Parameters.Add(pCategory);
+                var pSearch = cmd.CreateParameter(); pSearch.ParameterName = "@search_query"; pSearch.Value = searchQueryFilter; cmd.Parameters.Add(pSearch);
 
-                var conn = _dbContext.Database.GetDbConnection();
-                var wasOpen = conn.State == System.Data.ConnectionState.Open;
-                if (!wasOpen) await conn.OpenAsync();
+                var pHasCoords = cmd.CreateParameter(); pHasCoords.ParameterName = "@has_coords"; pHasCoords.Value = hasCoords ? 1 : 0; cmd.Parameters.Add(pHasCoords);
+                var pLat = cmd.CreateParameter(); pLat.ParameterName = "@lat"; pLat.Value = lat; cmd.Parameters.Add(pLat);
+                var pLng = cmd.CreateParameter(); pLng.ParameterName = "@lng"; pLng.Value = lng; cmd.Parameters.Add(pLng);
+                var pRadius = cmd.CreateParameter(); pRadius.ParameterName = "@radius"; pRadius.Value = radius; cmd.Parameters.Add(pRadius);
 
-                // 1. Fetch Listings
-                int totalListings = 0;
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT COUNT(*) FROM public.listings;";
-                    totalListings = Convert.ToInt32(await cmd.ExecuteScalarAsync());
-                }
-
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = @"
-                        SELECT 
-                            l.listingid,
-                            l.raw_message_text,
-                            l.listing_type,
-                            l.property_type,
-                            l.configuration,
-                            l.price,
-                            l.furnishing,
-                            l.facing,
-                            l.floor_number,
-                            ml.area,
-                            b.name AS broker_name,
-                            b.phone_number AS broker_phone
-                        FROM public.listings l
-                        LEFT JOIN public.master ml ON ml.masterid = l.master_id
-                        LEFT JOIN public.brokers b ON b.brokerid = l.broker_id
-                        ORDER BY l.last_refreshed_at DESC
-                        LIMIT @limit OFFSET @offset;";
-
-                    var pLimit = cmd.CreateParameter();
-                    pLimit.ParameterName = "@limit";
-                    pLimit.Value = adminLimit;
-                    cmd.Parameters.Add(pLimit);
-
-                    var pOffset = cmd.CreateParameter();
-                    pOffset.ParameterName = "@offset";
-                    pOffset.Value = adminSkip;
-                    cmd.Parameters.Add(pOffset);
-
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var id = Convert.ToInt32(reader["listingid"]);
-                        var text = reader["raw_message_text"] as string ?? string.Empty;
-                        var type = reader["listing_type"] as string ?? "SELL";
-                        var propType = reader["property_type"] as string ?? "Flat";
-                        var config = reader["configuration"] as string ?? "2BHK";
-                        var priceVal = reader["price"];
-                        decimal? price = (priceVal != DBNull.Value && priceVal != null) ? Convert.ToDecimal(priceVal) : null;
-                        var furnishing = reader["furnishing"] as string ?? "Semi-Furnished";
-                        var facing = reader["facing"] as string ?? "West Facing";
-                        var floorVal = reader["floor_number"];
-                        int? floor = (floorVal != DBNull.Value && floorVal != null) ? Convert.ToInt32(floorVal) : null;
-                        var locality = reader["area"] as string ?? "Indore";
-                        var bName = reader["broker_name"] as string ?? "PropSeekr";
-                        var bPhone = reader["broker_phone"] as string ?? "N/A";
-
-                        supplyResults.Add(MapListingToPropertySearchResultItemDto(id, text, type, propType, config, price, furnishing, facing, floor, locality, bName, bPhone));
-                    }
-                }
-
-                // 2. Fetch Requirements
-                int totalRequirements = 0;
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT COUNT(*) FROM public.requirements;";
-                    totalRequirements = Convert.ToInt32(await cmd.ExecuteScalarAsync());
-                }
-
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = @"
-                        SELECT 
-                            r.requirementid,
-                            r.raw_message_text,
-                            r.requirement_type,
-                            r.property_type,
-                            r.configurations,
-                            r.budget,
-                            mr.area,
-                            b.name AS broker_name
-                        FROM public.requirements r
-                        LEFT JOIN public.master mr ON mr.masterid = r.preferred_locality_ids[1]
-                        LEFT JOIN public.brokers b ON b.brokerid = r.broker_id
-                        ORDER BY r.requirementid DESC
-                        LIMIT @limit OFFSET @offset;";
-
-                    var pLimit = cmd.CreateParameter();
-                    pLimit.ParameterName = "@limit";
-                    pLimit.Value = adminLimit;
-                    cmd.Parameters.Add(pLimit);
-
-                    var pOffset = cmd.CreateParameter();
-                    pOffset.ParameterName = "@offset";
-                    pOffset.Value = adminSkip;
-                    cmd.Parameters.Add(pOffset);
-
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var id = Convert.ToInt32(reader["requirementid"]);
-                        var text = reader["raw_message_text"] as string ?? string.Empty;
-                        var type = reader["requirement_type"] as string ?? "BUY";
-                        var propType = reader["property_type"] as string ?? "Flat";
-                        
-                        string[] configs = null;
-                        if (reader["configurations"] is string[] confArr)
-                        {
-                            configs = confArr;
-                        }
-                        
-                        var budgetVal = reader["budget"];
-                        decimal? budget = (budgetVal != DBNull.Value && budgetVal != null) ? Convert.ToDecimal(budgetVal) : null;
-                        var locality = reader["area"] as string ?? "Indore";
-                        var bName = reader["broker_name"] as string ?? "PropSeekr";
-
-                        demandRequirements.Add(MapRequirementToRequirementSearchResultItemDto(id, text, type, propType, configs, budget, locality, bName));
-                    }
-                }
-
-                if (!wasOpen) await conn.CloseAsync();
-
-                var adminIsDemandTab = string.Equals(request.ListingType, "DEMAND", StringComparison.OrdinalIgnoreCase);
-
-                return new SearchPropertyResponseDto
-                {
-                    Status = "success",
-                    AvailableCount = totalListings,
-                    LookingCount = totalRequirements,
-                    TotalCount = adminIsDemandTab ? totalRequirements : totalListings,
-                    Page = adminPage,
-                    Limit = adminLimit,
-                    Results = supplyResults,
-                    Requirements = demandRequirements
-                };
+                totalListings = Convert.ToInt32(await cmd.ExecuteScalarAsync());
             }
 
-            var baseQuery = _dbContext.PropertyRequests.AsQueryable();
-            var centre = BuildSearchCentre(request.Location);
-
-            // Filter by transaction type
-            if (!string.IsNullOrWhiteSpace(request.TransactionType))
+            // 2. Get Requirements Count
+            using (var cmd = conn.CreateCommand())
             {
-                var searchTxType = request.TransactionType.Trim().ToUpperInvariant();
-                if (searchTxType == "BUY")
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == "BUY");
-                }
-                else if (searchTxType == "SELL" || searchTxType == "SALE")
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == "SELL");
-                }
-                else if (searchTxType == "BUY_SELL")
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == "BUY" || p.TransactionType == "SELL");
-                }
-                else
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == request.TransactionType);
-                }
+                cmd.CommandText = @"
+                    SELECT COUNT(*) 
+                    FROM public.requirements r
+                    LEFT JOIN public.master mr ON mr.masterid = r.preferred_locality_ids[1]
+                    LEFT JOIN public.brokers b ON b.brokerid = r.broker_id
+                    WHERE (@city = '' OR LOWER(mr.city) = LOWER(@city))
+                      AND (@locality = '' OR LOWER(mr.area) LIKE LOWER(@locality))
+                      AND (@tx_type = '' OR 
+                           (@tx_type = 'RENTAL' AND r.requirement_type IN ('RENT', 'LEASE')) OR
+                           (@tx_type = 'BUY_SELL' AND r.requirement_type = 'BUY'))
+                      AND (@category = '' OR 
+                           (@category = 'Plot/Land' AND LOWER(r.property_type) IN ('plot', 'land')) OR
+                           (@category != 'Plot/Land' AND LOWER(r.property_type) NOT IN ('plot', 'land')))
+                      AND (@search_query = '' OR LOWER(r.raw_message_text) LIKE LOWER(@search_query) OR LOWER(b.name) LIKE LOWER(@search_query))
+                      AND (@has_coords = 0 OR 
+                           (mr.lat IS NOT NULL AND mr.lat <> 0 AND mr.lng IS NOT NULL AND mr.lng <> 0 AND
+                            (6371 * acos(LEAST(1.0, GREATEST(-1.0, cos(radians(@lat)) * cos(radians(mr.lat)) * cos(radians(mr.lng) - radians(@lng)) + sin(radians(@lat)) * sin(radians(mr.lat)))))) <= @radius));";
+
+                var pCity = cmd.CreateParameter(); pCity.ParameterName = "@city"; pCity.Value = cityFilter; cmd.Parameters.Add(pCity);
+                var pLocality = cmd.CreateParameter(); pLocality.ParameterName = "@locality"; pLocality.Value = localityFilter; cmd.Parameters.Add(pLocality);
+                var pTxType = cmd.CreateParameter(); pTxType.ParameterName = "@tx_type"; pTxType.Value = txTypeFilter; cmd.Parameters.Add(pTxType);
+                var pCategory = cmd.CreateParameter(); pCategory.ParameterName = "@category"; pCategory.Value = categoryFilter; cmd.Parameters.Add(pCategory);
+                var pSearch = cmd.CreateParameter(); pSearch.ParameterName = "@search_query"; pSearch.Value = searchQueryFilter; cmd.Parameters.Add(pSearch);
+
+                var pHasCoords = cmd.CreateParameter(); pHasCoords.ParameterName = "@has_coords"; pHasCoords.Value = hasCoords ? 1 : 0; cmd.Parameters.Add(pHasCoords);
+                var pLat = cmd.CreateParameter(); pLat.ParameterName = "@lat"; pLat.Value = lat; cmd.Parameters.Add(pLat);
+                var pLng = cmd.CreateParameter(); pLng.ParameterName = "@lng"; pLng.Value = lng; cmd.Parameters.Add(pLng);
+                var pRadius = cmd.CreateParameter(); pRadius.ParameterName = "@radius"; pRadius.Value = radius; cmd.Parameters.Add(pRadius);
+
+                totalRequirements = Convert.ToInt32(await cmd.ExecuteScalarAsync());
             }
-
-            // Filter by location (city and locality)
-            if (!string.IsNullOrWhiteSpace(request.Location.City))
-            {
-                baseQuery = baseQuery.Where(p => p.City.ToLower() == request.Location.City.ToLower());
-            }
-
-            if (!string.IsNullOrWhiteSpace(request.Location.Locality))
-            {
-                baseQuery = baseQuery.Where(p => p.Locality.ToLower() == request.Location.Locality.ToLower());
-            }
-
-            if (centre != null && request.Location.RadiusKm > 0)
-            {
-                var radiusMetres = request.Location.RadiusKm * 1000.0;
-                baseQuery = baseQuery.Where(p =>
-                    p.Location != null &&
-                    p.Location.Distance(centre) <= radiusMetres);
-            }
-
-            // Filter by Category
-            if (!string.IsNullOrWhiteSpace(request.Category))
-            {
-                baseQuery = baseQuery.Where(p => p.Category.ToLower() == request.Category.ToLower());
-            }
-
-            // Filter by budget
-            if (request.Budget != null)
-            {
-                baseQuery = FilterByBudget(baseQuery, request.Budget);
-            }
-
-            // Filter by search query (title and user info)
-            if (!string.IsNullOrWhiteSpace(request.SearchQuery))
-            {
-                var searchQuery = request.SearchQuery.ToLower();
-                baseQuery = baseQuery.Where(p =>
-                    p.Title.ToLower().Contains(searchQuery) ||
-                    (p.User != null && p.User.Name.ToLower().Contains(searchQuery)));
-            }
-
-            // Apply custom filters if present
-            if (request.Filters != null)
-            {
-                baseQuery = ApplyCustomFilters(baseQuery, request.Filters);
-            }
-
-            // Separate supply (results) and demand (requirements) queries
-            var supplyQuery = baseQuery.Where(p =>
-                p.ListingType.ToLower() == "supply" ||
-                (string.IsNullOrWhiteSpace(p.ListingType) && p.Status.ToLower() == "active"));
-
-            var demandQuery = baseQuery.Where(p =>
-                p.ListingType.ToLower() == "demand" ||
-                (string.IsNullOrWhiteSpace(p.ListingType) && p.Status.ToLower() == "looking"));
-
-            var availableCount = await supplyQuery.CountAsync();
-            var lookingCount = await demandQuery.CountAsync();
 
             // Calculate pagination parameters
             var pageNumber = request.Pagination.Page > 0 ? request.Pagination.Page : 1;
             var limit = request.Pagination.Limit > 0 ? request.Pagination.Limit : 20;
             var skip = (pageNumber - 1) * limit;
 
-            List<Models.PropertyRequest> supplyRequests = new();
-            List<Models.PropertyRequest> demandRequests = new();
-
             var isDemandTab = string.Equals(request.ListingType, "DEMAND", StringComparison.OrdinalIgnoreCase);
 
-            if (isDemandTab)
+            var supplyResults = new List<PropertySearchResultItemDto>();
+            var demandRequirements = new List<RequirementSearchResultItemDto>();
+
+            // 3. Fetch Listings (Supply)
+            var listingsLimit = isDemandTab ? 5 : limit;
+            var listingsSkip = isDemandTab ? 0 : skip;
+
+            using (var cmd = conn.CreateCommand())
             {
-                // Paginate demand requirements
-                demandRequests = await demandQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Skip(skip)
-                    .Take(limit)
-                    .ToListAsync();
-
-                // Get first page of supply results as default companion list
-                supplyRequests = await supplyQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Take(5)
-                    .ToListAsync();
+                cmd.CommandText = @"
+                    SELECT 
+                        l.listingid,
+                        l.raw_message_text,
+                        l.listing_type,
+                        l.property_type,
+                        l.configuration,
+                        l.price,
+                        l.furnishing,
+                        l.facing,
+                        l.floor_number,
+                        ml.area,
+                        b.name AS broker_name,
+                        b.phone_number AS broker_phone,
+                        (CASE WHEN @has_coords = 1 THEN 
+                            (6371 * acos(LEAST(1.0, GREATEST(-1.0, cos(radians(@lat)) * cos(radians(ml.lat)) * cos(radians(ml.lng) - radians(@lng)) + sin(radians(@lat)) * sin(radians(ml.lat))))))
+                         ELSE 0.0 END) AS distance
+                    FROM public.listings l
+                    LEFT JOIN public.master ml ON ml.masterid = l.master_id
+                    LEFT JOIN public.brokers b ON b.brokerid = l.broker_id
+                    WHERE (@city = '' OR LOWER(ml.city) = LOWER(@city))
+                      AND (@locality = '' OR LOWER(ml.area) LIKE LOWER(@locality))
+                      AND (@tx_type = '' OR 
+                           (@tx_type = 'RENTAL' AND l.listing_type IN ('RENT', 'LEASE')) OR
+                           (@tx_type = 'BUY_SELL' AND l.listing_type = 'SELL'))
+                      AND (@category = '' OR 
+                           (@category = 'Plot/Land' AND LOWER(l.property_type) IN ('plot', 'land')) OR
+                           (@category != 'Plot/Land' AND LOWER(l.property_type) NOT IN ('plot', 'land')))
+                      AND (@search_query = '' OR LOWER(l.raw_message_text) LIKE LOWER(@search_query) OR LOWER(b.name) LIKE LOWER(@search_query))
+                      AND (@has_coords = 0 OR 
+                           (ml.lat IS NOT NULL AND ml.lat <> 0 AND ml.lng IS NOT NULL AND ml.lng <> 0 AND
+                            (6371 * acos(LEAST(1.0, GREATEST(-1.0, cos(radians(@lat)) * cos(radians(ml.lat)) * cos(radians(ml.lng) - radians(@lng)) + sin(radians(@lat)) * sin(radians(ml.lat)))))) <= @radius))
+                    ORDER BY 
+                      (CASE WHEN @has_coords = 1 THEN 
+                         (CASE WHEN ml.lat IS NULL OR ml.lat = 0 OR ml.lng IS NULL OR ml.lng = 0 THEN 1 ELSE 0 END)
+                       ELSE 0 END) ASC,
+                      distance ASC, 
+                      l.last_refreshed_at DESC
+                    LIMIT @limit OFFSET @offset;";
+ 
+                var pCity = cmd.CreateParameter(); pCity.ParameterName = "@city"; pCity.Value = cityFilter; cmd.Parameters.Add(pCity);
+                var pLocality = cmd.CreateParameter(); pLocality.ParameterName = "@locality"; pLocality.Value = localityFilter; cmd.Parameters.Add(pLocality);
+                var pTxType = cmd.CreateParameter(); pTxType.ParameterName = "@tx_type"; pTxType.Value = txTypeFilter; cmd.Parameters.Add(pTxType);
+                var pCategory = cmd.CreateParameter(); pCategory.ParameterName = "@category"; pCategory.Value = categoryFilter; cmd.Parameters.Add(pCategory);
+                var pSearch = cmd.CreateParameter(); pSearch.ParameterName = "@search_query"; pSearch.Value = searchQueryFilter; cmd.Parameters.Add(pSearch);
+                
+                var pHasCoords = cmd.CreateParameter(); pHasCoords.ParameterName = "@has_coords"; pHasCoords.Value = hasCoords ? 1 : 0; cmd.Parameters.Add(pHasCoords);
+                var pLat = cmd.CreateParameter(); pLat.ParameterName = "@lat"; pLat.Value = lat; cmd.Parameters.Add(pLat);
+                var pLng = cmd.CreateParameter(); pLng.ParameterName = "@lng"; pLng.Value = lng; cmd.Parameters.Add(pLng);
+                var pRadius = cmd.CreateParameter(); pRadius.ParameterName = "@radius"; pRadius.Value = radius; cmd.Parameters.Add(pRadius);
+ 
+                var pLimit = cmd.CreateParameter(); pLimit.ParameterName = "@limit"; pLimit.Value = listingsLimit; cmd.Parameters.Add(pLimit);
+                var pOffset = cmd.CreateParameter(); pOffset.ParameterName = "@offset"; pOffset.Value = listingsSkip; cmd.Parameters.Add(pOffset);
+ 
+                using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var id = Convert.ToInt32(reader["listingid"]);
+                    var text = reader["raw_message_text"] as string ?? string.Empty;
+                    var type = reader["listing_type"] as string ?? "SELL";
+                    var propType = reader["property_type"] as string ?? "Flat";
+                    var config = reader["configuration"] as string ?? "2BHK";
+                    var priceVal = reader["price"];
+                    decimal? price = (priceVal != DBNull.Value && priceVal != null) ? Convert.ToDecimal(priceVal) : null;
+                    var furnishing = reader["furnishing"] as string ?? "Semi-Furnished";
+                    var facing = reader["facing"] as string ?? "West Facing";
+                    var floorVal = reader["floor_number"];
+                    int? floor = (floorVal != DBNull.Value && floorVal != null) ? Convert.ToInt32(floorVal) : null;
+                    var locality = reader["area"] as string ?? "Indore";
+                    var bName = reader["broker_name"] as string ?? "PropSeekr";
+                    var bPhone = reader["broker_phone"] as string ?? "N/A";
+                    var distance = Convert.ToDouble(reader["distance"]);
+ 
+                    supplyResults.Add(MapListingToPropertySearchResultItemDto(id, text, type, propType, config, price, furnishing, facing, floor, locality, bName, bPhone, distance, hasCoords));
+                }
             }
-            else
+ 
+            // 4. Fetch Requirements (Demand)
+            var reqsLimit = isDemandTab ? limit : 5;
+            var reqsSkip = isDemandTab ? skip : 0;
+ 
+            using (var cmd = conn.CreateCommand())
             {
-                // Paginate supply results
-                supplyRequests = await supplyQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Skip(skip)
-                    .Take(limit)
-                    .ToListAsync();
+                cmd.CommandText = @"
+                    SELECT 
+                        r.requirementid,
+                        r.raw_message_text,
+                        r.requirement_type,
+                        r.property_type,
+                        r.configurations,
+                        r.budget,
+                        mr.area,
+                        b.name AS broker_name,
+                        (CASE WHEN @has_coords = 1 THEN 
+                            (6371 * acos(LEAST(1.0, GREATEST(-1.0, cos(radians(@lat)) * cos(radians(mr.lat)) * cos(radians(mr.lng) - radians(@lng)) + sin(radians(@lat)) * sin(radians(mr.lat))))))
+                         ELSE 0.0 END) AS distance
+                    FROM public.requirements r
+                    LEFT JOIN public.master mr ON mr.masterid = r.preferred_locality_ids[1]
+                    LEFT JOIN public.brokers b ON b.brokerid = r.broker_id
+                    WHERE (@city = '' OR LOWER(mr.city) = LOWER(@city))
+                      AND (@locality = '' OR LOWER(mr.area) LIKE LOWER(@locality))
+                      AND (@tx_type = '' OR 
+                           (@tx_type = 'RENTAL' AND r.requirement_type IN ('RENT', 'LEASE')) OR
+                           (@tx_type = 'BUY_SELL' AND r.requirement_type = 'BUY'))
+                      AND (@category = '' OR 
+                           (@category = 'Plot/Land' AND LOWER(r.property_type) IN ('plot', 'land')) OR
+                           (@category != 'Plot/Land' AND LOWER(r.property_type) NOT IN ('plot', 'land')))
+                      AND (@search_query = '' OR LOWER(r.raw_message_text) LIKE LOWER(@search_query) OR LOWER(b.name) LIKE LOWER(@search_query))
+                      AND (@has_coords = 0 OR 
+                           (mr.lat IS NOT NULL AND mr.lat <> 0 AND mr.lng IS NOT NULL AND mr.lng <> 0 AND
+                            (6371 * acos(LEAST(1.0, GREATEST(-1.0, cos(radians(@lat)) * cos(radians(mr.lat)) * cos(radians(mr.lng) - radians(@lng)) + sin(radians(@lat)) * sin(radians(mr.lat)))))) <= @radius))
+                    ORDER BY 
+                      (CASE WHEN @has_coords = 1 THEN 
+                         (CASE WHEN mr.lat IS NULL OR mr.lat = 0 OR mr.lng IS NULL OR mr.lng = 0 THEN 1 ELSE 0 END)
+                       ELSE 0 END) ASC,
+                      distance ASC, 
+                      r.requirementid DESC
+                    LIMIT @limit OFFSET @offset;";
+ 
+                var pCity = cmd.CreateParameter(); pCity.ParameterName = "@city"; pCity.Value = cityFilter; cmd.Parameters.Add(pCity);
+                var pLocality = cmd.CreateParameter(); pLocality.ParameterName = "@locality"; pLocality.Value = localityFilter; cmd.Parameters.Add(pLocality);
+                var pTxType = cmd.CreateParameter(); pTxType.ParameterName = "@tx_type"; pTxType.Value = txTypeFilter; cmd.Parameters.Add(pTxType);
+                var pCategory = cmd.CreateParameter(); pCategory.ParameterName = "@category"; pCategory.Value = categoryFilter; cmd.Parameters.Add(pCategory);
+                var pSearch = cmd.CreateParameter(); pSearch.ParameterName = "@search_query"; pSearch.Value = searchQueryFilter; cmd.Parameters.Add(pSearch);
+                
+                var pHasCoords = cmd.CreateParameter(); pHasCoords.ParameterName = "@has_coords"; pHasCoords.Value = hasCoords ? 1 : 0; cmd.Parameters.Add(pHasCoords);
+                var pLat = cmd.CreateParameter(); pLat.ParameterName = "@lat"; pLat.Value = lat; cmd.Parameters.Add(pLat);
+                var pLng = cmd.CreateParameter(); pLng.ParameterName = "@lng"; pLng.Value = lng; cmd.Parameters.Add(pLng);
+                var pRadius = cmd.CreateParameter(); pRadius.ParameterName = "@radius"; pRadius.Value = radius; cmd.Parameters.Add(pRadius);
+ 
+                var pLimit = cmd.CreateParameter(); pLimit.ParameterName = "@limit"; pLimit.Value = reqsLimit; cmd.Parameters.Add(pLimit);
+                var pOffset = cmd.CreateParameter(); pOffset.ParameterName = "@offset"; pOffset.Value = reqsSkip; cmd.Parameters.Add(pOffset);
 
-                // Get first page of demand requirements as default companion list
-                demandRequests = await demandQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Take(5)
-                    .ToListAsync();
+                using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var id = Convert.ToInt32(reader["requirementid"]);
+                    var text = reader["raw_message_text"] as string ?? string.Empty;
+                    var type = reader["requirement_type"] as string ?? "BUY";
+                    var propType = reader["property_type"] as string ?? "Flat";
+                    
+                    string[]? configs = null;
+                    if (reader["configurations"] is string[] confArr)
+                    {
+                        configs = confArr;
+                    }
+
+                    var budgetVal = reader["budget"];
+                    decimal? budget = (budgetVal != DBNull.Value && budgetVal != null) ? Convert.ToDecimal(budgetVal) : null;
+                    var locality = reader["area"] as string ?? "Indore";
+                    var bName = reader["broker_name"] as string ?? "PropSeekr";
+
+                    demandRequirements.Add(MapRequirementToRequirementSearchResultItemDto(id, text, type, propType, configs, budget, locality, bName));
+                }
             }
 
-            var resultsMapped = supplyRequests.Select(pr => MapToPropertySearchResultItemDto(pr, centre)).ToList();
-            var requirementsMapped = demandRequests.Select(pr => MapToRequirementSearchResultItemDto(pr)).ToList();
+            if (!wasOpen) await conn.CloseAsync();
 
             return new SearchPropertyResponseDto
             {
                 Status = "success",
-                AvailableCount = availableCount,
-                LookingCount = lookingCount,
-                TotalCount = isDemandTab ? lookingCount : availableCount,
+                AvailableCount = totalListings,
+                LookingCount = totalRequirements,
+                TotalCount = isDemandTab ? totalRequirements : totalListings,
                 Page = pageNumber,
                 Limit = limit,
-                Results = resultsMapped,
-                Requirements = requirementsMapped
+                Results = supplyResults,
+                Requirements = demandRequirements
             };
         }
         catch (Exception ex)
@@ -556,7 +535,7 @@ public class SearchPropertyService : ISearchPropertyService
     private static double ToRadians(double value) => value * Math.PI / 180.0;
 
     private PropertySearchResultItemDto MapListingToPropertySearchResultItemDto(
-        int id, string text, string type, string propType, string config, decimal? price, string furnishing, string facing, int? floor, string locality, string brokerName, string brokerPhone)
+        int id, string text, string type, string propType, string config, decimal? price, string furnishing, string facing, int? floor, string locality, string brokerName, string brokerPhone, double distance, bool hasCoords)
     {
         var bhk = config ?? "2BHK";
         var propertyType = propType ?? "Flat";
@@ -584,6 +563,10 @@ public class SearchPropertyService : ISearchPropertyService
 
         var initials = string.IsNullOrWhiteSpace(brokerName) ? "PS" : (brokerName.Split(' ').Length > 1 ? (brokerName.Split(' ')[0][..1] + brokerName.Split(' ')[^1][..1]).ToUpper() : brokerName[..1].ToUpper());
 
+        var formattedDistance = hasCoords ? $"{distance:0.0} km" : "1.2 km";
+        var isNearby = hasCoords ? distance <= 2.0 : true;
+        var locationLabel = $"{formattedDistance} · {locality ?? "Indore"} main road";
+
         return new PropertySearchResultItemDto
         {
             Id = id.ToString(),
@@ -598,8 +581,8 @@ public class SearchPropertyService : ISearchPropertyService
             AvailableFrom = "Immediate",
             CreatedAt = DateTime.UtcNow,
             UnlockCost = 1,
-            IsNearby = true,
-            LocationLabel = $"1.2 km · {locality} main road",
+            IsNearby = isNearby,
+            LocationLabel = locationLabel,
             BrokerName = brokerName ?? "PropSeekr",
             BrokerInitials = initials,
             BrokerSub = $"{locality} · PropSeekr",

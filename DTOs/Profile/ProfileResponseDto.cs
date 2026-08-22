@@ -19,4 +19,6 @@ public class ProfileResponseDto
     public bool IsEmailVerified { get; set; }
 
     public bool IsMobileVerified { get; set; }
+
+    public int? BrokerId { get; set; }
 }

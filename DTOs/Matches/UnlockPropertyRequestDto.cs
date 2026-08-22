@@ -6,6 +6,16 @@ public class UnlockPropertyRequestDto
 {
     [Required]
     public int MatchId { get; set; }
+
+    public Guid? PropertyRequestId { get; set; }
+    public Guid? InitiatorPropertyRequestId { get; set; }
+
+    // Pre-reveal availability confirmation fields
+    public bool IsAvailable { get; set; } = true;
+    public bool IsPriceValid { get; set; } = true;
+    public DateTime? AvailabilityDate { get; set; }
+    public bool IsPriceNegotiable { get; set; } = false;
+    public bool ReadyToConnect { get; set; } = true;
 }
 
 public class UnlockPropertyResponseDto

@@ -52,7 +52,14 @@ public class UserMatchItemDto
     // Only populated when IsUnlocked == true (Security enforcement)
     public ContactDetailsDto? OwnerContact { get; set; }
 
+    // Helper IDs for unlocking
+    public Guid? PropertyRequestId { get; set; }
+    public Guid? InitiatorPropertyRequestId { get; set; }
+
     // New matching side metadata for UI rendering
     public PropertyMatchSideDto Property { get; set; } = new();
     public RequirementMatchSideDto Requirement { get; set; } = new();
+
+    public double? DistanceKm { get; set; }
+    public string DistanceLabel { get; set; } = string.Empty;
 }

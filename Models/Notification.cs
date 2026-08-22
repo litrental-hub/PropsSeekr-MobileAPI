@@ -33,6 +33,8 @@ public class Notification
 
     public int TokenCost { get; set; } = 0;
 
+
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public string? MetaJson { get; set; }
