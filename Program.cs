@@ -105,6 +105,7 @@ builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>(
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
+builder.Services.AddScoped<IUnlockService, UnlockService>();
 
 builder.Services.AddAuthorization();
 

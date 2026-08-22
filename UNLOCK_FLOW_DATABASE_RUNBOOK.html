@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PropSeekr Unlock Flow — Database Runbook</title>
+  <style>
+    :root { color-scheme: light; --ink:#14213d; --muted:#5f6b7a; --line:#d9e1ea; --bg:#f5f8fb; --blue:#1769aa; --green:#1f7a4d; --amber:#b86b00; }
+    * { box-sizing:border-box; } body { margin:0; font:15px/1.55 Inter,Segoe UI,Arial,sans-serif; color:var(--ink); background:var(--bg); }
+    main { max-width:1000px; margin:36px auto; padding:0 22px 48px; } section, header { background:#fff; border:1px solid var(--line); border-radius:12px; padding:24px; margin-top:18px; box-shadow:0 1px 2px #1522380b; }
+    header { border-left:6px solid var(--blue); } h1 { margin:0 0 6px; font-size:27px; } h2 { margin:0 0 14px; font-size:20px; } h3 { margin:18px 0 7px; font-size:16px; } p { margin:7px 0; } .muted { color:var(--muted); } .note { border-left:4px solid var(--amber); padding:10px 13px; background:#fff8ed; border-radius:4px; } .ok { border-left:4px solid var(--green); padding:10px 13px; background:#effaf4; border-radius:4px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 4px; } th,td { border:1px solid var(--line); padding:9px 10px; text-align:left; vertical-align:top; } th { background:#eef5fb; } code { font:13px Consolas,monospace; background:#f1f4f7; border-radius:4px; padding:2px 4px; } pre { overflow:auto; background:#10233b; color:#ecf5ff; padding:14px; border-radius:8px; font:13px/1.5 Consolas,monospace; }
+    ol.flow { counter-reset:step; padding:0; margin:0; list-style:none; } ol.flow > li { position:relative; padding:0 0 22px 48px; } ol.flow > li::before { counter-increment:step; content:counter(step); position:absolute; left:0; top:0; display:grid; place-items:center; width:30px; height:30px; border-radius:50%; background:var(--blue); color:white; font-weight:700; } ol.flow > li:not(:last-child)::after { content:""; position:absolute; left:14px; top:31px; height:calc(100% - 15px); border-left:2px solid #b8d3ea; } .action { font-weight:700; } ul { margin:6px 0 0; padding-left:20px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Unlock Functionality — Database Runbook</h1>
+    <p class="muted">The unique unlock identity is <code>matches.matchid</code>. It is an integer and must be passed as <code>MatchId</code> throughout the match/confirmation/reveal flow.</p>
+  </header>
+
+  <section>
+    <h2>Tables to check, in sequence</h2>
+    <table>
+      <thead><tr><th>#</th><th>Table</th><th>Why it is checked</th><th>Key fields</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>matches</code></td><td>Confirms the match exists, identifies both participating brokers, and holds the lifecycle state.</td><td><code>matchid</code>, <code>listing_broker_id</code>, <code>requirement_broker_id</code>, <code>state</code></td></tr>
+        <tr><td>2</td><td><code>reveals</code></td><td>Idempotency check. If a row already exists for the match, contacts are already unlocked and no further credit may be deducted.</td><td><code>match_id</code> (unique), <code>revealed_at</code></td></tr>
+        <tr><td>3</td><td><code>match_confirmations</code></td><td>Records one confirmation for each broker and checks that both confirmations are still within the 4-hour window.</td><td><code>match_id</code>, <code>broker_id</code>, <code>confirmed_at</code>, <code>window_expires_at</code></td></tr>
+        <tr><td>4</td><td><code>credit_wallets</code></td><td>Validates that each broker has at least one available credit before a reveal is created.</td><td><code>broker_id</code>, <code>free_credits_balance</code>, <code>paid_credits_balance</code></td></tr>
+        <tr><td>5</td><td><code>credit_transactions</code></td><td>Immutable audit trail of both deductions. Two rows are inserted for every successful reveal.</td><td><code>broker_id</code>, <code>type</code>, <code>amount</code>, <code>balance_after</code>, <code>reference_type</code>, <code>reference_id</code></td></tr>
+        <tr><td>6</td><td><code>brokers</code></td><td>Used to obtain the revealed counterparty name and phone number after the successful reveal.</td><td><code>brokerid</code>, <code>name</code>, <code>phone_number</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Unlock sequence</h2>
+    <p class="note"><strong>Column rule:</strong> use <code>matches.state</code> as the canonical dual-confirmation lifecycle. Do <strong>not</strong> overwrite <code>matches.status</code> with <code>pending_confirmation</code> or <code>confirmed</code>. The existing <code>status</code> column belongs to the matching/listing lifecycle and should remain available for its existing meaning.</p>
+    <ol class="flow">
+      <li><span class="action">Load the match.</span><br>Read <code>matches</code> by <code>matchid = :matchId</code>. The requesting broker must equal either <code>listing_broker_id</code> or <code>requirement_broker_id</code>.</li>
+      <li><span class="action">Prevent duplicate charging.</span><br>Read <code>reveals</code> by <code>match_id</code>. If it exists, return the previously unlocked result; do not insert anything and do not deduct credits.</li>
+      <li><span class="action">First broker confirms.</span><br>Upsert one row in <code>match_confirmations</code>; set all checklist fields, <code>confirmed_at = now()</code>, and <code>window_expires_at = now() + 4 hours</code>. Update <code>matches.state</code> to <code>pending_confirmation</code>; leave <code>matches.status</code> unchanged.</li>
+      <li><span class="action">Second broker confirms.</span><br>Upsert their confirmation row with the same 4-hour window. Check that both expected broker rows have non-null, non-expired <code>confirmed_at</code> values.</li>
+      <li><span class="action">Confirm the match.</span><br>If both confirmations pass, update <code>matches.state</code> to <code>confirmed</code>; leave <code>matches.status</code> unchanged.</li>
+      <li><span class="action">Check both wallets.</span><br>Read both <code>credit_wallets</code> rows. Each broker needs at least one combined free/paid credit. If either broker lacks credit, stop: no reveal and no deductions are written.</li>
+      <li><span class="action">Reveal atomically.</span><br>Within one database transaction, insert one <code>reveals</code> row, decrement each wallet (free credits first), and insert both ledger rows in <code>credit_transactions</code>. Commit only when all writes succeed.</li>
+      <li><span class="action">Return contact information.</span><br>Read the other broker from <code>brokers</code> and return their name and phone to each party.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Frontend state to show</h2>
+    <p>The frontend should treat <code>state</code> as the handshake state and <code>reveals.match_id</code> as the final unlock flag. A match may remain <code>state = 'confirmed'</code> after contacts are revealed; that is correct.</p>
+    <table>
+      <thead><tr><th>API/database condition</th><th>Show to the current broker</th><th>Primary action</th></tr></thead>
+      <tbody>
+        <tr><td><code>state = 'matched'</code>; no confirmation row for current broker</td><td>New match / not confirmed</td><td>Confirm &amp; Connect</td></tr>
+        <tr><td><code>state = 'pending_confirmation'</code>; current broker has a confirmation</td><td>Waiting for other broker</td><td>Disabled button; show expiry time</td></tr>
+        <tr><td><code>state = 'pending_confirmation'</code>; current broker has no confirmation</td><td>Other broker wants to connect</td><td>Confirm &amp; Connect</td></tr>
+        <tr><td><code>state = 'confirmed'</code>; no <code>reveals</code> row</td><td>Both confirmed; reveal pending / insufficient credit</td><td>Show credit-purchase or retry guidance</td></tr>
+        <tr><td>A <code>reveals</code> row exists for <code>match_id</code></td><td>Unlocked</td><td>Show counterparty name and phone</td></tr>
+        <tr><td><code>state = 'expired'</code></td><td>Confirmation window expired</td><td>Confirm &amp; Connect again</td></tr>
+      </tbody>
+    </table>
+    <p class="note"><strong>Do not use <code>status</code> to decide which confirmation button or banner to render.</strong> Return <code>state</code>, current-broker confirmation status, <code>window_expires_at</code>, and <code>isRevealed</code> in the match API response. This avoids relying on the frontend to infer state from other broker data.</p>
+  </section>
+
+  <section>
+    <h2>Successful reveal: data written</h2>
+    <table>
+      <thead><tr><th>Order</th><th>Table</th><th>Operation</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>match_confirmations</code></td><td>Insert or update broker A confirmation.</td></tr>
+        <tr><td>2</td><td><code>matches</code></td><td>Update <code>state</code> to <code>pending_confirmation</code>; do not change <code>status</code>.</td></tr>
+        <tr><td>3</td><td><code>match_confirmations</code></td><td>Insert or update broker B confirmation.</td></tr>
+        <tr><td>4</td><td><code>matches</code></td><td>Update <code>state</code> to <code>confirmed</code>; do not change <code>status</code>.</td></tr>
+        <tr><td>5</td><td><code>reveals</code></td><td>Insert one row: <code>match_id</code>, <code>revealed_at</code>.</td></tr>
+        <tr><td>6</td><td><code>credit_wallets</code></td><td>Update broker A balance and <code>updated_at</code>.</td></tr>
+        <tr><td>7</td><td><code>credit_transactions</code></td><td>Insert broker A deduction: <code>type = 'deduct'</code>, <code>amount = 1</code>, <code>reference_type = 'reveal'</code>.</td></tr>
+        <tr><td>8</td><td><code>credit_wallets</code></td><td>Update broker B balance and <code>updated_at</code>.</td></tr>
+        <tr><td>9</td><td><code>credit_transactions</code></td><td>Insert broker B deduction with the same reveal reference.</td></tr>
+      </tbody>
+    </table>
+    <p class="note"><strong>Important:</strong> steps 5–9 are one transaction. A failed wallet check or write must roll back all of these steps.</p>
+  </section>
+
+  <section>
+    <h2>Development verification performed</h2>
+    <p class="ok">Tested development match <code>2293176</code>: brokers <code>28590</code> and <code>3673</code> confirmed; match state became <code>confirmed</code>; one reveal row and two ledger rows were created; both balances changed from <code>10</code> to <code>9</code>.</p>
+  </section>
+
+  <section>
+    <h2>Useful verification queries</h2>
+    <pre>-- Replace :match_id with the matches.matchid being investigated.
+SELECT matchid, listing_broker_id, requirement_broker_id, state, status
+FROM matches WHERE matchid = :match_id;
+
+SELECT * FROM match_confirmations WHERE match_id = :match_id ORDER BY broker_id;
+SELECT * FROM reveals WHERE match_id = :match_id;
+
+SELECT broker_id, free_credits_balance, paid_credits_balance, updated_at
+FROM credit_wallets
+WHERE broker_id IN (
+  SELECT listing_broker_id FROM matches WHERE matchid = :match_id
+  UNION
+  SELECT requirement_broker_id FROM matches WHERE matchid = :match_id
+);
+
+SELECT broker_id, type, amount, balance_after, reference_type, reference_id, created_at
+FROM credit_transactions
+WHERE notes = 'Reveal for match ' || :match_id
+ORDER BY created_at;</pre>
+  </section>
+</main>
+</body>
+</html>

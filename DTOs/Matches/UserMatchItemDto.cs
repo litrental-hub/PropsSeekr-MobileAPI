@@ -31,6 +31,9 @@ public class RequirementMatchSideDto
 
 public class UserMatchItemDto
 {
+    // Match ID for unlock operations - replaces PropertyRequestId
+    public int MatchId { get; set; }
+    
     public string Id { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
@@ -44,7 +47,7 @@ public class UserMatchItemDto
     public string PostedTimeAgo { get; set; } = string.Empty;
     public int MatchScore { get; set; }
     public bool IsUnlocked { get; set; }
-    public string UnlockStatus { get; set; } = "NONE"; // NONE, PENDING, REQUESTED, UNLOCKED
+    public string UnlockStatus { get; set; } = "NONE"; // NONE, PENDING, REQUESTED, UNLOCKED, CONFIRMED
     
     // Only populated when IsUnlocked == true (Security enforcement)
     public ContactDetailsDto? OwnerContact { get; set; }

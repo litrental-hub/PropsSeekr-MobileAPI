@@ -6,15 +6,7 @@ namespace PropSeekr.Data;
 
 public class AppDbContext : DbContext
 {
-    private static readonly Guid SeedAdminId = Guid.Parse("b0ef71c1-13ab-4070-9d85-86571adf59c8");
-    private static readonly DateTime SeedAdminCreatedDate = new(2026, 6, 20, 0, 0, 0, DateTimeKind.Utc);
-    private const string SeedAdminPasswordHash = "PBKDF2-SHA256$100000$LVJ7kAGk7zNsEMneVYpBfyC8ZPENOZviao1yEc2gT1s=$hjnNN2d8W2s5SBkDGTAb+ct2M9qD+Csk7rNkZs9hlaM=";
-
-    public AppDbContext(DbContextOptions<AppDbContext> options)
-        : base(options)
-    {
-    }
-
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
     public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
@@ -23,145 +15,42 @@ public class AppDbContext : DbContext
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<UnlockedProperty> UnlockedProperties => Set<UnlockedProperty>();
     public DbSet<Notification> Notifications => Set<Notification>();
+    public DbSet<Match> Matches => Set<Match>();
+    public DbSet<MatchConfirmation> MatchConfirmations => Set<MatchConfirmation>();
+    public DbSet<Reveal> Reveals => Set<Reveal>();
+    public DbSet<CreditWallet> CreditWallets => Set<CreditWallet>();
+    public DbSet<CreditTransaction> CreditTransactions => Set<CreditTransaction>();
+    public DbSet<CreditPack> CreditPacks => Set<CreditPack>();
+    public DbSet<Payment> Payments => Set<Payment>();
 
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    protected override void OnModelCreating(ModelBuilder b)
     {
-        modelBuilder.Entity<Notification>()
-            .HasOne(n => n.User)
-            .WithMany()
-            .HasForeignKey(n => n.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
+        b.Entity<OtpVerification>().ToTable("OtpVerifications");
+        b.Entity<User>().HasIndex(x => x.MobileNumber).IsUnique();
+        b.Entity<User>().HasIndex(x => x.Email).IsUnique();
+        b.Entity<PropertyRequest>().Property(x => x.Location).HasColumnType("geography (point)");
+        b.Entity<PropertyRequest>().HasIndex(x => x.Location).HasMethod("GIST");
+        b.Entity<UnlockedProperty>().HasIndex(x => new { x.UserId, x.PropertyRequestId }).IsUnique();
 
-        modelBuilder.Entity<Notification>()
-            .HasIndex(n => n.UserId);
-
-        modelBuilder.Entity<Notification>()
-            .HasIndex(n => n.CreatedAt)
-            .IsDescending();
-
-        modelBuilder.Entity<User>()
-            .HasIndex(u => u.MobileNumber)
-            .IsUnique();
-
-        modelBuilder.Entity<User>()
-            .HasIndex(u => u.Email)
-            .IsUnique();
-
-        modelBuilder.Entity<User>()
-            .HasIndex(u => u.AadharNumber)
-            .IsUnique();
-
-        modelBuilder.Entity<User>()
-            .HasIndex(u => u.PanCard)
-            .IsUnique();
-
-        modelBuilder.Entity<AdminUser>()
-            .HasIndex(a => a.UserName)
-            .IsUnique();
-
-        modelBuilder.Entity<AdminUser>()
-            .HasData(new AdminUser
-            {
-                Id = SeedAdminId,
-                UserName = "admin",
-                PasswordHash = SeedAdminPasswordHash,
-                IsActive = true,
-                CreatedDate = SeedAdminCreatedDate,
-                ModifiedDate = SeedAdminCreatedDate
-            });
-
-        modelBuilder.Entity<OtpVerification>()
-            .HasIndex(o => new { o.MobileNumber, o.OtpCode });
-
-        // Map to the actual table name present in the database (OtpVerifications)
-        modelBuilder.Entity<OtpVerification>()
-            .ToTable("OtpVerifications");
-
-        modelBuilder.Entity<OtpVerification>()
-            .HasIndex(o => o.MobileNumber);
-
-        modelBuilder.Entity<EmailOtpRecord>()
-            .HasIndex(e => new { e.Email, e.Purpose, e.IsUsed, e.ExpiresAt });
-
-        modelBuilder.Entity<EmailOtpRecord>()
-            .HasIndex(e => e.ExpiresAt);
-
-        // Configure PropertyRequest relationships and indexes
-        modelBuilder.Entity<PropertyRequest>()
-            .HasOne(p => p.User)
-            .WithMany()
-            .HasForeignKey(p => p.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.UserId);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.TransactionType);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.ListingType);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.Category);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => new { p.City, p.Locality });
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.PostedAt)
-            .IsDescending();
-        
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.BudgetMin);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.BudgetMax);
-
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.PropertyTypesJson);
-
-        // Configure the PostGIS geography point column for spatial distance queries
-        modelBuilder.Entity<PropertyRequest>()
-            .Property(p => p.Location)
-            .HasColumnType("geography (point)");
-
-        // Spatial index for fast distance filtering
-        modelBuilder.Entity<PropertyRequest>()
-            .HasIndex(p => p.Location)
-            .HasMethod("GIST");
-
-        // Configure PaymentTransaction relationships and indexes
-        modelBuilder.Entity<PaymentTransaction>()
-            .HasOne(p => p.User)
-            .WithMany()
-            .HasForeignKey(p => p.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        modelBuilder.Entity<PaymentTransaction>()
-            .HasIndex(p => p.RazorpayOrderId)
-            .IsUnique();
-
-        modelBuilder.Entity<PaymentTransaction>()
-            .HasIndex(p => p.Receipt)
-            .IsUnique();
-
-        // Configure UnlockedProperty relationships and unique index
-        modelBuilder.Entity<UnlockedProperty>()
-            .HasOne(u => u.User)
-            .WithMany()
-            .HasForeignKey(u => u.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        modelBuilder.Entity<UnlockedProperty>()
-            .HasOne(u => u.PropertyRequest)
-            .WithMany()
-            .HasForeignKey(u => u.PropertyRequestId)
-            .OnDelete(DeleteBehavior.Cascade);
-
-        modelBuilder.Entity<UnlockedProperty>()
-            .HasIndex(u => new { u.UserId, u.PropertyRequestId })
-            .IsUnique();
+        b.Entity<Match>(e =>
+        {
+            e.ToTable("matches"); e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("matchid");
+            e.Property(x => x.ListingId).HasColumnName("listing_id");
+            e.Property(x => x.RequirementId).HasColumnName("requirement_id");
+            e.Property(x => x.ListingBrokerId).HasColumnName("listing_broker_id");
+            e.Property(x => x.RequirementBrokerId).HasColumnName("requirement_broker_id");
+            e.Property(x => x.MatchScore).HasColumnName("match_score");
+            e.Property(x => x.Status).HasColumnName("status");
+            e.Property(x => x.State).HasColumnName("state");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.StatusUpdatedAt).HasColumnName("status_updated_at");
+        });
+        b.Entity<MatchConfirmation>(e => { e.ToTable("match_confirmations"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.AvailabilityConfirmed).HasColumnName("availability_confirmed"); e.Property(x => x.PriceValid).HasColumnName("price_valid"); e.Property(x => x.PriceNegotiable).HasColumnName("price_negotiable"); e.Property(x => x.ReadyToConnect).HasColumnName("ready_to_connect"); e.Property(x => x.ConfirmedAt).HasColumnName("confirmed_at"); e.Property(x => x.WindowExpiresAt).HasColumnName("window_expires_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.HasIndex(x => new { x.MatchId, x.BrokerId }).IsUnique(); });
+        b.Entity<Reveal>(e => { e.ToTable("reveals"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.RevealedAt).HasColumnName("revealed_at"); e.HasIndex(x => x.MatchId).IsUnique(); });
+        b.Entity<CreditWallet>(e => { e.ToTable("credit_wallets"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.FreeCreditsBalance).HasColumnName("free_credits_balance"); e.Property(x => x.PaidCreditsBalance).HasColumnName("paid_credits_balance"); e.Property(x => x.FreeCreditsResetAt).HasColumnName("free_credits_reset_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); e.HasIndex(x => x.BrokerId).IsUnique(); });
+        b.Entity<CreditTransaction>(e => { e.ToTable("credit_transactions"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.Type).HasColumnName("Type"); e.Property(x => x.Amount).HasColumnName("Amount"); e.Property(x => x.BalanceAfter).HasColumnName("balance_after"); e.Property(x => x.ReferenceType).HasColumnName("reference_type"); e.Property(x => x.ReferenceId).HasColumnName("reference_id"); e.Property(x => x.Notes).HasColumnName("Notes"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); });
+        b.Entity<CreditPack>(e => { e.ToTable("credit_packs"); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.Name).HasColumnName("Name"); e.Property(x => x.Credits).HasColumnName("Credits"); e.Property(x => x.Price).HasColumnName("Price"); e.Property(x => x.Active).HasColumnName("Active"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); });
+        b.Entity<Payment>(e => { e.ToTable("payments"); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.CreditPackId).HasColumnName("credit_pack_id"); e.Property(x => x.Amount).HasColumnName("amount"); e.Property(x => x.Currency).HasColumnName("currency"); e.Property(x => x.Gateway).HasColumnName("gateway"); e.Property(x => x.GatewayTransactionId).HasColumnName("gateway_txn_id"); e.Property(x => x.Status).HasColumnName("status"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); });
     }
 }
-

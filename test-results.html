@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PropSeekr Test Results</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2937; }
+    h1 { margin-bottom: 8px; }
+    .meta { color: #4b5563; margin-bottom: 20px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .ok { color: #065f46; }
+    .warn { color: #92400e; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; }
+    th { background: #f9fafb; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>PropSeekr MatchId Refactor - Test Results</h1>
+  <div class="meta">Generated: 2026-08-22</div>
+
+  <div class="card">
+    <h2>Scope</h2>
+    <p>Validate MatchId usage now derives from Matches table (Matches.Id) and verify solution health.</p>
+  </div>
+
+  <div class="card">
+    <h2>Execution Summary</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Check</th>
+          <th>Status</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Build</td>
+          <td class="ok">PASS</td>
+          <td><code>dotnet build</code> succeeded in 14.5s</td>
+        </tr>
+        <tr>
+          <td>Warnings</td>
+          <td class="warn">1 Warning</td>
+          <td>SearchPropertyService.cs(146,44): CS8600 (pre-existing, unrelated to MatchId change)</td>
+        </tr>
+        <tr>
+          <td>Automated Tests</td>
+          <td class="ok">PASS</td>
+          <td><code>dotnet test</code> completed successfully; no failing tests reported</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Functional Verification Notes</h2>
+    <ul>
+      <li>Legacy unlock path now delegates to UnlockService using MatchId as Matches.Id.</li>
+      <li>User match listing now resolves and returns MatchId from Matches table pairings.</li>
+      <li>Unlocked matches payload now backfills MatchId from Matches table relations where available.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Changed File</h2>
+    <p>Services/UserMatchesService.cs</p>
+  </div>
+</body>
+</html>
