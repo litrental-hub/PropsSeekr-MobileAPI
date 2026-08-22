@@ -200,8 +200,11 @@ public class RazorpayService : IRazorpayService
         transaction.Status = PaymentStatus.Success.ToString();
         transaction.ModifiedDate = DateTime.UtcNow;
 
-        // Award Credits & update legacy tables
-        await UpdateLegacyWalletAndBrokerAsync(user, transaction.CreditsAwarded, "payment", null, $"Purchase of credits for order {transaction.RazorpayOrderId}");
+        // Award Credits
+        user.Credits += transaction.CreditsAwarded;
+        user.ModifiedDate = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
 
         _logger.LogInformation("Successfully verified payment. Awarded {Credits} credits to User {UserId}. New Balance: {NewBalance}", 
             transaction.CreditsAwarded, userId, user.Credits);
@@ -295,8 +298,10 @@ public class RazorpayService : IRazorpayService
             transaction.Status = PaymentStatus.Success.ToString();
             transaction.ModifiedDate = DateTime.UtcNow;
 
-            // Award Credits & update legacy tables
-            await UpdateLegacyWalletAndBrokerAsync(user, transaction.CreditsAwarded, "payment", null, $"Purchase of credits for order {transaction.RazorpayOrderId}");
+            user.Credits += transaction.CreditsAwarded;
+            user.ModifiedDate = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
             _logger.LogInformation("Webhook applied: Transaction {OrderId} set to Success. Awarded {Credits} credits. New Balance: {Balance}", 
                 orderId, transaction.CreditsAwarded, user.Credits);
         }
@@ -313,75 +318,6 @@ public class RazorpayService : IRazorpayService
             await _context.SaveChangesAsync();
             _logger.LogInformation("Webhook applied: Transaction {OrderId} set to Failed. Reason: {Reason}", orderId, transaction.FailureReason);
         }
-    }
-
-    private async Task UpdateLegacyWalletAndBrokerAsync(User user, int creditsAwarded, string referenceType, long? referenceId, string notes)
-    {
-        // 1. Get or create Broker
-        var broker = await _context.Brokers.FirstOrDefaultAsync(b => b.PhoneNumber == user.MobileNumber);
-        if (broker == null)
-        {
-            broker = new Broker
-            {
-                PhoneNumber = user.MobileNumber,
-                Name = user.Name,
-                CreditBalance = user.Credits,
-                Status = "active",
-                CreatedAt = DateTime.UtcNow,
-                LastActiveAt = DateTime.UtcNow,
-                ConfirmationComplianceRate = 100.00m,
-                VisibilityPenaltyFlag = false
-            };
-            _context.Brokers.Add(broker);
-            await _context.SaveChangesAsync();
-        }
-
-        // 2. Get or create CreditWallet
-        var wallet = await _context.CreditWallets.FirstOrDefaultAsync(w => w.BrokerId == broker.Id);
-        if (wallet == null)
-        {
-            wallet = new CreditWallet
-            {
-                BrokerId = broker.Id,
-                FreeCreditsBalance = 0,
-                PaidCreditsBalance = creditsAwarded,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-            _context.CreditWallets.Add(wallet);
-        }
-        else
-        {
-            wallet.PaidCreditsBalance += creditsAwarded;
-            wallet.UpdatedAt = DateTime.UtcNow;
-            _context.CreditWallets.Update(wallet);
-        }
-        await _context.SaveChangesAsync();
-
-        // 3. Log ledger transaction
-        var ledgerTx = new CreditTransaction
-        {
-            BrokerId = broker.Id,
-            Type = "purchase",
-            Amount = creditsAwarded,
-            BalanceAfter = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance,
-            ReferenceType = referenceType,
-            ReferenceId = referenceId,
-            Notes = notes,
-            CreatedAt = DateTime.UtcNow
-        };
-        _context.CreditTransactions.Add(ledgerTx);
-
-        // 4. Update user's BrokerId and Credits in Users table (to keep in sync)
-        user.BrokerId = broker.Id;
-        user.Credits = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
-        user.ModifiedDate = DateTime.UtcNow;
-
-        // 5. Update broker CreditBalance
-        broker.CreditBalance = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
-        _context.Brokers.Update(broker);
-
-        await _context.SaveChangesAsync();
     }
 
     private static string ComputeHmacSha256(string message, string secret)

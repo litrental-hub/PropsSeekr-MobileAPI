@@ -57,16 +57,6 @@ public class PropertyRequest
 
     public double RadiusKm { get; set; }
 
-    // Freshness & Availability tracking
-    public DateTime? LastConfirmedAt { get; set; }
-    public int FreshnessScore { get; set; } = 100;
-
-    [MaxLength(50)]
-    public string FreshnessCategory { get; set; } = "Fresh"; // Recently Confirmed, Fresh, Moderate, Old, Expired
-
-    [MaxLength(50)]
-    public string AvailabilityStatus { get; set; } = "Available"; // Available, UnderNegotiation, Sold, Rented
-
     // Timestamps
     public DateTime PostedAt { get; set; } = DateTime.UtcNow;
     public DateTime ModifiedDate { get; set; } = DateTime.UtcNow;

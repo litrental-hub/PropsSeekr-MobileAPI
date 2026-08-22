@@ -14,7 +14,6 @@ using PropSeekr.Data;
 using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
 
-AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Logging.ClearProviders();
@@ -26,7 +25,7 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 
 if (connectionString != null)
 {
-    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "08848bbeba4892b40fd6f720dcee07de3936e6e3");
+    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
 }
 
 var secretName = builder.Configuration["AWS:DatabaseSecretName"];
@@ -91,8 +90,7 @@ if (!string.IsNullOrWhiteSpace(secretName))
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
         connectionString,
-        o => o.UseNetTopologySuite())
-           .ConfigureWarnings(warnings => warnings.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)));
+        o => o.UseNetTopologySuite()));
 
 // Services
 builder.Services.AddHttpClient();

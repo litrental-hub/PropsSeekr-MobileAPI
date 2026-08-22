@@ -1,17 +1,11 @@
 using System;
 using System.ComponentModel.DataAnnotations;
-using System.ComponentModel.DataAnnotations.Schema;
 
 namespace PropSeekr.Models;
 
 public class User
 {
     public Guid Id { get; set; }
-
-    public int? BrokerId { get; set; }
-
-    [ForeignKey("BrokerId")]
-    public Broker? Broker { get; set; }
 
     [MaxLength(100)]
     public string Name { get; set; } = string.Empty;

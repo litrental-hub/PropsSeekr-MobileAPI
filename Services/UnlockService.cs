@@ -63,44 +63,18 @@ public class UnlockService : IUnlockService
         return Response(match, result.Success ? "Both brokers confirmed; contacts revealed." : result.Message, confirmation.WindowExpiresAt);
     }
 
-    public Task<UnlockPropertyResponseDto> UnlockMatchAsync(Guid userId, UnlockPropertyRequestDto request) => RevealAsync(request.MatchId, userId);
+    public Task<UnlockPropertyResponseDto> UnlockMatchAsync(Guid _, UnlockPropertyRequestDto request) => RevealAsync(request.MatchId);
 
-    private async Task<UnlockPropertyResponseDto> RevealAsync(int matchId, Guid userId)
+    private async Task<UnlockPropertyResponseDto> RevealAsync(int matchId)
     {
         await using var transaction = await _dbContext.Database.BeginTransactionAsync();
         var match = await _dbContext.Matches.SingleOrDefaultAsync(m => m.Id == matchId)
             ?? throw new KeyNotFoundException("Match not found.");
         var existing = await _dbContext.Reveals.SingleOrDefaultAsync(r => r.MatchId == matchId);
-
-        // Fetch counterparty details
-        var user = await _dbContext.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId)
-            ?? throw new KeyNotFoundException("User not found.");
-        var callerBroker = await _dbContext.Brokers.AsNoTracking().FirstOrDefaultAsync(b => b.PhoneNumber == user.MobileNumber);
-
-        Broker? counterParty = null;
-        if (callerBroker != null)
-        {
-            if (callerBroker.Id == match.ListingBrokerId)
-            {
-                counterParty = await _dbContext.Brokers.AsNoTracking().FirstOrDefaultAsync(b => b.Id == match.RequirementBrokerId);
-            }
-            else if (callerBroker.Id == match.RequirementBrokerId)
-            {
-                counterParty = await _dbContext.Brokers.AsNoTracking().FirstOrDefaultAsync(b => b.Id == match.ListingBrokerId);
-            }
-        }
-
-        var unlockedContact = counterParty != null ? new ContactDetailsDto
-        {
-            OwnerName = counterParty.Name ?? "Counterparty Broker",
-            OwnerMobile = counterParty.PhoneNumber ?? "N/A",
-            OwnerEmail = counterParty.Email
-        } : null;
-
         if (existing is not null)
         {
             await transaction.CommitAsync();
-            return new UnlockPropertyResponseDto { Success = true, Message = "Contact details already unlocked.", UnlockedContact = unlockedContact };
+            return new UnlockPropertyResponseDto { Success = true, Message = "Contact details already unlocked." };
         }
         if (!string.Equals(match.State, "confirmed", StringComparison.OrdinalIgnoreCase))
             return new UnlockPropertyResponseDto { Success = false, Message = "Both brokers must confirm before contacts are revealed." };
@@ -133,7 +107,7 @@ public class UnlockService : IUnlockService
         await _dbContext.SaveChangesAsync();
         await transaction.CommitAsync();
         _logger.LogInformation("Revealed match {MatchId} and deducted one credit from each broker.", matchId);
-        return new UnlockPropertyResponseDto { Success = true, Message = "Contacts revealed successfully.", UnlockedContact = unlockedContact, CreditsRemaining = wallets.Min(w => w.FreeCreditsBalance + w.PaidCreditsBalance) };
+        return new UnlockPropertyResponseDto { Success = true, Message = "Contacts revealed successfully.", CreditsRemaining = wallets.Min(w => w.FreeCreditsBalance + w.PaidCreditsBalance) };
     }
 
     public Task<bool> IsMatchRevealedAsync(int matchId, Guid _) => _dbContext.Reveals.AnyAsync(r => r.MatchId == matchId);

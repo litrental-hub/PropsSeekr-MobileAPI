@@ -40,7 +40,6 @@ public class ProfileService : IProfileService
     public async Task<ProfileResponseDto> GetProfileAsync(Guid userId)
     {
         var user = await GetUserAsync(userId);
-        await EnsureLegacyBrokerLinkedAsync(user);
 
         return MapToResponse(user);
     }
@@ -48,7 +47,6 @@ public class ProfileService : IProfileService
     public async Task<ProfileResponseDto> UpdateProfileAsync(Guid userId, UpdateProfileRequestDto request)
     {
         var user = await GetUserAsync(userId);
-        await EnsureLegacyBrokerLinkedAsync(user);
         var normalizedEmail = NormalizeOptionalEmail(request.Email);
         var normalizedProfilePhotoUrl = NormalizeOptional(request.ProfilePhotoUrl);
 
@@ -83,7 +81,6 @@ public class ProfileService : IProfileService
         ValidatePhoto(file);
 
         var user = await GetUserAsync(userId);
-        await EnsureLegacyBrokerLinkedAsync(user);
         var extension = Path.GetExtension(file.FileName);
         var fileName = $"{userId:N}_{Guid.NewGuid():N}{extension.ToLowerInvariant()}";
         var relativeFolder = _configuration["Uploads:ProfilePhotoFolder"] ?? "uploads/profile-photos";
@@ -159,8 +156,7 @@ public class ProfileService : IProfileService
             ProfilePhotoUrl = user.ProfilePhotoUrl,
             RemainingCreditBalance = user.Credits,
             IsEmailVerified = user.IsEmailVerified,
-            IsMobileVerified = user.IsMobileVerified,
-            BrokerId = user.BrokerId
+            IsMobileVerified = user.IsMobileVerified
         };
     }
 
@@ -195,82 +191,6 @@ public class ProfileService : IProfileService
     {
         var normalized = value?.Trim();
         return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
-    }
-
-    private async Task<int> EnsureLegacyBrokerLinkedAsync(User user)
-    {
-        if (user.BrokerId.HasValue)
-        {
-            // Sync credits from wallet to user record to avoid getting out of sync
-            var existingWallet = await _dbContext.CreditWallets.AsNoTracking().FirstOrDefaultAsync(w => w.BrokerId == user.BrokerId.Value);
-            if (existingWallet != null)
-            {
-                var expectedCredits = existingWallet.FreeCreditsBalance + existingWallet.PaidCreditsBalance;
-                if (user.Credits != expectedCredits)
-                {
-                    user.Credits = expectedCredits;
-                    user.ModifiedDate = DateTime.UtcNow;
-                    _dbContext.Users.Update(user);
-                    await _dbContext.SaveChangesAsync();
-                }
-            }
-            return user.BrokerId.Value;
-        }
-
-        var mobileRaw = user.MobileNumber ?? string.Empty;
-        var digitsOnly = new string(mobileRaw.Where(char.IsDigit).ToArray());
-        var normalizedMobile = digitsOnly.Length >= 10 ? digitsOnly.Substring(digitsOnly.Length - 10) : digitsOnly;
-
-        var broker = await _dbContext.Brokers.FirstOrDefaultAsync(b => 
-            b.PhoneNumber != null && 
-            (b.PhoneNumber == user.MobileNumber || b.PhoneNumber.EndsWith(normalizedMobile)));
-        if (broker == null)
-        {
-            broker = new Broker
-            {
-                Name = user.Name,
-                PhoneNumber = user.MobileNumber ?? "",
-                CreatedAt = DateTime.UtcNow,
-                LastActiveAt = DateTime.UtcNow
-            };
-            _dbContext.Brokers.Add(broker);
-            await _dbContext.SaveChangesAsync();
-        }
-
-        var wallet = await _dbContext.CreditWallets.FirstOrDefaultAsync(w => w.BrokerId == broker.Id);
-        if (wallet == null)
-        {
-            wallet = new CreditWallet
-            {
-                BrokerId = broker.Id,
-                FreeCreditsBalance = 10,
-                PaidCreditsBalance = 0,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-            _dbContext.CreditWallets.Add(wallet);
-            await _dbContext.SaveChangesAsync();
-
-            var grantTx = new CreditTransaction
-            {
-                BrokerId = broker.Id,
-                Type = "grant",
-                Amount = 10,
-                BalanceAfter = 10,
-                ReferenceType = "monthly_grant",
-                Notes = "Signup free grant credits balance",
-                CreatedAt = DateTime.UtcNow
-            };
-            _dbContext.CreditTransactions.Add(grantTx);
-            await _dbContext.SaveChangesAsync();
-        }
-
-        user.BrokerId = broker.Id;
-        user.Credits = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
-        user.ModifiedDate = DateTime.UtcNow;
-        await _dbContext.SaveChangesAsync();
-
-        return broker.Id;
     }
 }
 

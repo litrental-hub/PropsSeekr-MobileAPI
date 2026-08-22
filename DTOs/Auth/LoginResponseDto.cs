@@ -8,7 +8,6 @@ public class AuthenticatedUserDto
     public string? Email { get; set; }
     public bool IsMobileVerified { get; set; }
     public int Credits { get; set; }
-    public int? BrokerId { get; set; }
 }
 
 public class LoginResponseDto
