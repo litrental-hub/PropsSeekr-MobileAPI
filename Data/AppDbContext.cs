@@ -22,6 +22,17 @@ public class AppDbContext : DbContext
     public DbSet<CreditTransaction> CreditTransactions => Set<CreditTransaction>();
     public DbSet<CreditPack> CreditPacks => Set<CreditPack>();
     public DbSet<Payment> Payments => Set<Payment>();
+    public DbSet<Broker> Brokers => Set<Broker>();
+    public DbSet<BrokerNotification> BrokerNotifications => Set<BrokerNotification>();
+    public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
+    public DbSet<Listing> Listings => Set<Listing>();
+    public DbSet<Requirement> Requirements => Set<Requirement>();
+    public DbSet<ListingSize> ListingSizes => Set<ListingSize>();
+    public DbSet<ListingRequirement> ListingRequirements => Set<ListingRequirement>();
+    public DbSet<MatchStatus> MatchStatuses => Set<MatchStatus>();
+    public DbSet<Deal> Deals => Set<Deal>();
+    public DbSet<Visit> Visits => Set<Visit>();
+    public DbSet<Dispute> Disputes => Set<Dispute>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {

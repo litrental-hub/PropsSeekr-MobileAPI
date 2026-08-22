@@ -15,4 +15,8 @@ public class Match
     public string State { get; set; } = "matched";
     public DateTime? CreatedAt { get; set; }
     public DateTime? StatusUpdatedAt { get; set; }
+    public Listing? Listing { get; set; }
+    public Requirement? Requirement { get; set; }
+    public Broker? ListingBroker { get; set; }
+    public Broker? RequirementBroker { get; set; }
 }

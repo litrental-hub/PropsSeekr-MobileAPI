@@ -7,8 +7,10 @@ public class Payment
     public int Id { get; set; }
 
     public int BrokerId { get; set; }
+    public Broker? Broker { get; set; }
 
     public int? CreditPackId { get; set; }
+    public CreditPack? CreditPack { get; set; }
 
     public decimal Amount { get; set; }
 

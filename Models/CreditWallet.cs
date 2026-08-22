@@ -7,6 +7,7 @@ public class CreditWallet
     public int Id { get; set; }
 
     public int BrokerId { get; set; }
+    public Broker? Broker { get; set; }
 
     public int FreeCreditsBalance { get; set; } = 0;
     public int PaidCreditsBalance { get; set; } = 0;

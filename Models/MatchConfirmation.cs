@@ -10,6 +10,7 @@ public class MatchConfirmation
     public Match? Match { get; set; }
 
     public int BrokerId { get; set; }
+    public Broker? Broker { get; set; }
 
     // Pre-reveal checklist fields
     public bool? AvailabilityConfirmed { get; set; }

@@ -56,4 +56,6 @@ public class User
 
     public DateTime CreatedDate { get; set; } = DateTime.UtcNow;
     public DateTime ModifiedDate { get; set; } = DateTime.UtcNow;
+    public int? BrokerId { get; set; }
+    public Broker? Broker { get; set; }
 }

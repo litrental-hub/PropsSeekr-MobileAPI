@@ -7,6 +7,7 @@ public class CreditTransaction
     public long Id { get; set; } // BIGSERIAL
 
     public int BrokerId { get; set; }
+    public Broker? Broker { get; set; }
 
     // grant, purchase, deduct, refund, expiry
     public string Type { get; set; } = string.Empty;
