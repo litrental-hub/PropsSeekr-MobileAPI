@@ -21,7 +21,7 @@ public class Payment
     public string? Gateway { get; set; }
 
     [StringLength(255)]
-    public string? GatewayTransactionId { get; set; }
+    public string? GatewayTxnId { get; set; }
 
     // initiated, success, failed, refunded
     public string Status { get; set; } = "initiated";

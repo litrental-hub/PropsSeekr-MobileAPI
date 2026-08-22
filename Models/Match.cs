@@ -15,6 +15,15 @@ public class Match
     public string State { get; set; } = "matched";
     public DateTime? CreatedAt { get; set; }
     public DateTime? StatusUpdatedAt { get; set; }
+
+    // AI verification fields
+    public string? AiStatus { get; set; }
+    public decimal? AiConfidencePct { get; set; }
+    public string? AiReasoning { get; set; }
+    public string? AiFlagsJson { get; set; }
+    public DateTime? AiValidatedAt { get; set; }
+
+    // Navigation properties
     public Listing? Listing { get; set; }
     public Requirement? Requirement { get; set; }
     public Broker? ListingBroker { get; set; }
