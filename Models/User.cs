@@ -7,6 +7,9 @@ public class User
 {
     public Guid Id { get; set; }
 
+    /// <summary>Links the authenticated app account to the broker-owned matching and credit data.</summary>
+    public int? BrokerId { get; set; }
+
     [MaxLength(100)]
     public string Name { get; set; } = string.Empty;
 

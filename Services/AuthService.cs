@@ -22,17 +22,20 @@ public class AuthService : IAuthService
     private readonly IConfiguration _configuration;
     private readonly IOtpDeliveryService _otpDeliveryService;
     private readonly IServiceProvider _serviceProvider;
+    private readonly IBrokerIdentityService _brokerIdentityService;
 
     public AuthService(
         AppDbContext dbContext,
         IConfiguration configuration,
         IOtpDeliveryService otpDeliveryService,
-        IServiceProvider serviceProvider)
+        IServiceProvider serviceProvider,
+        IBrokerIdentityService brokerIdentityService)
     {
         _dbContext = dbContext;
         _configuration = configuration;
         _otpDeliveryService = otpDeliveryService;
         _serviceProvider = serviceProvider;
+        _brokerIdentityService = brokerIdentityService;
     }
 
     public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
@@ -82,6 +85,7 @@ public class AuthService : IAuthService
 
         _dbContext.Users.Add(user);
         await _dbContext.SaveChangesAsync();
+        await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
 
         await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
 

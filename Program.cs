@@ -106,6 +106,7 @@ builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IUnlockService, UnlockService>();
+builder.Services.AddScoped<IBrokerIdentityService, BrokerIdentityService>();
 
 builder.Services.AddAuthorization();
 
@@ -191,9 +192,10 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Auto-apply database migrations on startup
-using (var scope = app.Services.CreateScope())
+// Production migrations are explicit; an API restart must not mutate the database.
+if (builder.Configuration.GetValue<bool>("Database:ApplyMigrationsOnStartup"))
 {
+    using var scope = app.Services.CreateScope();
     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     dbContext.Database.Migrate();
 }

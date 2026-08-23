@@ -28,6 +28,7 @@ public class AppDbContext : DbContext
         b.Entity<OtpVerification>().ToTable("OtpVerifications");
         b.Entity<User>().HasIndex(x => x.MobileNumber).IsUnique();
         b.Entity<User>().HasIndex(x => x.Email).IsUnique();
+        b.Entity<User>().Property(x => x.BrokerId).HasColumnName("BrokerId");
         b.Entity<PropertyRequest>().Property(x => x.Location).HasColumnType("geography (point)");
         b.Entity<PropertyRequest>().HasIndex(x => x.Location).HasMethod("GIST");
         b.Entity<UnlockedProperty>().HasIndex(x => new { x.UserId, x.PropertyRequestId }).IsUnique();
