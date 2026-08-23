@@ -14,15 +14,18 @@ public class UserMatchesController : ControllerBase
     private readonly IUserMatchesService _userMatchesService;
     private readonly IUnlockService _unlockService;
     private readonly ILogger<UserMatchesController> _logger;
+    private readonly IBrokerIdentityService _brokerIdentityService;
 
     public UserMatchesController(
         IUserMatchesService userMatchesService,
         IUnlockService unlockService,
-        ILogger<UserMatchesController> logger)
+        ILogger<UserMatchesController> logger,
+        IBrokerIdentityService brokerIdentityService)
     {
         _userMatchesService = userMatchesService;
         _unlockService = unlockService;
         _logger = logger;
+        _brokerIdentityService = brokerIdentityService;
     }
 
     [HttpGet]
@@ -66,6 +69,9 @@ public class UserMatchesController : ControllerBase
         {
             return BadRequest(new { message = "MatchId mismatch." });
         }
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue) return Unauthorized(new { message = "No broker profile is linked to this account." });
+        request.BrokerId = brokerId.Value;
 
         try
         {
@@ -103,10 +109,12 @@ public class UserMatchesController : ControllerBase
         {
             return BadRequest(new { message = "MatchId mismatch." });
         }
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue) return Unauthorized(new { message = "No broker profile is linked to this account." });
 
         try
         {
-            var response = await _unlockService.UnlockMatchAsync(userId, request);
+            var response = await _unlockService.UnlockMatchAsync(brokerId.Value, request);
             if (!response.Success)
             {
                 return BadRequest(response);

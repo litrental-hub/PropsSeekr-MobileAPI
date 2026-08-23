@@ -16,6 +16,7 @@ public interface IUnlockService
     /// Deducts credits and creates reveal record.
     /// </summary>
     Task<UnlockPropertyResponseDto> UnlockMatchAsync(Guid userId, UnlockPropertyRequestDto request);
+    Task<UnlockPropertyResponseDto> UnlockMatchAsync(int brokerId, UnlockPropertyRequestDto request);
 
     /// <summary>
     /// Check if a match has been revealed.

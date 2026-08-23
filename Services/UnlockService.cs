@@ -64,12 +64,15 @@ public class UnlockService : IUnlockService
     }
 
     public Task<UnlockPropertyResponseDto> UnlockMatchAsync(Guid _, UnlockPropertyRequestDto request) => RevealAsync(request.MatchId);
+    public Task<UnlockPropertyResponseDto> UnlockMatchAsync(int brokerId, UnlockPropertyRequestDto request) => RevealAsync(request.MatchId, brokerId);
 
-    private async Task<UnlockPropertyResponseDto> RevealAsync(int matchId)
+    private async Task<UnlockPropertyResponseDto> RevealAsync(int matchId, int? callerBrokerId = null)
     {
         await using var transaction = await _dbContext.Database.BeginTransactionAsync();
         var match = await _dbContext.Matches.SingleOrDefaultAsync(m => m.Id == matchId)
             ?? throw new KeyNotFoundException("Match not found.");
+        if (callerBrokerId.HasValue && callerBrokerId != match.ListingBrokerId && callerBrokerId != match.RequirementBrokerId)
+            throw new UnauthorizedAccessException("Broker is not a party to this match.");
         var existing = await _dbContext.Reveals.SingleOrDefaultAsync(r => r.MatchId == matchId);
         if (existing is not null)
         {
