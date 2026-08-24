@@ -140,9 +140,17 @@ jobs:
       - name: Get current task definition
         id: task-def
         run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
+          echo "Using cluster: $CLUSTER_NAME, service: $SERVICE_NAME"
+
           TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --services ${{ secrets.ECS_SERVICE }} \
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" \
             --query 'services[0].taskDefinition' \
             --output text)
 
@@ -179,10 +187,16 @@ jobs:
 
       - name: Update ECS service
         run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
           echo "🚀 Deploying to ECS..."
           aws ecs update-service \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --service ${{ secrets.ECS_SERVICE }} \
+            --cluster "$CLUSTER_NAME" \
+            --service "$SERVICE_NAME" \
             --task-definition ${{ steps.update-task-def.outputs.new_task_def_arn }} \
             --force-new-deployment \
             --query 'service.serviceName' \
@@ -192,10 +206,16 @@ jobs:
 
       - name: Wait for service stability
         run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
           echo "⏳ Waiting for ECS service to stabilize (up to 10 minutes)..."
           aws ecs wait services-stable \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --services ${{ secrets.ECS_SERVICE }} \
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" \
             --timeout 600 || true
           echo "✅ Service stabilized."
 

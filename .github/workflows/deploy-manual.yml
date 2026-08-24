@@ -106,9 +106,17 @@ jobs:
       - name: Snapshot current task definition (for rollback)
         id: snapshot
         run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
+          echo "Using cluster: $CLUSTER_NAME, service: $SERVICE_NAME"
+
           CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --services ${{ secrets.ECS_SERVICE }} \
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" \
             --query 'services[0].taskDefinition' \
             --output text)
 
@@ -154,9 +162,15 @@ jobs:
 
       - name: Deploy to ECS
         run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
           aws ecs update-service \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --service ${{ secrets.ECS_SERVICE }} \
+            --cluster "$CLUSTER_NAME" \
+            --service "$SERVICE_NAME" \
             --task-definition ${{ steps.update.outputs.new_task_def_arn }} \
             --force-new-deployment \
             --query 'service.serviceName' \
@@ -166,10 +180,16 @@ jobs:
 
       - name: Wait for stability
         run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
           echo "⏳ Waiting for service to stabilize..."
           aws ecs wait services-stable \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --services ${{ secrets.ECS_SERVICE }} || true
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" || true
           echo "✅ Service stabilized."
 
       - name: Health check
