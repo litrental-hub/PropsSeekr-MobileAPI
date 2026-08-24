@@ -23,29 +23,16 @@ builder.Logging.AddDebug();
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
-if (connectionString != null)
-{
-    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
-}
-
 var secretName = builder.Configuration["AWS:DatabaseSecretName"];
 if (!string.IsNullOrWhiteSpace(secretName))
 {
     try
     {
         var region = builder.Configuration["AWS:Region"] ?? "ap-south-1";
-        var accessKey = builder.Configuration["AWS:AccessKeyId"];
-        var secretKey = builder.Configuration["AWS:SecretAccessKey"];
-
-        IAmazonSecretsManager secretsClient;
-        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
-        {
-            secretsClient = new AmazonSecretsManagerClient(accessKey, secretKey, RegionEndpoint.GetBySystemName(region));
-        }
-        else
-        {
-            secretsClient = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
-        }
+        // Use the AWS SDK default credential chain. In ECS this resolves to the
+        // task role, so long-lived IAM user credentials never enter source code.
+        using IAmazonSecretsManager secretsClient =
+            new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
 
         var request = new GetSecretValueRequest { SecretId = secretName };
         var response = secretsClient.GetSecretValueAsync(request).GetAwaiter().GetResult();

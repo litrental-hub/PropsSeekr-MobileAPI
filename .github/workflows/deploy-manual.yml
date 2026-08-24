@@ -25,6 +25,10 @@ on:
 env:
   ECR_REPOSITORY: propseekr-mobile-api
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   # ──────────────────────────────────────────────
   # Validate inputs
@@ -54,8 +58,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: propseekr-api-verify-${{ github.run_id }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Verify image exists in ECR
@@ -99,8 +103,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: propseekr-api-manual-deploy-${{ github.run_id }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Snapshot current task definition (for rollback)
