@@ -137,6 +137,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Diagnostic ECS Check
+        run: |
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
+          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
+
+          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
+          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
+
+          echo "=== AWS Identity ==="
+          aws sts get-caller-identity || true
+
+          echo "=== List Clusters ==="
+          aws ecs list-clusters 2>&1 || true
+
+          echo "=== Describe Services (with error capture) ==="
+          aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" 2>&1 || true
+
       - name: Get current task definition
         id: task-def
         run: |
