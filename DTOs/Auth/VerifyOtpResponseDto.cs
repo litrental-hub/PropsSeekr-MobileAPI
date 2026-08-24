@@ -8,5 +8,7 @@ public class VerifyOtpResponseDto
 
     public Guid UserId { get; set; }
 
+    public int? BrokerId { get; set; }
+
     public string UserName { get; set; } = string.Empty;
 }

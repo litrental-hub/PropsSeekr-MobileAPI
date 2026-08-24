@@ -18,6 +18,7 @@ public class CreditTransaction
 
     public string? ReferenceType { get; set; } // reveal, payment, dispute, monthly_grant
     public long? ReferenceId { get; set; }
+    public string? ReferenceKey { get; set; }
 
     public string? Notes { get; set; }
 

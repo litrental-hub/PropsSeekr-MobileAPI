@@ -6,7 +6,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PropSeekr.Data;
+using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
+using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Controllers;
 
@@ -16,10 +18,17 @@ namespace PropSeekr.Controllers;
 public class MatchesController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
+    private readonly IUnlockService _unlockService;
+    private readonly IBrokerIdentityService _brokerIdentityService;
 
-    public MatchesController(AppDbContext dbContext)
+    public MatchesController(
+        AppDbContext dbContext,
+        IUnlockService unlockService,
+        IBrokerIdentityService brokerIdentityService)
     {
         _dbContext = dbContext;
+        _unlockService = unlockService;
+        _brokerIdentityService = brokerIdentityService;
     }
 
     [HttpGet("{matchId}")]
@@ -56,8 +65,9 @@ public class MatchesController : ControllerBase
             return Forbid();
         }
 
-        var isConfirmed = string.Equals(match.State, "confirmed", StringComparison.OrdinalIgnoreCase) ||
-                          string.Equals(match.State, "revealed", StringComparison.OrdinalIgnoreCase);
+        // Confirmation alone must never expose contacts. A reveals row is the
+        // sole authorization flag for unmasking counterparty information.
+        var isConfirmed = await _dbContext.Reveals.AsNoTracking().AnyAsync(r => r.MatchId == match.Id);
 
         var listing = match.Listing;
         var requirement = match.Requirement;
@@ -203,134 +213,44 @@ public class MatchesController : ControllerBase
     }
 
     [HttpPost("{matchId}/reveal")]
-    [AllowAnonymous] // Internal/Admin API (can be called automatically or manually)
+    [Obsolete("Use POST /api/v1/user-matches/matches/{matchId}/reveal instead.")]
     public async Task<IActionResult> RevealMatchContact([FromRoute] int matchId)
     {
-        var match = await _dbContext.Matches
-            .Include(m => m.Listing)
-            .Include(m => m.Requirement)
-            .Include(m => m.ListingBroker)
-            .Include(m => m.RequirementBroker)
-            .FirstOrDefaultAsync(m => m.Id == matchId);
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized(new { message = "Invalid authenticated user." });
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue)
+            return Unauthorized(new { message = "No broker profile is linked to this account." });
 
-        if (match == null)
+        try
         {
-            return NotFound(new { success = false, message = "Match not found." });
+            var response = await _unlockService.UnlockMatchAsync(
+                brokerId.Value,
+                new UnlockPropertyRequestDto { MatchId = matchId });
+            return response.Success ? Ok(response) : BadRequest(response);
         }
-
-        // Check if reveal already exists
-        var reveal = await _dbContext.Reveals.FirstOrDefaultAsync(r => r.MatchId == matchId);
-        if (reveal == null)
+        catch (KeyNotFoundException ex)
         {
-            // Execute the credits check and deduction logic
-            using var transaction = await _dbContext.Database.BeginTransactionAsync();
-            try
-            {
-                var walletA = await _dbContext.CreditWallets.FirstOrDefaultAsync(w => w.BrokerId == match.ListingBrokerId);
-                var walletB = await _dbContext.CreditWallets.FirstOrDefaultAsync(w => w.BrokerId == match.RequirementBrokerId);
-
-                // Balance check
-                if (walletA == null || (walletA.FreeCreditsBalance + walletA.PaidCreditsBalance) < 1)
-                {
-                    return BadRequest(new
-                    {
-                        error = "insufficient_credits",
-                        broker_id = match.ListingBrokerId,
-                        required = 1,
-                        available = walletA != null ? walletA.FreeCreditsBalance + walletA.PaidCreditsBalance : 0
-                    });
-                }
-
-                if (walletB == null || (walletB.FreeCreditsBalance + walletB.PaidCreditsBalance) < 1)
-                {
-                    return BadRequest(new
-                    {
-                        error = "insufficient_credits",
-                        broker_id = match.RequirementBrokerId,
-                        required = 1,
-                        available = walletB != null ? walletB.FreeCreditsBalance + walletB.PaidCreditsBalance : 0
-                    });
-                }
-
-                // Deduct credits for Listing Broker
-                DeductWalletCredits(walletA);
-                var grantTxA = new CreditTransaction
-                {
-                    BrokerId = match.ListingBrokerId,
-                    Type = "debit",
-                    Amount = 1,
-                    BalanceAfter = walletA.FreeCreditsBalance + walletA.PaidCreditsBalance,
-                    ReferenceType = "reveal",
-                    Notes = $"Deducted 1 credit for match reveal: {match.Id}",
-                    CreatedAt = DateTime.UtcNow
-                };
-                _dbContext.CreditTransactions.Add(grantTxA);
-
-                // Deduct credits for Requirement Broker
-                DeductWalletCredits(walletB);
-                var grantTxB = new CreditTransaction
-                {
-                    BrokerId = match.RequirementBrokerId,
-                    Type = "debit",
-                    Amount = 1,
-                    BalanceAfter = walletB.FreeCreditsBalance + walletB.PaidCreditsBalance,
-                    ReferenceType = "reveal",
-                    Notes = $"Deducted 1 credit for match reveal: {match.Id}",
-                    CreatedAt = DateTime.UtcNow
-                };
-                _dbContext.CreditTransactions.Add(grantTxB);
-
-                _dbContext.CreditWallets.Update(walletA);
-                _dbContext.CreditWallets.Update(walletB);
-
-                // Create Reveal record
-                reveal = new Reveal
-                {
-                    MatchId = match.Id,
-                    RevealedAt = DateTime.UtcNow
-                };
-                _dbContext.Reveals.Add(reveal);
-
-                // Update Match state
-                match.State = "confirmed";
-                match.Status = "confirmed";
-                match.StatusUpdatedAt = DateTime.UtcNow;
-
-                // Sync freshness timestamps
-                if (match.Listing != null)
-                {
-                    match.Listing.LastConfirmedAt = DateTime.UtcNow;
-                    _dbContext.Listings.Update(match.Listing);
-                }
-                if (match.Requirement != null)
-                {
-                    match.Requirement.LastConfirmedAt = DateTime.UtcNow;
-                    _dbContext.Requirements.Update(match.Requirement);
-                }
-
-                await _dbContext.SaveChangesAsync();
-                await transaction.CommitAsync();
-            }
-            catch (Exception ex)
-            {
-                await transaction.RollbackAsync();
-                return BadRequest(new { success = false, message = ex.Message });
-            }
+            return NotFound(new { message = ex.Message });
         }
-
-        return Ok(new
+        catch (UnauthorizedAccessException)
         {
-            match_id = match.Id,
-            revealed_at = reveal.RevealedAt,
-            broker_a_contact = match.ListingBroker?.PhoneNumber ?? "N/A",
-            broker_b_contact = match.RequirementBroker?.PhoneNumber ?? "N/A",
-            credits_deducted = 1
-        });
+            return Forbid();
+        }
     }
 
     [HttpGet("{matchId}/reveal")]
     public async Task<IActionResult> GetRevealStatus([FromRoute] int matchId)
     {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized(new { message = "Invalid authenticated user." });
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue)
+            return Unauthorized(new { message = "No broker profile is linked to this account." });
+        var match = await _dbContext.Matches.AsNoTracking().SingleOrDefaultAsync(m => m.Id == matchId);
+        if (match is null) return NotFound(new { success = false, message = "Match not found." });
+        if (match.ListingBrokerId != brokerId && match.RequirementBrokerId != brokerId) return Forbid();
+
         var reveal = await _dbContext.Reveals.AsNoTracking().FirstOrDefaultAsync(r => r.MatchId == matchId);
         if (reveal == null)
         {

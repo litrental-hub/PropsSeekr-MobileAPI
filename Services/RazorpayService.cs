@@ -145,18 +145,17 @@ public class RazorpayService : IRazorpayService
 
         if (!string.Equals(computedSignature, request.RazorpaySignature, StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogWarning("Signature verification failed. Expected: {Expected}, Received: {Received}", computedSignature, request.RazorpaySignature);
+            _logger.LogWarning("Signature verification failed for order {OrderId}.", request.RazorpayOrderId);
 
             // Update transaction to Failed if found
-            var failedTx = await _context.PaymentTransactions
-                .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId);
-            if (failedTx != null && failedTx.Status == PaymentStatus.Pending.ToString())
-            {
-                failedTx.Status = PaymentStatus.Failed.ToString();
-                failedTx.FailureReason = "Signature mismatch";
-                failedTx.ModifiedDate = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
-            }
+            await _context.PaymentTransactions
+                .Where(t => t.RazorpayOrderId == request.RazorpayOrderId &&
+                            t.UserId == userId &&
+                            t.Status == PaymentStatus.Pending.ToString())
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(t => t.Status, PaymentStatus.Failed.ToString())
+                    .SetProperty(t => t.FailureReason, "Signature mismatch")
+                    .SetProperty(t => t.ModifiedDate, DateTime.UtcNow));
 
             return new VerifyPaymentResponseDto
             {
@@ -165,9 +164,11 @@ public class RazorpayService : IRazorpayService
             };
         }
 
-        // 2. Update Database (Transaction Status & User Credits)
+        // The payment row is the idempotency gate. Exactly one caller (mobile
+        // verification or webhook) can claim it and credit the broker wallet.
         var transaction = await _context.PaymentTransactions
-            .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId);
+            .AsNoTracking()
+            .FirstOrDefaultAsync(t => t.RazorpayOrderId == request.RazorpayOrderId && t.UserId == userId);
 
         if (transaction == null)
         {
@@ -175,45 +176,51 @@ public class RazorpayService : IRazorpayService
             throw new KeyNotFoundException("Transaction record not found.");
         }
 
-        var user = await _context.Users.FindAsync(userId);
-        if (user == null)
+        var user = await _context.Users.FirstOrDefaultAsync(item => item.Id == userId);
+        if (user?.BrokerId is null)
         {
-            _logger.LogError("User {UserId} not found when applying payment credits.", userId);
-            throw new KeyNotFoundException("User not found.");
+            throw new KeyNotFoundException("A broker wallet is not linked to this user.");
         }
 
-        // Handle idempotency (if webhook already set it to success)
+        // Already-successful legacy transactions are not auto-credited here:
+        // doing so could double-credit manually reconciled purchases. The
+        // reconciliation report handles those rows explicitly.
         if (transaction.Status == PaymentStatus.Success.ToString())
         {
-            _logger.LogInformation("Transaction {OrderId} was already processed successfully.", request.RazorpayOrderId);
             return new VerifyPaymentResponseDto
             {
                 Success = true,
                 Message = "Payment verified successfully.",
-                NewBalance = user.Credits
+                NewBalance = await GetWalletTotalAsync(user.BrokerId.Value)
             };
         }
 
-        // Update transaction details
-        transaction.RazorpayPaymentId = request.RazorpayPaymentId;
-        transaction.RazorpaySignature = request.RazorpaySignature;
-        transaction.Status = PaymentStatus.Success.ToString();
-        transaction.ModifiedDate = DateTime.UtcNow;
+        await using var databaseTransaction = await _context.Database.BeginTransactionAsync();
+        var claimed = await _context.PaymentTransactions
+            .Where(item => item.Id == transaction.Id && item.Status != PaymentStatus.Success.ToString())
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.RazorpayPaymentId, request.RazorpayPaymentId)
+                .SetProperty(item => item.RazorpaySignature, request.RazorpaySignature)
+                .SetProperty(item => item.Status, PaymentStatus.Success.ToString())
+                .SetProperty(item => item.FailureReason, (string?)null)
+                .SetProperty(item => item.ModifiedDate, DateTime.UtcNow));
 
-        // Award Credits
-        user.Credits += transaction.CreditsAwarded;
-        user.ModifiedDate = DateTime.UtcNow;
+        var newBalance = claimed == 1
+            ? await CreditWalletForPaymentAsync(user, transaction)
+            : await GetWalletTotalAsync(user.BrokerId.Value);
+        await databaseTransaction.CommitAsync();
 
-        await _context.SaveChangesAsync();
-
-        _logger.LogInformation("Successfully verified payment. Awarded {Credits} credits to User {UserId}. New Balance: {NewBalance}", 
-            transaction.CreditsAwarded, userId, user.Credits);
+        _logger.LogInformation(
+            "Verified payment {OrderId}; wallet balance for broker {BrokerId} is {Balance}.",
+            request.RazorpayOrderId,
+            user.BrokerId.Value,
+            newBalance);
 
         return new VerifyPaymentResponseDto
         {
             Success = true,
             Message = "Payment verified successfully.",
-            NewBalance = user.Credits
+            NewBalance = newBalance
         };
     }
 
@@ -269,8 +276,9 @@ public class RazorpayService : IRazorpayService
             return;
         }
 
-        // 3. Update Database (Idempotent Transaction Update)
+        // 3. Update Database using the payment status as an atomic idempotency gate.
         var transaction = await _context.PaymentTransactions
+            .AsNoTracking()
             .FirstOrDefaultAsync(t => t.RazorpayOrderId == orderId);
 
         if (transaction == null)
@@ -279,45 +287,108 @@ public class RazorpayService : IRazorpayService
             return;
         }
 
-        if (transaction.Status == PaymentStatus.Success.ToString())
-        {
-            _logger.LogInformation("Webhook skipped processing. Transaction {OrderId} is already in Success state.", orderId);
-            return;
-        }
-
-        var user = await _context.Users.FindAsync(transaction.UserId);
-        if (user == null)
-        {
-            _logger.LogError("Webhook processing failed: User {UserId} associated with transaction {OrderId} not found.", transaction.UserId, orderId);
-            return;
-        }
-
         if (eventType == "payment.captured" || eventType == "order.paid")
         {
-            transaction.RazorpayPaymentId = paymentId;
-            transaction.Status = PaymentStatus.Success.ToString();
-            transaction.ModifiedDate = DateTime.UtcNow;
+            var user = await _context.Users.FirstOrDefaultAsync(item => item.Id == transaction.UserId);
+            if (user?.BrokerId is null)
+            {
+                _logger.LogError("Webhook cannot credit order {OrderId}: no broker wallet is linked.", orderId);
+                return;
+            }
 
-            user.Credits += transaction.CreditsAwarded;
-            user.ModifiedDate = DateTime.UtcNow;
-
-            await _context.SaveChangesAsync();
-            _logger.LogInformation("Webhook applied: Transaction {OrderId} set to Success. Awarded {Credits} credits. New Balance: {Balance}", 
-                orderId, transaction.CreditsAwarded, user.Credits);
+            await using var databaseTransaction = await _context.Database.BeginTransactionAsync();
+            var claimed = await _context.PaymentTransactions
+                .Where(item => item.Id == transaction.Id && item.Status != PaymentStatus.Success.ToString())
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.RazorpayPaymentId, paymentId)
+                    .SetProperty(item => item.Status, PaymentStatus.Success.ToString())
+                    .SetProperty(item => item.FailureReason, (string?)null)
+                    .SetProperty(item => item.ModifiedDate, DateTime.UtcNow));
+            if (claimed == 1)
+            {
+                await CreditWalletForPaymentAsync(user, transaction);
+            }
+            await databaseTransaction.CommitAsync();
         }
         else if (eventType == "payment.failed")
         {
             string errorCode = entityProp.TryGetProperty("error_code", out var codeProp) ? codeProp.GetString() ?? string.Empty : string.Empty;
             string errorDesc = entityProp.TryGetProperty("error_description", out var descProp) ? descProp.GetString() ?? string.Empty : string.Empty;
 
-            transaction.RazorpayPaymentId = paymentId;
-            transaction.Status = PaymentStatus.Failed.ToString();
-            transaction.FailureReason = $"Razorpay Error: [{errorCode}] {errorDesc}";
-            transaction.ModifiedDate = DateTime.UtcNow;
-
-            await _context.SaveChangesAsync();
-            _logger.LogInformation("Webhook applied: Transaction {OrderId} set to Failed. Reason: {Reason}", orderId, transaction.FailureReason);
+            var reason = $"Razorpay Error: [{errorCode}] {errorDesc}";
+            await _context.PaymentTransactions
+                .Where(item => item.Id == transaction.Id && item.Status != PaymentStatus.Success.ToString())
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.RazorpayPaymentId, paymentId)
+                    .SetProperty(item => item.Status, PaymentStatus.Failed.ToString())
+                    .SetProperty(item => item.FailureReason, reason)
+                    .SetProperty(item => item.ModifiedDate, DateTime.UtcNow));
         }
+    }
+
+    private async Task<int> CreditWalletForPaymentAsync(User user, PaymentTransaction payment)
+    {
+        var brokerId = user.BrokerId
+            ?? throw new KeyNotFoundException("A broker wallet is not linked to this user.");
+        var referenceKey = payment.Id.ToString("N");
+
+        // The payment status claim prevents duplicate calls. The ledger key is
+        // a second database-enforced guard against accidental double crediting.
+        if (await _context.CreditTransactions.AnyAsync(item =>
+                item.BrokerId == brokerId &&
+                item.ReferenceType == "payment" &&
+                item.ReferenceKey == referenceKey))
+        {
+            return await GetWalletTotalAsync(brokerId);
+        }
+
+        var wallet = await _context.CreditWallets
+            .FromSqlInterpolated($@"SELECT * FROM credit_wallets WHERE broker_id = {brokerId} FOR UPDATE")
+            .SingleOrDefaultAsync();
+        if (wallet is null)
+        {
+            wallet = new CreditWallet
+            {
+                BrokerId = brokerId,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+            _context.CreditWallets.Add(wallet);
+        }
+
+        wallet.PaidCreditsBalance += payment.CreditsAwarded;
+        wallet.UpdatedAt = DateTime.UtcNow;
+        var total = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
+
+        _context.CreditTransactions.Add(new CreditTransaction
+        {
+            BrokerId = brokerId,
+            Type = "purchase",
+            Amount = payment.CreditsAwarded,
+            BalanceAfter = total,
+            ReferenceType = "payment",
+            ReferenceKey = referenceKey,
+            Notes = $"Razorpay order {payment.RazorpayOrderId}",
+            CreatedAt = DateTime.UtcNow
+        });
+
+        // Compatibility-only mirrors. No API should use these columns as the
+        // source of truth after this change.
+        user.Credits = total;
+        user.ModifiedDate = DateTime.UtcNow;
+        var broker = await _context.Brokers.FirstOrDefaultAsync(item => item.Id == brokerId);
+        if (broker is not null) broker.CreditBalance = total;
+
+        await _context.SaveChangesAsync();
+        return total;
+    }
+
+    private async Task<int> GetWalletTotalAsync(int brokerId)
+    {
+        var wallet = await _context.CreditWallets.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.BrokerId == brokerId)
+            ?? throw new KeyNotFoundException("Credit wallet not found.");
+        return wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
     }
 
     private static string ComputeHmacSha256(string message, string secret)

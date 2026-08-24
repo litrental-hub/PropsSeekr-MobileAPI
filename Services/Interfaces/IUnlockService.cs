@@ -9,13 +9,14 @@ public interface IUnlockService
     /// Confirm match details before reveal (dual handshake).
     /// Both brokers must confirm within window period.
     /// </summary>
-    Task<MatchConfirmationResponseDto> ConfirmMatchAsync(Guid userId, MatchConfirmationRequestDto request);
+    Task<MatchConfirmationResponseDto> ConfirmMatchAsync(int brokerId, MatchConfirmationRequestDto request);
+
+    Task<MatchRejectionResponseDto> RejectMatchAsync(int brokerId, MatchRejectionRequestDto request);
 
     /// <summary>
     /// Unlock/reveal contact details for confirmed match.
     /// Deducts credits and creates reveal record.
     /// </summary>
-    Task<UnlockPropertyResponseDto> UnlockMatchAsync(Guid userId, UnlockPropertyRequestDto request);
     Task<UnlockPropertyResponseDto> UnlockMatchAsync(int brokerId, UnlockPropertyRequestDto request);
 
     /// <summary>

@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Claims;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PropSeekr.Data;
+using PropSeekr.DTOs.Inventory;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
+using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Controllers;
 
@@ -17,15 +20,98 @@ namespace PropSeekr.Controllers;
 public class ListingsController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
+    private readonly IBrokerIdentityService _brokerIdentityService;
+    private readonly IBrokerListingsService _brokerListingsService;
+    private readonly IAutomatedMatchingService _matchingService;
+    private readonly ILogger<ListingsController> _logger;
 
-    public ListingsController(AppDbContext dbContext)
+    public ListingsController(
+        AppDbContext dbContext,
+        IBrokerIdentityService brokerIdentityService,
+        IBrokerListingsService brokerListingsService,
+        IAutomatedMatchingService matchingService,
+        ILogger<ListingsController> logger)
     {
         _dbContext = dbContext;
+        _brokerIdentityService = brokerIdentityService;
+        _brokerListingsService = brokerListingsService;
+        _matchingService = matchingService;
+        _logger = logger;
+    }
+
+    [HttpGet("mine")]
+    [ProducesResponseType(typeof(GetBrokerListingsResponseDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetMyListings(
+        [FromQuery] int page = 1,
+        [FromQuery] int limit = 20,
+        [FromQuery] string? transactionType = null,
+        [FromQuery] string? status = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (page < 1 || limit is < 1 or > 100)
+        {
+            return BadRequest(new
+            {
+                success = false,
+                message = "page must be at least 1 and limit must be between 1 and 100."
+            });
+        }
+
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdClaim, out var userId))
+        {
+            return Unauthorized(new { success = false, message = "Invalid authenticated user." });
+        }
+
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId, cancellationToken);
+        if (!brokerId.HasValue)
+        {
+            return NotFound(new
+            {
+                success = false,
+                code = "broker_profile_not_linked",
+                message = "No broker profile is linked to this account."
+            });
+        }
+
+        try
+        {
+            var response = await _brokerListingsService.GetMyListingsAsync(
+                brokerId.Value,
+                page,
+                limit,
+                transactionType,
+                status,
+                cancellationToken);
+            return Ok(response);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
     }
 
     [HttpPost]
     public async Task<IActionResult> CreateListing([FromBody] CreateListingRequestDto request)
     {
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdClaim, out var userId))
+        {
+            return Unauthorized(new { success = false, message = "Invalid authenticated user." });
+        }
+
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue)
+        {
+            return NotFound(new
+            {
+                success = false,
+                code = "broker_profile_not_linked",
+                message = "No broker profile is linked to this account."
+            });
+        }
+
+        request.BrokerId = brokerId.Value;
         return await SaveListingInternal(request, request.Source ?? "manual");
     }
 
@@ -211,6 +297,18 @@ public class ListingsController : ControllerBase
             return NotFound(new { success = false, message = $"Broker ID {request.BrokerId} not found." });
         }
 
+        var normalizedListingType = request.ListingType?.Trim().ToUpperInvariant();
+        if (normalizedListingType == "RENTAL") normalizedListingType = "RENT";
+        if (normalizedListingType == "SALE") normalizedListingType = "SELL";
+        if (source == "manual" && normalizedListingType is not ("RENT" or "SELL" or "LEASE"))
+        {
+            return BadRequest(new
+            {
+                success = false,
+                message = "listing_type is required and must be RENT or SELL."
+            });
+        }
+
         using var transaction = await _dbContext.Database.BeginTransactionAsync();
         try
         {
@@ -220,7 +318,7 @@ public class ListingsController : ControllerBase
                 MasterId = request.MasterId,
                 Source = source,
                 RawMessageText = request.RawMessageText,
-                ListingType = request.ListingType ?? "SELL",
+                ListingType = normalizedListingType ?? "SELL",
                 PropertyType = request.PropertyType,
                 Configuration = request.Configuration,
                 Price = request.Price,
@@ -285,11 +383,24 @@ public class ListingsController : ControllerBase
 
             await transaction.CommitAsync();
 
+            IReadOnlyList<int> matches = [];
+            try
+            {
+                matches = await _matchingService.RunForListingAsync(listing.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Automated matching failed for listing {ListingId}", listing.Id);
+            }
+
             return Ok(new
             {
                 success = true,
                 listing_id = listing.Id,
-                message = "Listing created successfully."
+                match_count = matches.Count,
+                message = matches.Count == 0
+                    ? "Listing created successfully. No compatible matches were found yet."
+                    : $"Listing created successfully. {matches.Count} matches were found."
             });
         }
         catch (Exception ex)

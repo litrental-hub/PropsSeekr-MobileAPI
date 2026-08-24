@@ -107,6 +107,8 @@ builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IUnlockService, UnlockService>();
 builder.Services.AddScoped<IBrokerIdentityService, BrokerIdentityService>();
+builder.Services.AddScoped<IBrokerListingsService, BrokerListingsService>();
+builder.Services.AddScoped<IAutomatedMatchingService, AutomatedMatchingService>();
 
 builder.Services.AddAuthorization();
 
@@ -231,4 +233,3 @@ app.MapControllers();
 app.MapGet("/hello", () => "Hello World");
 
 app.Run();
-

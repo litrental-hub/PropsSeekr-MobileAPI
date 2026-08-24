@@ -128,55 +128,43 @@ public class BrokersController : ControllerBase
             return NotFound(new { message = "Target broker not found." });
         }
 
-        // Check if there is an unlocked reveal between these two brokers
         var isUnlocked = await _dbContext.Reveals.AnyAsync(r =>
             (r.Match!.Listing!.BrokerId == callingBrokerId && r.Match.Requirement!.BrokerId == brokerId) ||
             (r.Match!.Requirement!.BrokerId == callingBrokerId && r.Match.Listing!.BrokerId == brokerId));
+
+        var targetUser = await _dbContext.Users.AsNoTracking().FirstOrDefaultAsync(u => u.BrokerId == brokerId);
 
         var wallet = await _dbContext.CreditWallets.AsNoTracking().FirstOrDefaultAsync(w => w.BrokerId == brokerId);
         var freeCredits = wallet?.FreeCreditsBalance ?? 0;
         var paidCredits = wallet?.PaidCreditsBalance ?? 0;
 
-        if (isUnlocked)
-        {
-            var details = new BrokerDetailsResponseDto
-            {
-                BrokerId = targetBroker.Id,
-                Name = targetBroker.Name ?? "N/A",
-                Phone = targetBroker.PhoneNumber,
-                Locality = targetBroker.Locality ?? "N/A",
-                BrokerageName = targetBroker.BrokerageName ?? "N/A",
-                Status = targetBroker.Status ?? "active",
-                ResponseScore = targetBroker.ResponseScore ?? 100.00m,
-                ConfirmationComplianceRate = targetBroker.ConfirmationComplianceRate,
-                VisibilityPenaltyFlag = targetBroker.VisibilityPenaltyFlag,
-                FreeCreditsBalance = freeCredits,
-                PaidCreditsBalance = paidCredits
-            };
-            return Ok(details);
-        }
-        else
-        {
-            // Mask the phone number to preserve privacy until unlocked
-            var phone = targetBroker.PhoneNumber;
-            var maskedPhone = phone.Length >= 5 ? phone.Substring(0, 5) + "XXXXX" : "XXXXX";
+        var canViewPrivateDetails = callingBrokerId == brokerId || isUnlocked;
+        var phone = targetBroker.PhoneNumber;
+        var displayPhone = canViewPrivateDetails
+            ? phone
+            : phone.Length >= 5
+                ? phone[..5] + "XXXXX"
+                : "XXXXX";
 
-            var details = new BrokerDetailsResponseDto
-            {
-                BrokerId = targetBroker.Id,
-                Name = targetBroker.Name ?? "N/A",
-                Phone = maskedPhone,
-                Locality = targetBroker.Locality ?? "N/A",
-                BrokerageName = targetBroker.BrokerageName ?? "N/A",
-                Status = targetBroker.Status ?? "active",
-                ResponseScore = targetBroker.ResponseScore ?? 100.00m,
-                ConfirmationComplianceRate = targetBroker.ConfirmationComplianceRate,
-                VisibilityPenaltyFlag = targetBroker.VisibilityPenaltyFlag,
-                FreeCreditsBalance = freeCredits,
-                PaidCreditsBalance = paidCredits
-            };
-            return Ok(details);
-        }
+        var details = new BrokerDetailsResponseDto
+        {
+            BrokerId = targetBroker.Id,
+            Name = targetBroker.Name ?? "N/A",
+            Phone = displayPhone,
+            Locality = targetBroker.Locality ?? "N/A",
+            BrokerageName = targetBroker.BrokerageName ?? "N/A",
+            Status = targetBroker.Status ?? "active",
+            ResponseScore = targetBroker.ResponseScore ?? 100.00m,
+            ConfirmationComplianceRate = targetBroker.ConfirmationComplianceRate,
+            VisibilityPenaltyFlag = targetBroker.VisibilityPenaltyFlag,
+            FreeCreditsBalance = freeCredits,
+            PaidCreditsBalance = paidCredits,
+            Email = canViewPrivateDetails ? targetUser?.Email : null,
+            CompanyGst = canViewPrivateDetails ? targetUser?.GSTNumber : null,
+            CompanyAddress = canViewPrivateDetails ? targetUser?.AddressLine1 : null,
+            ProfilePhotoUrl = canViewPrivateDetails ? targetUser?.ProfilePhotoUrl : null
+        };
+        return Ok(details);
     }
 
     [HttpPatch("{brokerId}")]
@@ -234,10 +222,35 @@ public class BrokersController : ControllerBase
             broker.BrokerageName = request.BrokerageName;
         }
 
-        broker.LastActiveAt = DateTime.UtcNow;
+        if (request.Email != null)
+        {
+            var normalizedEmail = request.Email.Trim();
+            var emailInUse = await _dbContext.Users.AnyAsync(user =>
+                user.Id != callingUser.Id && user.Email == normalizedEmail);
+            if (emailInUse)
+            {
+                return Conflict(new { message = "Another account is already registered with this email address." });
+            }
 
-        _dbContext.Brokers.Update(broker);
-        _dbContext.Users.Update(callingUser);
+            callingUser.Email = normalizedEmail;
+        }
+
+        if (request.CompanyGst != null)
+        {
+            callingUser.GSTNumber = request.CompanyGst;
+        }
+
+        if (request.CompanyAddress != null)
+        {
+            callingUser.AddressLine1 = request.CompanyAddress;
+        }
+
+        if (request.ProfilePhotoUrl != null)
+        {
+            callingUser.ProfilePhotoUrl = request.ProfilePhotoUrl;
+        }
+
+        broker.LastActiveAt = DateTime.UtcNow;
         await _dbContext.SaveChangesAsync();
 
         var wallet = await _dbContext.CreditWallets.AsNoTracking().FirstOrDefaultAsync(w => w.BrokerId == brokerId);
@@ -256,7 +269,11 @@ public class BrokersController : ControllerBase
             ConfirmationComplianceRate = broker.ConfirmationComplianceRate,
             VisibilityPenaltyFlag = broker.VisibilityPenaltyFlag,
             FreeCreditsBalance = freeCredits,
-            PaidCreditsBalance = paidCredits
+            PaidCreditsBalance = paidCredits,
+            Email = callingUser.Email,
+            CompanyGst = callingUser.GSTNumber,
+            CompanyAddress = callingUser.AddressLine1,
+            ProfilePhotoUrl = callingUser.ProfilePhotoUrl
         };
 
         return Ok(details);
@@ -351,7 +368,9 @@ public class BrokersController : ControllerBase
         {
             free_credits_balance = wallet.FreeCreditsBalance,
             paid_credits_balance = wallet.PaidCreditsBalance,
-            free_credits_reset_at = resetDate
+            total_credits_balance = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance,
+            free_credits_reset_at = resetDate,
+            updated_at = wallet.UpdatedAt
         });
     }
 
@@ -404,40 +423,137 @@ public class BrokersController : ControllerBase
     }
 
     [HttpGet("{brokerId}/notifications")]
-    public async Task<IActionResult> GetBrokerNotifications([FromRoute] int brokerId)
+    public async Task<IActionResult> GetBrokerNotifications(
+        [FromRoute] int brokerId,
+        [FromQuery] int page = 1,
+        [FromQuery] int limit = 20,
+        [FromQuery] string filter = "ALL")
     {
-        if (!TryGetCurrentUserId(out var userId))
-        {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        var callerUser = await _dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId);
-        if (callerUser == null || !callerUser.BrokerId.HasValue || callerUser.BrokerId.Value != brokerId)
+        if (!await CallerOwnsBrokerAsync(brokerId))
         {
             return Unauthorized(new { message = "You can only view your own notifications." });
         }
 
-        var dbNotifications = await _dbContext.BrokerNotifications
-            .AsNoTracking()
-            .Where(n => n.BrokerId == brokerId)
-            .OrderByDescending(n => n.CreatedAt)
-            .ToListAsync();
+        page = Math.Max(1, page);
+        limit = Math.Clamp(limit, 1, 100);
+        var normalizedFilter = filter.Trim().ToUpperInvariant();
 
-        var notifications = dbNotifications.Select(n => new
+        var query = _dbContext.BrokerNotifications
+            .AsNoTracking()
+            .Where(notification => notification.BrokerId == brokerId);
+
+        query = normalizedFilter switch
         {
-            id = n.Id,
-            type = n.Type,
-            channel = n.Channel,
-            payload = string.IsNullOrEmpty(n.PayloadJson) ? (object?)null : JsonSerializer.Deserialize<object>(n.PayloadJson, (JsonSerializerOptions?)null),
-            channel_status = n.ChannelStatus,
-            read_at = n.ReadAt,
-            created_at = n.CreatedAt
+            "UNREAD" => query.Where(notification => notification.ReadAt == null),
+            "MATCHES" => query.Where(notification => notification.Type == "match_found"),
+            "BROKER_REQUESTS" => query.Where(notification =>
+                notification.Type.StartsWith("confirm_")),
+            _ => query
+        };
+
+        var totalCount = await query.CountAsync();
+        var unreadCount = await _dbContext.BrokerNotifications
+            .AsNoTracking()
+            .CountAsync(notification => notification.BrokerId == brokerId && notification.ReadAt == null);
+        var dbNotifications = await query
+            .OrderByDescending(notification => notification.CreatedAt)
+            .ThenByDescending(notification => notification.Id)
+            .Skip((page - 1) * limit)
+            .Take(limit)
+            .ToListAsync();
+        var requestIds = dbNotifications
+            .Where(notification => notification.ConnectionRequestId.HasValue)
+            .Select(notification => notification.ConnectionRequestId!.Value)
+            .Distinct()
+            .ToArray();
+        var requestStatuses = await _dbContext.MatchConnectionRequests
+            .AsNoTracking()
+            .Where(request => requestIds.Contains(request.Id))
+            .ToDictionaryAsync(request => request.Id, request => request.Status);
+
+        var notifications = dbNotifications.Select(notification =>
+        {
+            var matchId = ReadMatchId(notification.PayloadJson);
+            var apiType = ApiNotificationType(notification.Type);
+            var content = NotificationContent(notification.Type);
+            var requestId = notification.ConnectionRequestId;
+            var actionStatus = requestId.HasValue && requestStatuses.TryGetValue(requestId.Value, out var status)
+                ? status
+                : null;
+            return new
+            {
+                notificationId = notification.Id.ToString(),
+                type = apiType,
+                title = content.Title,
+                message = content.Message,
+                isRead = notification.ReadAt.HasValue,
+                createdAt = notification.CreatedAt,
+                channelStatus = notification.ChannelStatus,
+                actionStatus,
+                meta = new { matchId, requestId }
+            };
         }).ToList();
 
         return Ok(new
         {
-            notifications = notifications
+            success = true,
+            unreadCount,
+            totalCount,
+            page,
+            limit,
+            data = notifications
         });
+    }
+
+    [HttpPatch("{brokerId}/notifications/{notificationId:long}/read")]
+    public async Task<IActionResult> MarkBrokerNotificationRead(
+        [FromRoute] int brokerId,
+        [FromRoute] long notificationId)
+    {
+        if (!await CallerOwnsBrokerAsync(brokerId))
+        {
+            return Unauthorized(new { message = "You can only update your own notifications." });
+        }
+
+        var notification = await _dbContext.BrokerNotifications
+            .SingleOrDefaultAsync(item => item.Id == notificationId && item.BrokerId == brokerId);
+        if (notification is null)
+        {
+            return NotFound(new { success = false, message = "Notification not found." });
+        }
+
+        if (!notification.ReadAt.HasValue)
+        {
+            notification.ReadAt = DateTime.UtcNow;
+            notification.ChannelStatus = "read";
+            await _dbContext.SaveChangesAsync();
+        }
+
+        var unreadCount = await _dbContext.BrokerNotifications
+            .CountAsync(item => item.BrokerId == brokerId && item.ReadAt == null);
+        return Ok(new { success = true, notificationId = notification.Id.ToString(), unreadCount });
+    }
+
+    [HttpPost("{brokerId}/notifications/mark-all-read")]
+    public async Task<IActionResult> MarkAllBrokerNotificationsRead([FromRoute] int brokerId)
+    {
+        if (!await CallerOwnsBrokerAsync(brokerId))
+        {
+            return Unauthorized(new { message = "You can only update your own notifications." });
+        }
+
+        var now = DateTime.UtcNow;
+        var unread = await _dbContext.BrokerNotifications
+            .Where(item => item.BrokerId == brokerId && item.ReadAt == null)
+            .ToListAsync();
+        foreach (var notification in unread)
+        {
+            notification.ReadAt = now;
+            notification.ChannelStatus = "read";
+        }
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(new { success = true, unreadCount = 0 });
     }
 
     [HttpGet("{brokerId}/notification-preferences")]
@@ -539,4 +655,53 @@ public class BrokersController : ControllerBase
         var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
         return Guid.TryParse(userIdClaim, out userId);
     }
+
+    private async Task<bool> CallerOwnsBrokerAsync(int brokerId)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return false;
+        }
+
+        return await _dbContext.Users
+            .AsNoTracking()
+            .AnyAsync(user => user.Id == userId && user.BrokerId == brokerId);
+    }
+
+    private static int? ReadMatchId(string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return document.RootElement.TryGetProperty("match_id", out var matchId) && matchId.TryGetInt32(out var value)
+                ? value
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string ApiNotificationType(string type) => type switch
+    {
+        "match_found" => "MATCH",
+        "confirm_pending" => "BROKER_UNLOCK",
+        "confirm_accepted" => "BROKER_ACCEPTED",
+        "confirm_rejected" => "BROKER_REJECTED",
+        "confirm_expired_resend" => "BROKER_REQUEST",
+        _ => "SYSTEM"
+    };
+
+    private static (string Title, string Message) NotificationContent(string type) => type switch
+    {
+        "match_found" => ("New Property Match", "A new property match is available. Open Matches to review it."),
+        "confirm_pending" => ("Match Unlock Request", "Another broker wants to connect. Open the match to review and accept."),
+        "confirm_accepted" => ("Connection Request Accepted", "Your request has been accepted. You can now connect with the other broker."),
+        "confirm_rejected" => ("Connection Request Declined", "The other broker declined this connection request. No tokens were deducted."),
+        "confirm_expired_resend" => ("Confirmation Window Expired", "The previous confirmation expired. Open the match to confirm again."),
+        "confirm_expired_counterparty" => ("Unlock Request Expired", "The other broker did not confirm within the four-hour window."),
+        _ => ("PropSeekr Update", "Open PropSeekr to view this update.")
+    };
 }

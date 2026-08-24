@@ -12,13 +12,26 @@ namespace PropSeekr.Services;
 public class RequirementService : IRequirementService
 {
     private readonly AppDbContext _dbContext;
+    private readonly IBrokerIdentityService _brokerIdentityService;
+    private readonly IAutomatedMatchingService _matchingService;
+    private readonly ILogger<RequirementService> _logger;
 
-    public RequirementService(AppDbContext dbContext)
+    public RequirementService(
+        AppDbContext dbContext,
+        IBrokerIdentityService brokerIdentityService,
+        IAutomatedMatchingService matchingService,
+        ILogger<RequirementService> logger)
     {
         _dbContext = dbContext;
+        _brokerIdentityService = brokerIdentityService;
+        _matchingService = matchingService;
+        _logger = logger;
     }
 
-    public async Task<MyRequirementsResponseDto> GetMyRequirementsAsync(Guid userId, PaginationDto pagination)
+    public async Task<MyRequirementsResponseDto> GetMyRequirementsAsync(
+        Guid userId,
+        PaginationDto pagination,
+        string? transactionType = null)
     {
         var pageNumber = pagination.Page > 0 ? pagination.Page : 1;
         var limit = pagination.Limit > 0 ? pagination.Limit : 20;
@@ -28,22 +41,41 @@ public class RequirementService : IRequirementService
             .AsNoTracking()
             .Where(p => p.UserId == userId && p.ListingType == "DEMAND");
 
-        var totalCount = await query.CountAsync();
+        if (!string.IsNullOrWhiteSpace(transactionType))
+        {
+            var normalizedTransactionType = transactionType.Trim().ToUpperInvariant().Replace('-', '_').Replace('/', '_');
+            if (normalizedTransactionType is "RENT" or "RENTAL" or "LEASE")
+            {
+                query = query.Where(p => p.TransactionType == "RENTAL" || p.TransactionType == "RENT");
+            }
+            else if (normalizedTransactionType is "BUY_SELL" or "BUY" or "SELL" or "SALE")
+            {
+                query = query.Where(p =>
+                    p.TransactionType == "BUY" ||
+                    p.TransactionType == "SELL" ||
+                    p.TransactionType == "BUY_SELL" ||
+                    p.TransactionType == "SALE");
+            }
+            else
+            {
+                throw new ArgumentException("transactionType must be RENTAL or BUY_SELL.", nameof(transactionType));
+            }
+        }
 
-        var requirements = await query
-            .OrderByDescending(p => p.PostedAt)
-            .Skip(skip)
-            .Take(limit)
-            .ToListAsync();
+        var requirements = await query.OrderByDescending(p => p.PostedAt).ToListAsync();
 
         var responseItems = requirements.Select(p => {
             var requiredArea = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson) : null;
             return new RequirementListItemDto
             {
+                Id = p.Id.ToString(),
                 RequirementId = p.Id.ToString(),
                 Description = p.Title,
                 TransactionType = p.TransactionType,
                 Category = p.Category,
+                PropertyType = p.Category,
+                Locality = p.Locality,
+                Location = p.Locality,
                 Budget = new BudgetResponseDto
                 {
                     Min = p.BudgetMin ?? 0,
@@ -71,12 +103,98 @@ public class RequirementService : IRequirementService
             };
         }).ToList();
 
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (brokerId.HasValue)
+        {
+            var canonicalQuery = _dbContext.Requirements
+                .AsNoTracking()
+                .Where(requirement => requirement.BrokerId == brokerId.Value);
+
+            if (!string.IsNullOrWhiteSpace(transactionType))
+            {
+                var normalizedTransactionType = transactionType.Trim().ToUpperInvariant().Replace('-', '_').Replace('/', '_');
+                if (normalizedTransactionType is "RENT" or "RENTAL" or "LEASE")
+                {
+                    canonicalQuery = canonicalQuery.Where(requirement =>
+                        requirement.RequirementType == "RENT" ||
+                        requirement.RequirementType == "RENTAL" ||
+                        requirement.RequirementType == "LEASE");
+                }
+                else
+                {
+                    canonicalQuery = canonicalQuery.Where(requirement =>
+                        requirement.RequirementType == "BUY" ||
+                        requirement.RequirementType == "SELL" ||
+                        requirement.RequirementType == "BUY_SELL" ||
+                        requirement.RequirementType == "SALE" ||
+                        requirement.RequirementType == "PURCHASE");
+                }
+            }
+
+            var canonical = await canonicalQuery.OrderByDescending(requirement => requirement.CreatedAt).ToListAsync();
+            var canonicalIds = canonical.Select(requirement => requirement.Id).ToArray();
+            var matchCounts = canonicalIds.Length == 0
+                ? new Dictionary<int, int>()
+                : await _dbContext.Matches.AsNoTracking()
+                    .Where(match => canonicalIds.Contains(match.RequirementId))
+                    .GroupBy(match => match.RequirementId)
+                    .Select(group => new { RequirementId = group.Key, Count = group.Count() })
+                    .ToDictionaryAsync(row => row.RequirementId, row => row.Count);
+
+            responseItems.AddRange(canonical.Select(requirement =>
+            {
+                var id = requirement.Id.ToString();
+                var configuration = requirement.Configurations?.FirstOrDefault() ?? string.Empty;
+                var propertyType = requirement.PropertyType ?? "Property";
+                var action = IsRentalRequirement(requirement.RequirementType) ? "Rent" : "Buy";
+                var city = requirement.City ?? "Location not specified";
+                return new RequirementListItemDto
+                {
+                    Id = id,
+                    RequirementId = id,
+                    Description = $"Wants to {action} {configuration} {propertyType}".Replace("  ", " ").Trim(),
+                    TransactionType = IsRentalRequirement(requirement.RequirementType) ? "RENTAL" : "BUY_SELL",
+                    Category = propertyType,
+                    PropertyType = propertyType,
+                    Configuration = configuration,
+                    Locality = city,
+                    Location = city,
+                    MatchesFound = matchCounts.GetValueOrDefault(requirement.Id),
+                    Budget = new BudgetResponseDto
+                    {
+                        Min = 0,
+                        Max = Convert.ToInt64(requirement.Budget ?? 0),
+                        DisplayValue = requirement.Budget.HasValue ? $"₹{requirement.Budget.Value}" : string.Empty,
+                        Currency = "INR"
+                    },
+                    PreferredLocation = new LocationDto { City = city, Locality = city },
+                    RequiredArea = new RequiredAreaDto
+                    {
+                        Min = Convert.ToInt32(requirement.Size ?? 0),
+                        Max = Convert.ToInt32(requirement.Size ?? 0),
+                        DisplayValue = requirement.Size.HasValue ? $"{requirement.Size.Value} SQFT" : string.Empty,
+                        Unit = "SQFT"
+                    },
+                    PostedAt = requirement.CreatedAt ?? DateTime.MinValue,
+                    Status = NormalizeStatus(requirement.Status)
+                };
+            }));
+        }
+
+        responseItems = responseItems
+            .OrderByDescending(item => item.PostedAt)
+            .Skip(skip)
+            .Take(limit)
+            .ToList();
+
         return new MyRequirementsResponseDto
         {
             Success = true,
             Metadata = new MetadataDto
             {
-                TotalCount = totalCount,
+                TotalCount = requirements.Count + (brokerId.HasValue
+                    ? await CountCanonicalRequirementsAsync(brokerId.Value, transactionType)
+                    : 0),
                 Page = pageNumber,
                 Limit = limit
             },
@@ -101,6 +219,9 @@ public class RequirementService : IRequirementService
         if (request.RadiusKm <= 0)
             throw new ArgumentException("Search radius must be greater than zero.");
 
+        if (string.IsNullOrWhiteSpace(request.PropertyType))
+            throw new ArgumentException("Property type is required.");
+
         var normalizedTransactionType = string.IsNullOrWhiteSpace(request.TransactionType) ? string.Empty : request.TransactionType.Trim().ToUpperInvariant();
         if (normalizedTransactionType == "BUY_SELL" || normalizedTransactionType == "BUY" || normalizedTransactionType == "PURCHASE")
         {
@@ -111,48 +232,74 @@ public class RequirementService : IRequirementService
             throw new ArgumentException("Transaction type must be BUY, BUY_SELL, or RENTAL.");
         }
 
-        var propertyRequest = new PropertyRequest
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId)
+            ?? throw new KeyNotFoundException("No broker profile is linked to this account.");
+
+        var requirement = new Requirement
         {
-            UserId = userId,
-            ListingType = "DEMAND",
-            TransactionType = normalizedTransactionType,
-            Category = request.Category,
-            Title = request.Description,
-            Status = "LOOKING",
-            BudgetMin = 0,
-            BudgetMax = request.BudgetMax,
+            BrokerId = brokerId,
+            Source = "manual",
+            RawMessageText = string.IsNullOrWhiteSpace(request.AdditionalNotes)
+                ? request.Description
+                : $"{request.Description}. {request.AdditionalNotes}",
+            RequirementType = normalizedTransactionType == "RENTAL" ? "RENT" : "BUY",
+            PropertyType = request.PropertyType.Trim().ToUpperInvariant(),
+            Configurations = request.Configurations.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray(),
+            Budget = request.BudgetMax,
+            BudgetUnit = "INR",
+            Size = request.MinimumSize,
+            FurnishingPref = request.FurnishingPreference,
+            FacingPref = request.FacingPreference,
+            Status = "active",
+            ExpiresAt = DateTime.UtcNow.AddDays(30),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            FreshnessUpdatedAt = DateTime.UtcNow,
             City = request.City,
-            Locality = request.Locality,
-            Location = new Point(request.Lng, request.Lat) { SRID = 4326 },
-            RadiusKm = request.RadiusKm,
-            PostedAt = DateTime.UtcNow,
-            ModifiedDate = DateTime.UtcNow,
-            RequiredAreaJson = JsonSerializer.Serialize(new RequiredAreaDto
-            {
-                Min = request.MinimumSize,
-                Max = request.MinimumSize,
-                DisplayValue = $"{request.MinimumSize} SQFT",
-                Unit = "SQFT"
-            }),
-            BudgetJson = JsonSerializer.Serialize(new BudgetResponseDto
-            {
-                Min = 0,
-                Max = request.BudgetMax,
-                DisplayValue = $"₹{request.BudgetMax}",
-                Currency = "INR"
-            })
+            PostedBy = "BROKER"
         };
 
-        _dbContext.PropertyRequests.Add(propertyRequest);
+        _dbContext.Requirements.Add(requirement);
         await _dbContext.SaveChangesAsync();
+
+        IReadOnlyList<int> matches = [];
+        try
+        {
+            matches = await _matchingService.RunForRequirementAsync(requirement.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Automated matching failed for requirement {RequirementId}", requirement.Id);
+        }
 
         return new CreateRequirementResponseDto
         {
             Success = true,
-            RequirementId = propertyRequest.Id.ToString(),
-            Message = "Requirement successfully posted."
+            RequirementId = requirement.Id.ToString(),
+            MatchCount = matches.Count,
+            Message = matches.Count == 0
+                ? "Requirement successfully posted. No compatible matches were found yet."
+                : $"Requirement successfully posted. {matches.Count} matches were found."
         };
     }
+
+    private async Task<int> CountCanonicalRequirementsAsync(int brokerId, string? transactionType)
+    {
+        var query = _dbContext.Requirements.AsNoTracking().Where(requirement => requirement.BrokerId == brokerId);
+        if (string.IsNullOrWhiteSpace(transactionType)) return await query.CountAsync();
+        var rental = IsRentalRequirement(transactionType);
+        return await query.CountAsync(requirement => rental
+            ? requirement.RequirementType == "RENT" || requirement.RequirementType == "RENTAL" || requirement.RequirementType == "LEASE"
+            : requirement.RequirementType == "BUY" || requirement.RequirementType == "SELL" || requirement.RequirementType == "BUY_SELL" || requirement.RequirementType == "SALE" || requirement.RequirementType == "PURCHASE");
+    }
+
+    private static bool IsRentalRequirement(string? value) =>
+        value?.Trim().ToUpperInvariant() is "RENT" or "RENTAL" or "LEASE";
+
+    private static string NormalizeStatus(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? "Under Review"
+            : char.ToUpperInvariant(value[0]) + value[1..].ToLowerInvariant();
 
     private static T? DeserializeJson<T>(string json) where T : class
     {

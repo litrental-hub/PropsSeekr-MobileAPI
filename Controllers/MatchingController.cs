@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -9,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
+using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Controllers;
 
@@ -17,10 +17,12 @@ namespace PropSeekr.Controllers;
 public class MatchingController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
+    private readonly IAutomatedMatchingService _matchingService;
 
-    public MatchingController(AppDbContext dbContext)
+    public MatchingController(AppDbContext dbContext, IAutomatedMatchingService matchingService)
     {
         _dbContext = dbContext;
+        _matchingService = matchingService;
     }
 
     [HttpPost("run")]
@@ -32,112 +34,23 @@ public class MatchingController : ControllerBase
             return BadRequest(new { success = false, message = "Either listing_id or requirement_id must be provided." });
         }
 
-        var matchedIds = new List<int>();
-
-        if (request.ListingId.HasValue)
+        try
         {
-            var listing = await _dbContext.Listings.FirstOrDefaultAsync(l => l.Id == request.ListingId.Value);
-            if (listing == null)
+            IReadOnlyList<int> matchedIds = request.ListingId.HasValue
+                ? await _matchingService.RunForListingAsync(request.ListingId.Value)
+                : await _matchingService.RunForRequirementAsync(request.RequirementId!.Value);
+
+            return Ok(new
             {
-                return NotFound(new { success = false, message = $"Listing ID {request.ListingId.Value} not found." });
-            }
-
-            // Find matching requirements
-            var matchingRequirements = await _dbContext.Requirements
-                .Where(r => r.BrokerId != listing.BrokerId &&
-                            r.PropertyType != null && listing.PropertyType != null &&
-                            r.PropertyType.ToLower() == listing.PropertyType.ToLower() &&
-                            r.Status == "active")
-                .ToListAsync();
-
-            // Filter compatible budgets manually to handle decimal formatting differences if needed
-            var matchesToCreate = matchingRequirements.Where(r => 
-                !r.Budget.HasValue || !listing.Price.HasValue || r.Budget.Value >= listing.Price.Value
-            ).ToList();
-
-            foreach (var req in matchesToCreate)
-            {
-                // Check duplicate
-                var exists = await _dbContext.Matches.AnyAsync(m => m.ListingId == listing.Id && m.RequirementId == req.Id);
-                if (!exists)
-                {
-                    var match = new Match
-                    {
-                        ListingId = listing.Id,
-                        RequirementId = req.Id,
-                        ListingBrokerId = listing.BrokerId,
-                        RequirementBrokerId = req.BrokerId,
-                        MatchScore = 95.00m,
-                        State = "matched",
-                        Status = "matched",
-                        CreatedAt = DateTime.UtcNow,
-                        StatusUpdatedAt = DateTime.UtcNow
-                    };
-                    _dbContext.Matches.Add(match);
-                    await _dbContext.SaveChangesAsync(); // Fetch match ID
-
-                    matchedIds.Add(match.Id);
-
-                    // Send Notifications
-                    await CreateNotificationsForMatch(match);
-                }
-            }
+                success = true,
+                message = $"Matching run completed. {matchedIds.Count} new matches identified.",
+                match_ids = matchedIds
+            });
         }
-        else if (request.RequirementId.HasValue)
+        catch (KeyNotFoundException ex)
         {
-            var req = await _dbContext.Requirements.FirstOrDefaultAsync(r => r.Id == request.RequirementId.Value);
-            if (req == null)
-            {
-                return NotFound(new { success = false, message = $"Requirement ID {request.RequirementId.Value} not found." });
-            }
-
-            // Find matching listings
-            var matchingListings = await _dbContext.Listings
-                .Where(l => l.BrokerId != req.BrokerId &&
-                            l.PropertyType != null && req.PropertyType != null &&
-                            l.PropertyType.ToLower() == req.PropertyType.ToLower() &&
-                            l.Status == "active")
-                .ToListAsync();
-
-            var matchesToCreate = matchingListings.Where(l =>
-                !req.Budget.HasValue || !l.Price.HasValue || req.Budget.Value >= l.Price.Value
-            ).ToList();
-
-            foreach (var listing in matchesToCreate)
-            {
-                // Check duplicate
-                var exists = await _dbContext.Matches.AnyAsync(m => m.ListingId == listing.Id && m.RequirementId == req.Id);
-                if (!exists)
-                {
-                    var match = new Match
-                    {
-                        ListingId = listing.Id,
-                        RequirementId = req.Id,
-                        ListingBrokerId = listing.BrokerId,
-                        RequirementBrokerId = req.BrokerId,
-                        MatchScore = 95.00m,
-                        State = "matched",
-                        Status = "matched",
-                        CreatedAt = DateTime.UtcNow,
-                        StatusUpdatedAt = DateTime.UtcNow
-                    };
-                    _dbContext.Matches.Add(match);
-                    await _dbContext.SaveChangesAsync();
-
-                    matchedIds.Add(match.Id);
-
-                    // Send Notifications
-                    await CreateNotificationsForMatch(match);
-                }
-            }
+            return NotFound(new { success = false, message = ex.Message });
         }
-
-        return Ok(new
-        {
-            success = true,
-            message = $"Matching run completed. {matchedIds.Count} new matches identified.",
-            match_ids = matchedIds
-        });
     }
 
     [HttpPost("expire-check")]
@@ -263,7 +176,6 @@ public class MatchingController : ControllerBase
 
                 // Update match state
                 match.State = "expired";
-                match.Status = "expired";
                 match.StatusUpdatedAt = DateTime.UtcNow;
                 _dbContext.Matches.Update(match);
 
@@ -285,34 +197,5 @@ public class MatchingController : ControllerBase
             await transaction.RollbackAsync();
             return BadRequest(new { success = false, message = ex.Message });
         }
-    }
-
-    private async Task CreateNotificationsForMatch(Match match)
-    {
-        // 1. Notify Listing Broker
-        var notifA = new BrokerNotification
-        {
-            BrokerId = match.ListingBrokerId,
-            Type = "match_found",
-            Channel = "in_app",
-            PayloadJson = JsonSerializer.Serialize(new { match_id = match.Id, role = "listing" }),
-            ChannelStatus = "pending",
-            CreatedAt = DateTime.UtcNow
-        };
-
-        // 2. Notify Requirement Broker
-        var notifB = new BrokerNotification
-        {
-            BrokerId = match.RequirementBrokerId,
-            Type = "match_found",
-            Channel = "in_app",
-            PayloadJson = JsonSerializer.Serialize(new { match_id = match.Id, role = "requirement" }),
-            ChannelStatus = "pending",
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _dbContext.BrokerNotifications.Add(notifA);
-        _dbContext.BrokerNotifications.Add(notifB);
-        await _dbContext.SaveChangesAsync();
     }
 }

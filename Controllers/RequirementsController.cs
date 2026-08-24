@@ -24,7 +24,9 @@ public class RequirementsController : ControllerBase
 
     [HttpGet("mine")]
     [Authorize]
-    public async Task<IActionResult> GetMyRequirements([FromQuery] PaginationDto pagination)
+    public async Task<IActionResult> GetMyRequirements(
+        [FromQuery] PaginationDto pagination,
+        [FromQuery] string? transactionType = null)
     {
         try
         {
@@ -34,7 +36,7 @@ public class RequirementsController : ControllerBase
                 return Unauthorized(new { message = "Invalid user" });
             }
 
-            var response = await _requirementService.GetMyRequirementsAsync(userId, pagination);
+            var response = await _requirementService.GetMyRequirementsAsync(userId, pagination, transactionType);
             return Ok(response);
         }
         catch (Exception ex)

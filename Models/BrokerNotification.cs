@@ -15,6 +15,9 @@ public class BrokerNotification
     [ForeignKey("BrokerId")]
     public Broker? Broker { get; set; }
 
+    [Column("connection_request_id")]
+    public long? ConnectionRequestId { get; set; }
+
     [Required]
     [MaxLength(50)]
     public string Type { get; set; } = string.Empty; // match_found, confirm_pending, reminder, expiry_warning, credit_low

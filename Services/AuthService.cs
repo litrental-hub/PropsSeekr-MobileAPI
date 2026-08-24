@@ -169,6 +169,7 @@ public class AuthService : IAuthService
             User = new AuthenticatedUserDto
             {
                 Id = user.Id,
+                BrokerId = user.BrokerId,
                 Name = user.Name,
                 MobileNumber = user.MobileNumber,
                 Email = user.Email,
@@ -326,6 +327,7 @@ public class AuthService : IAuthService
                 Token = token,
                 ExpiresAt = expiresAt,
                 UserId = user.Id,
+                BrokerId = user.BrokerId,
                 UserName = user.Name
             };
         }

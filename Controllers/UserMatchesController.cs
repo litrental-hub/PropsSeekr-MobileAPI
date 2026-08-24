@@ -29,7 +29,14 @@ public class UserMatchesController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetUserMatches([FromQuery] string? type, [FromQuery] string? transactionType)
+    public async Task<IActionResult> GetUserMatches(
+        [FromQuery] string? type,
+        [FromQuery] string? transactionType,
+        [FromQuery] int? listingId,
+        [FromQuery] int? requirementId,
+        [FromQuery] int? matchId,
+        [FromQuery] int page = 1,
+        [FromQuery] int limit = 20)
     {
         if (!TryGetCurrentUserId(out var userId))
         {
@@ -38,8 +45,21 @@ public class UserMatchesController : ControllerBase
 
         try
         {
+            if (listingId is <= 0)
+            {
+                return BadRequest(new { success = false, message = "listingId must be greater than zero." });
+            }
+            if (requirementId is <= 0)
+            {
+                return BadRequest(new { success = false, message = "requirementId must be greater than zero." });
+            }
+            if (matchId is <= 0)
+            {
+                return BadRequest(new { success = false, message = "matchId must be greater than zero." });
+            }
+
             var txType = type ?? transactionType;
-            var response = await _userMatchesService.GetUserMatchesAsync(userId, txType);
+            var response = await _userMatchesService.GetUserMatchesAsync(userId, txType, listingId, requirementId, matchId, page, limit);
             return Ok(response);
         }
         catch (KeyNotFoundException ex)
@@ -75,7 +95,7 @@ public class UserMatchesController : ControllerBase
 
         try
         {
-            var response = await _unlockService.ConfirmMatchAsync(userId, request);
+            var response = await _unlockService.ConfirmMatchAsync(brokerId.Value, request);
             return Ok(response);
         }
         catch (KeyNotFoundException ex)
@@ -84,11 +104,51 @@ public class UserMatchesController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            return Forbid(ex.Message);
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error confirming match {MatchId} for user {UserId}", matchId, userId);
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Reject a pending connection request. Rejection never deducts credits.
+    /// </summary>
+    [HttpPost("matches/{matchId}/reject")]
+    public async Task<IActionResult> RejectMatch(int matchId, [FromBody] MatchRejectionRequestDto request)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return Unauthorized(new { message = "Invalid authenticated user." });
+        }
+        if (matchId != request.MatchId)
+        {
+            return BadRequest(new { message = "MatchId mismatch." });
+        }
+
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue)
+        {
+            return Unauthorized(new { message = "No broker profile is linked to this account." });
+        }
+
+        try
+        {
+            return Ok(await _unlockService.RejectMatchAsync(brokerId.Value, request));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error rejecting match {MatchId} for user {UserId}", matchId, userId);
             return BadRequest(new { success = false, message = ex.Message });
         }
     }
@@ -127,7 +187,7 @@ public class UserMatchesController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            return Forbid(ex.Message);
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
         catch (Exception ex)
         {
@@ -170,7 +230,7 @@ public class UserMatchesController : ControllerBase
     }
 
     [HttpGet("unlocked")]
-    public async Task<IActionResult> GetUnlockedProperties()
+    public async Task<IActionResult> GetUnlockedProperties([FromQuery] int page = 1, [FromQuery] int limit = 20)
     {
         if (!TryGetCurrentUserId(out var userId))
         {
@@ -179,7 +239,7 @@ public class UserMatchesController : ControllerBase
 
         try
         {
-            var response = await _userMatchesService.GetUnlockedPropertiesAsync(userId);
+            var response = await _userMatchesService.GetUnlockedPropertiesAsync(userId, page, limit);
             return Ok(response);
         }
         catch (Exception ex)
@@ -195,4 +255,3 @@ public class UserMatchesController : ControllerBase
         return Guid.TryParse(userIdClaim, out userId);
     }
 }
-

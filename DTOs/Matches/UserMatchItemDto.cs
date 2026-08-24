@@ -31,9 +31,22 @@ public class RequirementMatchSideDto
 
 public class UserMatchItemDto
 {
-    // Match ID for unlock operations - replaces PropertyRequestId
+    // Canonical matches.matchid used by confirmation and reveal operations.
     public int MatchId { get; set; }
-    
+    public int ListingId { get; set; }
+    public int RequirementId { get; set; }
+
+    public string State { get; set; } = "matched";
+    public bool CurrentBrokerConfirmed { get; set; }
+    public DateTime? WindowExpiresAt { get; set; }
+    public bool IsRevealed { get; set; }
+    public ContactDetailsDto? UnlockedContact { get; set; }
+    public long? ConnectionRequestId { get; set; }
+    public string? ConnectionRequestStatus { get; set; }
+    public string? DeliveryChannel { get; set; }
+    public bool IncomingConnectionRequest { get; set; }
+    public string CurrentBrokerRole { get; set; } = string.Empty;
+
     public string Id { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
@@ -49,7 +62,7 @@ public class UserMatchItemDto
     public bool IsUnlocked { get; set; }
     public string UnlockStatus { get; set; } = "NONE"; // NONE, PENDING, REQUESTED, UNLOCKED, CONFIRMED
     
-    // Only populated when IsUnlocked == true (Security enforcement)
+    // Legacy alias. Only populated when a reveals row exists.
     public ContactDetailsDto? OwnerContact { get; set; }
 
     // New matching side metadata for UI rendering

@@ -13,7 +13,11 @@ public sealed class BrokerIdentityService : IBrokerIdentityService
 
     public async Task<int?> GetBrokerIdAsync(Guid userId, CancellationToken cancellationToken = default)
     {
-        var user = await _db.Users.AsNoTracking().SingleOrDefaultAsync(x => x.Id == userId, cancellationToken);
+        var user = await _db.Users
+            .AsNoTracking()
+            .Where(x => x.Id == userId)
+            .Select(x => new { x.BrokerId, x.MobileNumber })
+            .SingleOrDefaultAsync(cancellationToken);
         if (user is null) return null;
         if (user.BrokerId.HasValue) return user.BrokerId.Value;
         var mobile = Digits(user.MobileNumber);

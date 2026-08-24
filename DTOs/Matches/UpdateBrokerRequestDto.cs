@@ -12,4 +12,16 @@ public class UpdateBrokerRequestDto
 
     public string? Locality { get; set; }
     public string? BrokerageName { get; set; }
+
+    [JsonPropertyName("email")]
+    public string? Email { get; set; }
+
+    [JsonPropertyName("companyGst")]
+    public string? CompanyGst { get; set; }
+
+    [JsonPropertyName("companyAddress")]
+    public string? CompanyAddress { get; set; }
+
+    [JsonPropertyName("profilePhotoUrl")]
+    public string? ProfilePhotoUrl { get; set; }
 }
