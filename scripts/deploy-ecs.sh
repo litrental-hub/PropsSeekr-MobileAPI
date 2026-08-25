@@ -17,13 +17,17 @@ readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-5}"
 previous_task_definition=""
 service_updated=false
 new_task_definition=""
+deployment_arn=""
+
+task_definition_file="task-definition.json"
+register_file="task-definition-register.json"
 
 rollback() {
     local status=$?
 
     if [[ "${service_updated}" == "true" && -n "${previous_task_definition}" ]]; then
         echo ""
-        echo "Deployment failed. Requesting ECS rollback..."
+        echo "Deployment failed. Requesting rollback to previous task definition..."
 
         aws ecs update-service \
             --region "${AWS_REGION}" \
@@ -45,13 +49,18 @@ echo "Container:    ${ECS_CONTAINER_NAME}"
 echo "Image:        ${IMAGE_URI}"
 echo "========================================"
 
-#
-# 1. Verify ECR image
-#
 echo ""
-echo "1/7 Verifying ECR image..."
+echo "1/7 Verifying AWS identity..."
+
+aws sts get-caller-identity --output json >/dev/null
+
+echo "AWS credentials are valid."
+
+echo ""
+echo "2/7 Verifying ECR image..."
 
 image_tag="${IMAGE_URI##*:}"
+
 repository_name="${IMAGE_URI#*/}"
 repository_name="${repository_name%%:*}"
 
@@ -63,11 +72,8 @@ aws ecr describe-images \
 
 echo "ECR image exists."
 
-#
-# 2. Discover ECS service
-#
 echo ""
-echo "2/7 Discovering ECS service..."
+echo "3/7 Discovering ECS Express service..."
 
 service_json="$(
     aws ecs describe-services \
@@ -78,8 +84,7 @@ service_json="$(
 )"
 
 service_count="$(
-    echo "${service_json}" |
-        jq '.services | length'
+    jq '.services | length' <<< "${service_json}"
 )"
 
 if [[ "${service_count}" -ne 1 ]]; then
@@ -90,8 +95,7 @@ if [[ "${service_count}" -ne 1 ]]; then
 fi
 
 service_status="$(
-    echo "${service_json}" |
-        jq -r '.services[0].status'
+    jq -r '.services[0].status' <<< "${service_json}"
 )"
 
 if [[ "${service_status}" != "ACTIVE" ]]; then
@@ -101,31 +105,26 @@ if [[ "${service_status}" != "ACTIVE" ]]; then
 fi
 
 ECS_SERVICE_ARN="$(
-    echo "${service_json}" |
-        jq -r '.services[0].serviceArn'
+    jq -r '.services[0].serviceArn' <<< "${service_json}"
 )"
 
 previous_task_definition="$(
-    echo "${service_json}" |
-        jq -r '.services[0].taskDefinition'
+    jq -r '.services[0].taskDefinition' <<< "${service_json}"
 )"
 
-echo "ECS service found."
+echo "Express service found."
 echo "Service ARN: ${ECS_SERVICE_ARN}"
 echo "Current task definition:"
 echo "${previous_task_definition}"
 
-#
-# 3. Read current task definition
-#
 echo ""
-echo "3/7 Reading current task definition..."
+echo "4/7 Creating new immutable task-definition revision..."
 
 aws ecs describe-task-definition \
     --region "${AWS_REGION}" \
     --task-definition "${previous_task_definition}" \
     --query taskDefinition \
-    --output json > task-definition.json
+    --output json > "${task_definition_file}"
 
 echo "Checking container '${ECS_CONTAINER_NAME}'..."
 
@@ -133,31 +132,29 @@ container_exists="$(
     jq \
         --arg container_name "${ECS_CONTAINER_NAME}" \
         '[.containerDefinitions[] | select(.name == $container_name)] | length' \
-        task-definition.json
+        "${task_definition_file}"
 )"
 
 if [[ "${container_exists}" -ne 1 ]]; then
     echo "ERROR: Container '${ECS_CONTAINER_NAME}' was not found."
+
     echo "Available containers:"
-    jq -r '.containerDefinitions[].name' task-definition.json
+    jq -r '.containerDefinitions[].name' "${task_definition_file}"
+
     exit 1
 fi
 
 echo "Container found."
 
-#
-# ECS Express task definitions should not be registered
-# with server-managed fields.
-#
 jq \
     --arg container_name "${ECS_CONTAINER_NAME}" \
     --arg image "${IMAGE_URI}" '
     if any(.containerDefinitions[]; .name == $container_name) then
-        .containerDefinitions |=
-        map(
-            if .name == $container_name
-            then .image = $image
-            else .
+        .containerDefinitions |= map(
+            if .name == $container_name then
+                .image = $image
+            else
+                .
             end
         )
     else
@@ -175,35 +172,24 @@ jq \
         .deregisteredAt
     )
     ' \
-    task-definition.json > task-definition-register.json
-
-echo "Task definition is compatible with ECS Express Mode."
-
-#
-# 4. Register new immutable task definition
-#
-echo ""
-echo "4/7 Creating new immutable task-definition revision..."
+    "${task_definition_file}" > "${register_file}"
 
 new_task_definition="$(
     aws ecs register-task-definition \
         --region "${AWS_REGION}" \
-        --cli-input-json file://task-definition-register.json \
+        --cli-input-json "file://${register_file}" \
         --query 'taskDefinition.taskDefinitionArn' \
         --output text
 )"
 
 if [[ -z "${new_task_definition}" || "${new_task_definition}" == "None" ]]; then
-    echo "ERROR: Failed to create task-definition revision."
+    echo "ERROR: Failed to create the new task-definition revision."
     exit 1
 fi
 
 echo "New task definition:"
 echo "${new_task_definition}"
 
-#
-# 5. Update ECS Express service
-#
 echo ""
 echo "5/7 Updating ECS Express service..."
 
@@ -218,12 +204,11 @@ update_response="$(
 )"
 
 target_service_revision="$(
-    echo "${update_response}" |
-        jq -r '.service.serviceRevisionArn // empty'
+    jq -r '.service.serviceRevisionArn // empty' <<< "${update_response}"
 )"
 
 if [[ -z "${target_service_revision}" ]]; then
-    echo "ERROR: ECS did not return a target service revision."
+    echo "ERROR: ECS did not return the target service revision."
     exit 1
 fi
 
@@ -233,13 +218,8 @@ echo "Express service update accepted."
 echo "Target service revision:"
 echo "${target_service_revision}"
 
-#
-# 6. Wait for the EXACT deployment created by this update.
-#
 echo ""
-echo "6/7 Waiting for ECS Express deployment..."
-
-deployment_arn=""
+echo "6/7 Waiting for the ECS Express deployment to finish..."
 
 while [[ -z "${deployment_arn}" ]]; do
 
@@ -252,28 +232,25 @@ while [[ -z "${deployment_arn}" ]]; do
     )"
 
     deployment_arn="$(
-        echo "${deployment_json}" |
-            jq -r \
-                --arg revision "${target_service_revision}" '
-                    .serviceDeployments[]
-                    | select(.targetServiceRevisionArn == $revision)
-                    | .serviceDeploymentArn
-                ' |
-            head -n 1
+        jq -r \
+            --arg revision "${target_service_revision}" '
+                .serviceDeployments[]
+                | select(.targetServiceRevisionArn == $revision)
+                | .serviceDeploymentArn
+            ' <<< "${deployment_json}" |
+        head -n 1
     )"
 
     if [[ -z "${deployment_arn}" ]]; then
         echo "Deployment record is not available yet. Waiting..."
         sleep "${HEALTH_CHECK_INTERVAL_SECONDS}"
     fi
+
 done
 
 echo "Deployment record found:"
 echo "${deployment_arn}"
 
-#
-# Continue until ECS reaches a terminal deployment state.
-#
 while true; do
 
     deployment_details="$(
@@ -284,13 +261,11 @@ while true; do
     )"
 
     deployment_status="$(
-        echo "${deployment_details}" |
-            jq -r '.serviceDeployments[0].status'
+        jq -r '.serviceDeployments[0].status // empty' <<< "${deployment_details}"
     )"
 
     deployment_reason="$(
-        echo "${deployment_details}" |
-            jq -r '.serviceDeployments[0].statusReason // ""'
+        jq -r '.serviceDeployments[0].statusReason // ""' <<< "${deployment_details}"
     )"
 
     echo "ECS Express deployment status: ${deployment_status}"
@@ -307,23 +282,10 @@ while true; do
             sleep "${HEALTH_CHECK_INTERVAL_SECONDS}"
             ;;
 
-        ROLLBACK_SUCCESSFUL)
+        ROLLBACK_SUCCESSFUL|ROLLBACK_FAILED|STOPPED|STOP_REQUESTED)
             echo ""
-            echo "ECS Express automatically rolled back the deployment."
-            echo "Reason: ${deployment_reason}"
-            exit 1
-            ;;
-
-        ROLLBACK_FAILED)
-            echo ""
-            echo "ECS Express rollback FAILED."
-            echo "Reason: ${deployment_reason}"
-            exit 1
-            ;;
-
-        STOPPED|STOP_REQUESTED)
-            echo ""
-            echo "ECS Express deployment stopped."
+            echo "ECS Express deployment ended unsuccessfully."
+            echo "Status: ${deployment_status}"
             echo "Reason: ${deployment_reason}"
             exit 1
             ;;
@@ -334,13 +296,11 @@ while true; do
             echo "Reason: ${deployment_reason}"
             exit 1
             ;;
+
     esac
 
 done
 
-#
-# 7. Application health check
-#
 echo ""
 echo "7/7 Verifying application health..."
 
@@ -356,6 +316,7 @@ if [[ -n "${HEALTH_CHECK_URL:-}" ]]; then
         status="$(
             curl \
                 --silent \
+                --show-error \
                 --output /dev/null \
                 --write-out '%{http_code}' \
                 --max-time 10 \
@@ -367,30 +328,26 @@ if [[ -n "${HEALTH_CHECK_URL:-}" ]]; then
         if [[ "${status}" == "200" ]]; then
             echo ""
             echo "Application health check passed."
-
-            printf 'task_definition=%s\n' \
-                "${new_task_definition}" \
-                >> "${GITHUB_OUTPUT:-/dev/stdout}"
-
-            echo ""
-            echo "========================================"
-            echo "DEPLOYMENT SUCCESSFUL"
-            echo "========================================"
-
-            exit 0
+            break
         fi
 
         sleep "${HEALTH_CHECK_INTERVAL_SECONDS}"
+
     done
 
 else
 
     echo "HEALTH_CHECK_URL is not configured."
-    echo "ECS Express deployment completed successfully."
+    echo "ECS deployment is the verification."
 
-    printf 'task_definition=%s\n' \
-        "${new_task_definition}" \
-        >> "${GITHUB_OUTPUT:-/dev/stdout}"
-
-    exit 0
 fi
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'task_definition=%s\n' \
+        "${new_task_definition}" >> "${GITHUB_OUTPUT}"
+fi
+
+echo ""
+echo "========================================"
+echo "DEPLOYMENT SUCCESSFUL"
+echo "========================================"
