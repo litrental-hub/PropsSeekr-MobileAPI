@@ -110,6 +110,7 @@ builder.Services.AddScoped<IUnlockService, UnlockService>();
 builder.Services.AddScoped<IBrokerIdentityService, BrokerIdentityService>();
 builder.Services.AddScoped<IBrokerListingsService, BrokerListingsService>();
 builder.Services.AddScoped<IAutomatedMatchingService, AutomatedMatchingService>();
+builder.Services.AddScoped<IMatchingPipelineService, MatchingPipelineService>();
 
 builder.Services.AddAuthorization();
 

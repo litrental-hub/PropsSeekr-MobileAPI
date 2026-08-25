@@ -13,18 +13,18 @@ public class RequirementService : IRequirementService
 {
     private readonly AppDbContext _dbContext;
     private readonly IBrokerIdentityService _brokerIdentityService;
-    private readonly IAutomatedMatchingService _matchingService;
+    private readonly IMatchingPipelineService _matchingPipeline;
     private readonly ILogger<RequirementService> _logger;
 
     public RequirementService(
         AppDbContext dbContext,
         IBrokerIdentityService brokerIdentityService,
-        IAutomatedMatchingService matchingService,
+        IMatchingPipelineService matchingPipeline,
         ILogger<RequirementService> logger)
     {
         _dbContext = dbContext;
         _brokerIdentityService = brokerIdentityService;
-        _matchingService = matchingService;
+        _matchingPipeline = matchingPipeline;
         _logger = logger;
     }
 
@@ -239,14 +239,14 @@ public class RequirementService : IRequirementService
         {
             BrokerId = brokerId,
             Source = "manual",
-            RawMessageText = string.IsNullOrWhiteSpace(request.AdditionalNotes)
-                ? request.Description
-                : $"{request.Description}. {request.AdditionalNotes}",
+            // The embedding and locality fallback need the structured form values too,
+            // not only an optional free-text note.
+            RawMessageText = BuildRequirementMatchText(request),
             RequirementType = normalizedTransactionType == "RENTAL" ? "RENT" : "BUY",
             PropertyType = request.PropertyType.Trim().ToUpperInvariant(),
             Configurations = request.Configurations.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray(),
             Budget = request.BudgetMax,
-            BudgetUnit = "INR",
+            BudgetUnit = "TOTAL",
             Size = request.MinimumSize,
             FurnishingPref = request.FurnishingPreference,
             FacingPref = request.FacingPreference,
@@ -265,11 +265,11 @@ public class RequirementService : IRequirementService
         IReadOnlyList<int> matches = [];
         try
         {
-            matches = await _matchingService.RunForRequirementAsync(requirement.Id);
+            await _matchingPipeline.TriggerForRequirementAsync(requirement.Id);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Automated matching failed for requirement {RequirementId}", requirement.Id);
+            _logger.LogError(ex, "Embedding and matching pipeline failed to start for requirement {RequirementId}", requirement.Id);
         }
 
         return new CreateRequirementResponseDto
@@ -277,9 +277,7 @@ public class RequirementService : IRequirementService
             Success = true,
             RequirementId = requirement.Id.ToString(),
             MatchCount = matches.Count,
-            Message = matches.Count == 0
-                ? "Requirement successfully posted. No compatible matches were found yet."
-                : $"Requirement successfully posted. {matches.Count} matches were found."
+            Message = "Requirement successfully posted. Embedding and matching have started."
         };
     }
 
@@ -300,6 +298,26 @@ public class RequirementService : IRequirementService
         string.IsNullOrWhiteSpace(value)
             ? "Under Review"
             : char.ToUpperInvariant(value[0]) + value[1..].ToLowerInvariant();
+
+    private static string BuildRequirementMatchText(CreateRequirementRequestDto request)
+    {
+        var parts = new[]
+        {
+            request.Description,
+            request.TransactionType,
+            string.Join(" ", request.Configurations.Where(value => !string.IsNullOrWhiteSpace(value))),
+            request.PropertyType,
+            request.Locality,
+            request.City,
+            request.MinimumSize > 0 ? $"{request.MinimumSize} sqft" : null,
+            request.BudgetMax > 0 ? $"budget {request.BudgetMax} total" : null,
+            request.FurnishingPreference,
+            request.FacingPreference,
+            request.AdditionalNotes
+        };
+
+        return string.Join(". ", parts.Where(value => !string.IsNullOrWhiteSpace(value)));
+    }
 
     private static T? DeserializeJson<T>(string json) where T : class
     {
