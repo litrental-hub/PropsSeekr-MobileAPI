@@ -71,24 +71,28 @@ jobs:
       - name: Check deployment variables
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
           ECS_SERVICE: ${{ vars.ECS_SERVICE }}
           ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
           HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
         run: |
           echo "AWS_REGION=${AWS_REGION}"
+          echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}"
           echo "ECS_CLUSTER=${ECS_CLUSTER}"
           echo "ECS_SERVICE=${ECS_SERVICE}"
           echo "ECS_CONTAINER_NAME=${ECS_CONTAINER_NAME}"
           echo "HEALTH_CHECK_URL=${HEALTH_CHECK_URL}"
 
           test -n "${ECS_CLUSTER}" || exit 1
+          test -n "${AWS_ACCOUNT_ID}" || exit 1
           test -n "${ECS_SERVICE}" || exit 1
           test -n "${ECS_CONTAINER_NAME}" || exit 1
 
       - name: Deploy and verify
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
           ECS_SERVICE: ${{ vars.ECS_SERVICE }}
           ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
