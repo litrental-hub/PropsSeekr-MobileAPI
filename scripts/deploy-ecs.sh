@@ -16,7 +16,6 @@
 set -euo pipefail
 
 : "${AWS_REGION:?AWS_REGION is required}"
-: "${AWS_ACCOUNT_ID:?AWS_ACCOUNT_ID is required}"
 : "${ECS_CLUSTER:?ECS_CLUSTER is required}"
 : "${ECS_SERVICE:?ECS_SERVICE is required}"
 : "${ECS_CONTAINER_NAME:?ECS_CONTAINER_NAME is required}"
