@@ -121,11 +121,12 @@ fi
 
 actual_cluster="$(jq -r '.service.cluster' <<< "${service_json}")"
 actual_service="$(jq -r '.service.serviceName' <<< "${service_json}")"
+actual_cluster_name="${actual_cluster##*/}"
 
-if [[ "${actual_cluster}" != "${ECS_CLUSTER}" ]]; then
+if [[ "${actual_cluster}" != "${ECS_CLUSTER}" && "${actual_cluster_name}" != "${ECS_CLUSTER}" ]]; then
   echo "Cluster mismatch." >&2
   echo "Expected: ${ECS_CLUSTER}" >&2
-  echo "Actual:   ${actual_cluster}" >&2
+  echo "Actual:   ${actual_cluster} (${actual_cluster_name})" >&2
   exit 1
 fi
 
