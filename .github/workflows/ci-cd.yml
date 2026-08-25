@@ -55,32 +55,45 @@ jobs:
     name: Deploy production
     needs: build_and_push
     runs-on: ubuntu-latest
-    environment: production
+    environment:
+      name: production
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_GITHUB_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      - name: Check deployment variables
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+          ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+          HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
+        run: |
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "ECS_CLUSTER=${ECS_CLUSTER}"
+          echo "ECS_SERVICE=${ECS_SERVICE}"
+          echo "ECS_CONTAINER_NAME=${ECS_CONTAINER_NAME}"
+          echo "HEALTH_CHECK_URL=${HEALTH_CHECK_URL}"
+
+          test -n "${ECS_CLUSTER}" || exit 1
+          test -n "${ECS_SERVICE}" || exit 1
+          test -n "${ECS_CONTAINER_NAME}" || exit 1
+
       - name: Deploy and verify
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
-          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-
-          # ECS Express Mode
-          ECS_SERVICE_ARN: ${{ vars.ECS_SERVICE_ARN }}
-
-          # Container inside the task definition
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
           ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
-
-          # Image produced by the previous job
           IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
-
-          # Application health check
           HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
           HEALTH_CHECK_PATH: /hello
-
-        run: bash scripts/deploy-ecs.sh
+        run: |
+          bash scripts/deploy-ecs.sh
