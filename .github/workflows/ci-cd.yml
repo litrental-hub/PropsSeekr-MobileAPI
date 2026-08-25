@@ -1,310 +1,74 @@
-name: CI/CD Pipeline — Build, Push & Deploy
+name: Mobile API CI and Production Deploy
 
 on:
-  push:
-    branches: [Main, develop]
   pull_request:
     branches: [Main]
+  push:
+    branches: [Main]
   workflow_dispatch:
-    inputs:
-      skip_deploy:
-        description: 'Skip deployment (build & push only)'
-        required: false
-        default: 'false'
-        type: boolean
-
-env:
-  DOTNET_VERSION: '9.0.x'
-  ECR_REPOSITORY: propseekr-mobile-api
-  IMAGE_NAME: propseekr-mobile-api
 
 permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: mobile-api-production
+  cancel-in-progress: false
+
 jobs:
-  # ──────────────────────────────────────────────
-  # Stage 1: Build & Test
-  # ──────────────────────────────────────────────
-  build-and-test:
-    name: 🔨 Build & Test
+  test:
+    name: Build and test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+          dotnet-version: |
+            9.0.x
+            10.0.x
+      - run: dotnet restore Tests/PropsSeekr-MobileAPI.Tests/PropsSeekr-MobileAPI.Tests.csproj
+      - run: dotnet build PropSeekr.csproj --configuration Release --no-restore
+      - run: dotnet test Tests/PropsSeekr-MobileAPI.Tests/PropsSeekr-MobileAPI.Tests.csproj --configuration Release --no-restore --verbosity normal
 
-      - name: Restore dependencies
-        run: dotnet restore
-
-      - name: Build (Release)
-        run: dotnet build -c Release --no-restore
-
-      - name: Run tests
-        run: |
-          if find . -name "*.Tests.csproj" -o -name "*Tests.csproj" | grep -q .; then
-            dotnet test -c Release --no-build --verbosity normal
-          else
-            echo "⚠️  No test projects found — skipping tests."
-          fi
-
-  # ──────────────────────────────────────────────
-  # Stage 2: Docker Build & Push to ECR
-  # ──────────────────────────────────────────────
-  docker-build-push:
-    name: 🐳 Docker Build & Push to ECR
+  build_and_push:
+    name: Build immutable image
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: build-and-test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment: production
     outputs:
-      image_tag: ${{ steps.meta.outputs.image_tag }}
-      full_image: ${{ steps.meta.outputs.full_image }}
+      image_uri: ${{ steps.image.outputs.image_uri }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Generate image metadata
-        id: meta
-        run: |
-          SHA_SHORT=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
-          IMAGE_TAG="${TIMESTAMP}-${SHA_SHORT}"
-          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
-          FULL_IMAGE="${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
-
-          echo "sha_short=${SHA_SHORT}" >> $GITHUB_OUTPUT
-          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
-          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "ecr_registry=${ECR_REGISTRY}" >> $GITHUB_OUTPUT
-          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
-
-          echo "📦 Image Tag: ${IMAGE_TAG}"
-          echo "📦 Full Image: ${FULL_IMAGE}"
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_GITHUB_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: image
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: bash scripts/build-and-push-image.sh
 
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}
-            ${{ steps.meta.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.sha_short }}
-            ${{ steps.meta.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Print pushed image details
-        run: |
-          echo "✅ Pushed images:"
-          echo "   → ${{ steps.meta.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}"
-          echo "   → ${{ steps.meta.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.sha_short }}"
-          echo "   → ${{ steps.meta.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:latest"
-
-  # ──────────────────────────────────────────────
-  # Stage 3: Deploy to ECS
-  # ──────────────────────────────────────────────
   deploy:
-    name: 🚀 Deploy to ECS
+    name: Deploy production
+    needs: build_and_push
     runs-on: ubuntu-latest
-    needs: docker-build-push
-    if: |
-      (github.ref == 'refs/heads/Main' || github.ref == 'refs/heads/develop') &&
-      (github.event.inputs.skip_deploy != 'true')
-    environment:
-      name: ${{ github.ref == 'refs/heads/Main' && 'production' || 'development' }}
+    environment: production
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Diagnostic ECS Check
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          {
-            echo "=== AWS Identity ==="
-            aws sts get-caller-identity || true
-
-            echo "=== List Clusters ==="
-            aws ecs list-clusters 2>&1 || true
-
-            echo "=== Describe Services ==="
-            aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" 2>&1 || true
-          } > diagnostic_output.txt
-
-      - name: Upload Diagnostic Logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnostic-logs
-          path: diagnostic_output.txt
-
-      - name: Get current task definition
-        id: task-def
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          echo "Using cluster: $CLUSTER_NAME, service: $SERVICE_NAME"
-
-          TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster "$CLUSTER_NAME" \
-            --services "$SERVICE_NAME" \
-            --query 'services[0].taskDefinition' \
-            --output text)
-
-          echo "Current task definition: ${TASK_DEF_ARN}"
-          echo "task_def_arn=${TASK_DEF_ARN}" >> $GITHUB_OUTPUT
-
-          # Get the task definition JSON
-          aws ecs describe-task-definition \
-            --task-definition "${TASK_DEF_ARN}" \
-            --query 'taskDefinition' > task-def.json
-
-      - name: Update image in task definition
-        id: update-task-def
-        run: |
-          NEW_IMAGE="${{ needs.docker-build-push.outputs.full_image }}"
-          echo "Updating container image to: ${NEW_IMAGE}"
-
-          # Update the image in the container definition
-          jq --arg IMAGE "${NEW_IMAGE}" \
-            '.containerDefinitions[0].image = $IMAGE' task-def.json > updated-task-def.json
-
-          # Remove fields that can't be included in register-task-definition
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
-            updated-task-def.json > register-task-def.json
-
-          # Register the new task definition
-          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://register-task-def.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "New task definition: ${NEW_TASK_DEF_ARN}"
-          echo "new_task_def_arn=${NEW_TASK_DEF_ARN}" >> $GITHUB_OUTPUT
-
-      - name: Update ECS service
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          echo "🚀 Deploying to ECS..."
-          aws ecs update-service \
-            --cluster "$CLUSTER_NAME" \
-            --service "$SERVICE_NAME" \
-            --task-definition ${{ steps.update-task-def.outputs.new_task_def_arn }} \
-            --force-new-deployment \
-            --query 'service.serviceName' \
-            --output text
-
-          echo "✅ ECS service update triggered."
-
-      - name: Wait for service stability
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          echo "⏳ Waiting for ECS service to stabilize (up to 10 minutes)..."
-          aws ecs wait services-stable \
-            --cluster "$CLUSTER_NAME" \
-            --services "$SERVICE_NAME" \
-            --timeout 600 || true
-          echo "✅ Service stabilized."
-
-  # ──────────────────────────────────────────────
-  # Stage 4: Post-Deploy Health Check
-  # ──────────────────────────────────────────────
-  health-check:
-    name: 🏥 Health Check
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: success()
-    steps:
-      - name: Verify deployment health
-        run: |
-          HEALTH_URL="${{ secrets.HEALTH_CHECK_URL }}"
-
-          if [ -z "${HEALTH_URL}" ]; then
-            echo "⚠️  HEALTH_CHECK_URL secret not set — skipping health check."
-            echo "   Set the HEALTH_CHECK_URL GitHub secret to enable post-deploy verification."
-            exit 0
-          fi
-
-          echo "🏥 Checking health at: ${HEALTH_URL}/hello"
-          MAX_RETRIES=30
-          RETRY_INTERVAL=10
-          ATTEMPT=0
-
-          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "   Attempt ${ATTEMPT}/${MAX_RETRIES}..."
-
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${HEALTH_URL}/hello" 2>/dev/null || echo "000")
-
-            if [ "${HTTP_STATUS}" = "200" ]; then
-              RESPONSE=$(curl -s --max-time 10 "${HEALTH_URL}/hello" 2>/dev/null)
-              echo ""
-              echo "✅ Health check PASSED!"
-              echo "   Status: ${HTTP_STATUS}"
-              echo "   Response: ${RESPONSE}"
-
-              # Also check Swagger
-              SWAGGER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${HEALTH_URL}/swagger/index.html" 2>/dev/null || echo "000")
-              echo "   Swagger UI: ${SWAGGER_STATUS}"
-              exit 0
-            fi
-
-            echo "   Status: ${HTTP_STATUS} — retrying in ${RETRY_INTERVAL}s..."
-            sleep $RETRY_INTERVAL
-          done
-
-          echo ""
-          echo "❌ Health check FAILED after ${MAX_RETRIES} attempts!"
-          echo "   Last status: ${HTTP_STATUS}"
-          exit 1
-
-      - name: Deployment summary
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "  DEPLOYMENT SUMMARY"
-          echo "=========================================="
-          echo "  Image:   ${{ needs.docker-build-push.outputs.full_image || 'N/A' }}"
-          echo "  Branch:  ${GITHUB_REF_NAME}"
-          echo "  Commit:  ${GITHUB_SHA:0:7}"
-          echo "  Actor:   ${GITHUB_ACTOR}"
-          echo "  Time:    $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-          echo "=========================================="
+          role-to-assume: ${{ vars.AWS_GITHUB_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy and verify
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+          ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+          IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
+          HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
+          HEALTH_CHECK_PATH: /hello
+        run: bash scripts/deploy-ecs.sh
