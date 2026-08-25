@@ -14,4 +14,6 @@ public class PropertyListingDto
     public string Status { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+    public int MatchesFound { get; set; }
+    public List<InventoryMatchDto> Matches { get; set; } = new();
 }

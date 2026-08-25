@@ -1,0 +1,10 @@
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://0.0.0.0:5150
+info: Microsoft.Hosting.Lifetime[0]
+      Application started. Press Ctrl+C to shut down.
+info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Production
+info: Microsoft.Hosting.Lifetime[0]
+      Content root path: C:\Users\Aman Jain\StudioProjects\PropsSeekr-MobileAPI\bin\Debug\net9.0
+warn: Microsoft.AspNetCore.HttpsPolicy.HttpsRedirectionMiddleware[3]
+      Failed to determine the https port for redirect.

@@ -102,6 +102,7 @@ builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
 builder.Services.AddScoped<IRequirementService, RequirementService>();
 builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>();
+builder.Services.AddScoped<IBrokerInventoryService, BrokerInventoryService>();
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();

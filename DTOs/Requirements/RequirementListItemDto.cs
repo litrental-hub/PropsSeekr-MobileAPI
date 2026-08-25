@@ -1,4 +1,5 @@
 using PropSeekr.DTOs.Search;
+using PropSeekr.DTOs.Inventory;
 
 namespace PropSeekr.DTOs.Requirements;
 
@@ -19,4 +20,5 @@ public class RequirementListItemDto
     public RequiredAreaDto RequiredArea { get; set; } = new();
     public DateTime PostedAt { get; set; }
     public string Status { get; set; } = string.Empty;
+    public List<InventoryMatchDto> Matches { get; set; } = new();
 }
