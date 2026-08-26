@@ -13,7 +13,6 @@ echo "========================================"
 
 readonly HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-/hello}"
 readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-10}"
-readonly DEPLOYMENT_TIMEOUT_SECONDS="${DEPLOYMENT_TIMEOUT_SECONDS:-600}"
 
 service_updated=false
 previous_task_definition=""
@@ -30,11 +29,10 @@ rollback() {
         echo "⚠️ Deployment failed. Rolling back to previous task definition..."
         echo "Previous task definition: ${previous_task_definition}"
 
-        aws ecs update-service \
+        aws ecs update-express-gateway-service \
             --region "${AWS_REGION}" \
-            --cluster "${ECS_CLUSTER}" \
-            --service "${ECS_SERVICE}" \
-            --task-definition "${previous_task_definition}" \
+            --service-arn "${ECS_SERVICE_ARN}" \
+            --task-definition-arn "${previous_task_definition}" \
             >/dev/null 2>&1 || true
             
         echo "Rollback command sent."
@@ -105,8 +103,55 @@ if [[ "${service_status}" != "ACTIVE" ]]; then
     exit 1
 fi
 
-previous_task_definition="$(jq -r '.services[0].taskDefinition // empty' <<< "${service_json}")"
-if [[ -z "${previous_task_definition}" ]]; then
+ECS_SERVICE_ARN="$(jq -r '.services[0].serviceArn' <<< "${service_json}")"
+
+echo "Express service found."
+echo "Service ARN:"
+echo "${ECS_SERVICE_ARN}"
+
+# Get Express configuration
+express_service_json="$(
+    aws ecs describe-express-gateway-service \
+        --region "${AWS_REGION}" \
+        --service-arn "${ECS_SERVICE_ARN}" \
+        --output json
+)"
+
+express_status="$(jq -r '.service.status.statusCode // empty' <<< "${express_service_json}")"
+if [[ "${express_status}" != "ACTIVE" ]]; then
+    echo "ERROR: ECS Express service is not ACTIVE."
+    echo "Status: ${express_status}"
+    echo "Reason:"
+    jq -r '.service.status.statusReason // ""' <<< "${express_service_json}"
+    exit 1
+fi
+
+# Get current active task definition from activeConfigurations
+previous_task_definition="$(
+    jq -r '
+        .service.activeConfigurations
+        | map(select(.taskDefinitionArn != null))
+        | sort_by(.createdAt)
+        | last
+        | .taskDefinitionArn // empty
+    ' <<< "${express_service_json}"
+)"
+
+# Fallback 1: check targetConfiguration
+if [[ -z "${previous_task_definition}" || "${previous_task_definition}" == "null" ]]; then
+    previous_task_definition="$(
+        jq -r '.service.targetConfiguration.taskDefinitionArn // empty' <<< "${express_service_json}"
+    )"
+fi
+
+# Fallback 2: check standard describe-services output
+if [[ -z "${previous_task_definition}" || "${previous_task_definition}" == "null" ]]; then
+    previous_task_definition="$(
+        jq -r '.services[0].taskDefinition // empty' <<< "${service_json}"
+    )"
+fi
+
+if [[ -z "${previous_task_definition}" || "${previous_task_definition}" == "null" ]]; then
     echo "ERROR: Could not determine the current active task definition."
     exit 1
 fi
@@ -179,91 +224,171 @@ fi
 echo "New task definition registered: ${new_task_definition}"
 
 #
-# 5. Update ECS service to deploy the new task definition
+# 5. Update ECS Express service to deploy the new task definition
 #
 echo ""
-echo "5/7 Updating ECS service..."
+echo "5/7 Updating ECS Express service..."
 update_response="$(
-    aws ecs update-service \
+    aws ecs update-express-gateway-service \
         --region "${AWS_REGION}" \
-        --cluster "${ECS_CLUSTER}" \
-        --service "${ECS_SERVICE}" \
-        --task-definition "${new_task_definition}" \
+        --service-arn "${ECS_SERVICE_ARN}" \
+        --task-definition-arn "${new_task_definition}" \
         --output json
 )"
 
+target_service_revision="$(
+    jq -r '.service.targetConfiguration.serviceRevisionArn // empty' \
+        <<< "${update_response}"
+)"
+
+if [[ -z "${target_service_revision}" ]]; then
+    echo "ERROR: ECS Express did not return a target service revision."
+    exit 1
+fi
+
 service_updated=true
-echo "ECS service update command sent successfully."
+echo "ECS Express service update accepted."
+echo "Target service revision: ${target_service_revision}"
 
 #
 # 6. Wait for service deployment to stabilize with live event feedback
 #
 echo ""
-echo "6/7 Monitoring ECS deployment progress..."
+echo "6/7 Monitoring ECS Express deployment progress..."
 
-start_time=$(date +%s)
-last_event_timestamp=""
-
-while true; do
-    current_time=$(date +%s)
-    elapsed=$((current_time - start_time))
-    
-    if [[ $elapsed -ge $DEPLOYMENT_TIMEOUT_SECONDS ]]; then
-        echo "ERROR: Deployment timed out after $((DEPLOYMENT_TIMEOUT_SECONDS / 60)) minutes."
+record_checks=0
+while [[ -z "${deployment_arn}" ]]; do
+    record_checks=$((record_checks + 1))
+    if [[ $record_checks -ge 24 ]]; then
+        echo "ERROR: Timed out waiting for deployment record to appear on AWS ECS after 2 minutes."
         exit 1
     fi
 
-    # Describe the service status
-    current_status_json="$(
-        aws ecs describe-services \
+    deployment_json="$(
+        aws ecs list-service-deployments \
             --region "${AWS_REGION}" \
-            --cluster "${ECS_CLUSTER}" \
-            --services "${ECS_SERVICE}" \
+            --service "${ECS_SERVICE_ARN}" \
+            --max-results 20 \
             --output json
     )"
 
-    # Get primary (newest) deployment details
-    primary_deployment="$(jq -r '.services[0].deployments[] | select(.status == "PRIMARY")' <<< "${current_status_json}")"
-    running_count=$(jq -r '.runningCount // 0' <<< "${primary_deployment}")
-    desired_count=$(jq -r '.desiredCount // 0' <<< "${primary_deployment}")
-    
-    echo "Progress: ${running_count}/${desired_count} tasks running (Elapsed: ${elapsed}s)..."
+    deployment_arn="$(
+        jq -r \
+            --arg revision "${target_service_revision}" '
+                .serviceDeployments[]
+                | select(.targetServiceRevisionArn == $revision)
+                | .serviceDeploymentArn
+            ' <<< "${deployment_json}" |
+        head -n 1
+    )"
 
-    # Print any new ECS events
-    events_json="$(jq '.services[0].events' <<< "${current_status_json}")"
-    if [[ -n "${events_json}" && "${events_json}" != "null" ]]; then
-        new_events="$(jq -c --arg last_ts "${last_event_timestamp}" '
-            .[] | select($last_ts == "" or .createdAt > $last_ts)
-        ' <<< "${events_json}" 2>/dev/null || true)"
-        
-        if [[ -n "${new_events}" ]]; then
-            # Convert to array of events and reverse to show oldest first
-            reversed_events="$(jq -s 'reverse | .[]' <<< "${new_events}" 2>/dev/null || true)"
-            if [[ -n "${reversed_events}" ]]; then
-                while read -r event; do
-                    if [[ -n "${event}" ]]; then
-                        msg="$(jq -r '.message' <<< "${event}")"
-                        ts="$(jq -r '.createdAt' <<< "${event}")"
-                        echo "  → [ECS Event $ts] $msg"
-                        last_event_timestamp="${ts}"
-                    fi
-                done <<< "${reversed_events}"
-            fi
+    # Fallback: if no exact revision match, take the latest service deployment
+    if [[ -z "${deployment_arn}" || "${deployment_arn}" == "null" ]]; then
+        deployment_arn="$(
+            jq -r '.serviceDeployments[0].serviceDeploymentArn // empty' <<< "${deployment_json}"
+        )"
+    fi
+
+    if [[ -z "${deployment_arn}" || "${deployment_arn}" == "null" ]]; then
+        echo "Deployment record is not available yet. Waiting..."
+        sleep "${HEALTH_CHECK_INTERVAL_SECONDS}"
+        deployment_arn=""
+    fi
+done
+
+echo "Deployment record found: ${deployment_arn}"
+
+stagnant_checks=0
+last_state_hash=""
+
+while true; do
+    deployment_details="$(
+        aws ecs describe-service-deployments \
+            --region "${AWS_REGION}" \
+            --service-deployment-arns "${deployment_arn}" \
+            --output json
+    )"
+
+    deployment_status="$(
+        jq -r '.serviceDeployments[0].status // empty' \
+            <<< "${deployment_details}"
+    )"
+
+    deployment_reason="$(
+        jq -r '.serviceDeployments[0].statusReason // ""' \
+            <<< "${deployment_details}"
+    )"
+
+    echo "ECS Express deployment status: ${deployment_status}"
+
+    # Calculate state hash to check for stagnation (status, reason, task counts)
+    current_state_hash=$(jq -c '[.serviceDeployments[0].status, .serviceDeployments[0].statusReason, .serviceDeployments[0].runningTaskCount, .serviceDeployments[0].pendingTaskCount]' <<< "${deployment_details}" 2>/dev/null || echo "${deployment_status}")
+
+    if [[ "${current_state_hash}" == "${last_state_hash}" ]]; then
+        stagnant_checks=$((stagnant_checks + 1))
+    else
+        stagnant_checks=0
+        last_state_hash="${current_state_hash}"
+    fi
+
+    # Print latest event if stuck in the same state for a while for live debugging feedback
+    if [[ $stagnant_checks -ge 12 ]]; then
+        latest_event=$(aws ecs describe-services --region "${AWS_REGION}" --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --query 'services[0].events[0].message' --output text 2>/dev/null || true)
+        if [[ -n "${latest_event}" ]]; then
+            echo "   [ECS Event Detail] ${latest_event}"
         fi
     fi
 
-    # Check for success
-    if [[ "${running_count}" -eq "${desired_count}" ]]; then
-        # Check if old deployments are completely gone (fully drained)
-        active_deployments_count=$(jq '.services[0].deployments | map(select(.status != "PRIMARY")) | length' <<< "${current_status_json}")
-        if [[ "${active_deployments_count}" -eq 0 ]]; then
-            echo "✅ Deployment completed successfully! Service is stable."
+    # Dynamic Stagnation Timeout: Abort if absolutely zero activity/change for 4 minutes
+    if [[ $stagnant_checks -ge 48 ]]; then
+        echo ""
+        echo "ERROR: Deployment is stagnant (no progress or state changes on AWS for 4 minutes). Aborting."
+        echo "Please check if your tasks are crashing on startup or failing target group health checks."
+        exit 1
+    fi
+
+    case "${deployment_status}" in
+
+        SUCCESSFUL)
+            echo ""
+            echo "ECS Express deployment completed successfully."
             break
-        fi
-        echo "Draining old container tasks (${active_deployments_count} old deployments still active)..."
-    fi
+            ;;
 
-    sleep "${HEALTH_CHECK_INTERVAL_SECONDS}"
+        PENDING|IN_PROGRESS|ROLLBACK_REQUESTED|ROLLBACK_IN_PROGRESS)
+            sleep "${HEALTH_CHECK_INTERVAL_SECONDS}"
+            ;;
+
+        ROLLBACK_SUCCESSFUL)
+            echo ""
+            echo "ECS Express automatically rolled back."
+            echo "Reason: ${deployment_reason}"
+            exit 1
+            ;;
+
+        ROLLBACK_FAILED)
+            echo ""
+            echo "ECS Express rollback FAILED."
+            echo "Reason: ${deployment_reason}"
+            exit 1
+            ;;
+
+        STOPPED|STOP_REQUESTED)
+            echo ""
+            echo "ECS Express deployment stopped."
+            echo "Reason: ${deployment_reason}"
+            exit 1
+            ;;
+
+        *)
+            echo ""
+            echo "Unknown ECS deployment status: ${deployment_status}"
+            echo "Reason: ${deployment_reason}"
+            exit 1
+            ;;
+
+    esac
+
 done
 
 #
