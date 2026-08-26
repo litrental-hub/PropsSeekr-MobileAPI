@@ -22,20 +22,20 @@ public class ListingsController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly IBrokerIdentityService _brokerIdentityService;
     private readonly IBrokerListingsService _brokerListingsService;
-    private readonly IAutomatedMatchingService _matchingService;
+    private readonly IMatchingPipelineService _matchingPipeline;
     private readonly ILogger<ListingsController> _logger;
 
     public ListingsController(
         AppDbContext dbContext,
         IBrokerIdentityService brokerIdentityService,
         IBrokerListingsService brokerListingsService,
-        IAutomatedMatchingService matchingService,
+        IMatchingPipelineService matchingPipeline,
         ILogger<ListingsController> logger)
     {
         _dbContext = dbContext;
         _brokerIdentityService = brokerIdentityService;
         _brokerListingsService = brokerListingsService;
-        _matchingService = matchingService;
+        _matchingPipeline = matchingPipeline;
         _logger = logger;
     }
 
@@ -317,12 +317,12 @@ public class ListingsController : ControllerBase
                 BrokerId = request.BrokerId,
                 MasterId = request.MasterId,
                 Source = source,
-                RawMessageText = request.RawMessageText,
+                RawMessageText = BuildListingMatchText(request),
                 ListingType = normalizedListingType ?? "SELL",
                 PropertyType = request.PropertyType,
                 Configuration = request.Configuration,
                 Price = request.Price,
-                PriceUnit = request.PriceUnit,
+                PriceUnit = NormalizePriceUnit(request.PriceUnit),
                 Size = request.Size,
                 Furnishing = request.Furnishing,
                 Facing = request.Facing,
@@ -386,11 +386,11 @@ public class ListingsController : ControllerBase
             IReadOnlyList<int> matches = [];
             try
             {
-                matches = await _matchingService.RunForListingAsync(listing.Id);
+                await _matchingPipeline.TriggerForListingAsync(listing.Id);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Automated matching failed for listing {ListingId}", listing.Id);
+                _logger.LogError(ex, "Embedding and matching pipeline failed to start for listing {ListingId}", listing.Id);
             }
 
             return Ok(new
@@ -398,9 +398,7 @@ public class ListingsController : ControllerBase
                 success = true,
                 listing_id = listing.Id,
                 match_count = matches.Count,
-                message = matches.Count == 0
-                    ? "Listing created successfully. No compatible matches were found yet."
-                    : $"Listing created successfully. {matches.Count} matches were found."
+                message = "Listing created successfully. Embedding and matching have started."
             });
         }
         catch (Exception ex)
@@ -408,5 +406,30 @@ public class ListingsController : ControllerBase
             await transaction.RollbackAsync();
             return BadRequest(new { success = false, message = ex.Message });
         }
+    }
+
+    private static string? NormalizePriceUnit(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "TOTAL";
+        return value.Trim().ToUpperInvariant() switch
+        {
+            "INR" or "TOTAL" => "TOTAL",
+            "PER MONTH" or "PER_MONTH" => "PER_MONTH",
+            "PER SQFT" or "PER_SQFT" => "PER_SQFT",
+            _ => value.Trim().ToUpperInvariant()
+        };
+    }
+
+    private static string BuildListingMatchText(CreateListingRequestDto request)
+    {
+        var parts = new[]
+        {
+            request.RawMessageText, request.ListingType, request.Configuration,
+            request.PropertyType, request.ProjectName ?? request.Locality, request.City,
+            request.Size.HasValue ? $"{request.Size.Value} sqft" : null,
+            request.Price.HasValue ? $"price {request.Price.Value} {NormalizePriceUnit(request.PriceUnit)}" : null,
+            request.Furnishing, request.Facing, request.RoadInfo
+        };
+        return string.Join(". ", parts.Where(value => !string.IsNullOrWhiteSpace(value)));
     }
 }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using PropSeekr.Data;
 using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
@@ -21,87 +22,52 @@ public sealed class AutomatedMatchingService : IAutomatedMatchingService
         int listingId,
         CancellationToken cancellationToken = default)
     {
-        var listing = await _db.Listings.AsNoTracking()
-            .SingleOrDefaultAsync(row => row.Id == listingId, cancellationToken)
-            ?? throw new KeyNotFoundException($"Listing ID {listingId} not found.");
+        if (!await _db.Listings.AnyAsync(row => row.Id == listingId, cancellationToken))
+            throw new KeyNotFoundException($"Listing ID {listingId} not found.");
 
-        var requirementTypes = IsRentalListing(listing.ListingType)
-            ? RentalRequirementTypes
-            : BuySellRequirementTypes;
-        var propertyTypes = EquivalentPropertyTypes(listing.PropertyType);
-
-        var candidates = await _db.Requirements.AsNoTracking()
-            .Where(requirement =>
-                requirement.BrokerId != listing.BrokerId &&
-                requirement.Status != null && requirement.Status.ToLower() == "active" &&
-                requirement.RequirementType != null && requirementTypes.Contains(requirement.RequirementType.ToUpper()) &&
-                requirement.PropertyType != null && propertyTypes.Contains(requirement.PropertyType.ToUpper()))
-            .Where(requirement =>
-                !requirement.Budget.HasValue || !listing.Price.HasValue || requirement.Budget.Value >= listing.Price.Value)
-            .ToListAsync(cancellationToken);
-
-        candidates = candidates
-            .Where(requirement => ConfigurationMatches(listing.Configuration, requirement.Configurations))
-            .ToList();
-
-        var existingRequirementIds = (await _db.Matches.AsNoTracking()
-                .Where(match => match.ListingId == listing.Id)
-                .Select(match => match.RequirementId)
-                .ToListAsync(cancellationToken))
-            .ToHashSet();
-        var created = candidates
-            .Where(requirement => !existingRequirementIds.Contains(requirement.Id))
-            .Select(requirement => NewMatch(listing, requirement))
-            .ToList();
-
-        _db.Matches.AddRange(created);
-        await _db.SaveChangesAsync(cancellationToken);
-        AddMatchNotifications(created);
-        await _db.SaveChangesAsync(cancellationToken);
-        return created.Select(match => match.Id).ToList();
+        return await RunStoredProcedureAsync(null, listingId, cancellationToken);
     }
 
     public async Task<IReadOnlyList<int>> RunForRequirementAsync(
         int requirementId,
         CancellationToken cancellationToken = default)
     {
-        var requirement = await _db.Requirements.AsNoTracking()
-            .SingleOrDefaultAsync(row => row.Id == requirementId, cancellationToken)
-            ?? throw new KeyNotFoundException($"Requirement ID {requirementId} not found.");
+        if (!await _db.Requirements.AnyAsync(row => row.Id == requirementId, cancellationToken))
+            throw new KeyNotFoundException($"Requirement ID {requirementId} not found.");
 
-        var listingTypes = IsRentalRequirement(requirement.RequirementType)
-            ? RentalListingTypes
-            : BuySellListingTypes;
-        var propertyTypes = EquivalentPropertyTypes(requirement.PropertyType);
+        return await RunStoredProcedureAsync(requirementId, null, cancellationToken);
+    }
 
-        var candidates = await _db.Listings.AsNoTracking()
-            .Where(listing =>
-                listing.BrokerId != requirement.BrokerId &&
-                listing.Status != null && listing.Status.ToLower() == "active" &&
-                listing.ListingType != null && listingTypes.Contains(listing.ListingType.ToUpper()) &&
-                listing.PropertyType != null && propertyTypes.Contains(listing.PropertyType.ToUpper()))
-            .Where(listing =>
-                !requirement.Budget.HasValue || !listing.Price.HasValue || requirement.Budget.Value >= listing.Price.Value)
+    private async Task<IReadOnlyList<int>> RunStoredProcedureAsync(
+        int? requirementId,
+        int? listingId,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = DateTime.UtcNow;
+        var requirementParameter = new NpgsqlParameter("p_requirement_id", requirementId ?? (object)DBNull.Value);
+        var listingParameter = new NpgsqlParameter("p_listing_id", listingId ?? (object)DBNull.Value);
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "CALL public.sp_run_matching_engine(@p_requirement_id, @p_listing_id)",
+            [requirementParameter, listingParameter],
+            cancellationToken);
+
+        var matches = await _db.Matches
+            .Where(match =>
+                (!requirementId.HasValue || match.RequirementId == requirementId.Value) &&
+                (!listingId.HasValue || match.ListingId == listingId.Value) &&
+                match.Status == "MATCHED")
             .ToListAsync(cancellationToken);
 
-        candidates = candidates
-            .Where(listing => ConfigurationMatches(listing.Configuration, requirement.Configurations))
+        var created = matches
+            .Where(match => match.CreatedAt.HasValue && match.CreatedAt.Value >= startedAt.AddSeconds(-1))
             .ToList();
+        if (created.Count > 0)
+        {
+            AddMatchNotifications(created);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
-        var existingListingIds = (await _db.Matches.AsNoTracking()
-                .Where(match => match.RequirementId == requirement.Id)
-                .Select(match => match.ListingId)
-                .ToListAsync(cancellationToken))
-            .ToHashSet();
-        var created = candidates
-            .Where(listing => !existingListingIds.Contains(listing.Id))
-            .Select(listing => NewMatch(listing, requirement))
-            .ToList();
-
-        _db.Matches.AddRange(created);
-        await _db.SaveChangesAsync(cancellationToken);
-        AddMatchNotifications(created);
-        await _db.SaveChangesAsync(cancellationToken);
         return created.Select(match => match.Id).ToList();
     }
 
