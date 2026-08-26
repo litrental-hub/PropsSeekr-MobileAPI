@@ -101,6 +101,14 @@ public sealed class ListingsControllerTests
         public int Page { get; private set; }
         public int Limit { get; private set; }
 
+        public Task<GetBrokerListingsResponseDto> GetAllListingsAsync(
+            int page,
+            int limit,
+            string? transactionType = null,
+            string? status = null,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GetBrokerListingsResponseDto { Page = page, Limit = limit });
+
         public Task<GetBrokerListingsResponseDto> GetMyListingsAsync(
             int brokerId,
             int page,

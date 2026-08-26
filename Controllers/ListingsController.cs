@@ -57,25 +57,31 @@ public class ListingsController : ControllerBase
             });
         }
 
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!Guid.TryParse(userIdClaim, out var userId))
-        {
-            return Unauthorized(new { success = false, message = "Invalid authenticated user." });
-        }
-
-        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId, cancellationToken);
-        if (!brokerId.HasValue)
-        {
-            return NotFound(new
-            {
-                success = false,
-                code = "broker_profile_not_linked",
-                message = "No broker profile is linked to this account."
-            });
-        }
-
         try
         {
+            if (User.IsInRole("Admin"))
+            {
+                return Ok(await _brokerListingsService.GetAllListingsAsync(
+                    page, limit, transactionType, status, cancellationToken));
+            }
+
+            var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (!Guid.TryParse(userIdClaim, out var userId))
+            {
+                return Unauthorized(new { success = false, message = "Invalid authenticated user." });
+            }
+
+            var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId, cancellationToken);
+            if (!brokerId.HasValue)
+            {
+                return NotFound(new
+                {
+                    success = false,
+                    code = "broker_profile_not_linked",
+                    message = "No broker profile is linked to this account."
+                });
+            }
+
             var response = await _brokerListingsService.GetMyListingsAsync(
                 brokerId.Value,
                 page,

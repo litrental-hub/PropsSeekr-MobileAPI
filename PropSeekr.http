@@ -1,5 +1,21 @@
 @PropSeekr_HostAddress = http://localhost:5150
 
+### Generate a presigned text-file upload URL
+POST {{PropSeekr_HostAddress}}/api/v1/file-processor/upload
+Content-Type: application/json
+
+{
+  "fileName": "WhatsApp Chat.txt"
+}
+
+### Start processing after the returned S3 PUT succeeds
+POST {{PropSeekr_HostAddress}}/api/v1/file-processor/pipeline
+Content-Type: application/json
+
+{
+  "key": "uploads/2026-08-26/WhatsApp_Chat_123.txt"
+}
+
 ### Register a new user
 POST {{PropSeekr_HostAddress}}/api/v1/auth/register
 Content-Type: application/json

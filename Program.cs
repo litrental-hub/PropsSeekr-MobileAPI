@@ -13,8 +13,14 @@ using Amazon.SecretsManager.Model;
 using PropSeekr.Data;
 using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
+using PropSeekr.FileProcessing;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// The migrated processor retains the Lambda's proven configuration names.
+// This lets FileProcessor:* app settings work locally while deployment
+// environment variables remain the preferred production configuration.
+FileProcessorConfigurationBridge.Apply(builder.Configuration);
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
@@ -94,6 +100,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Services
 builder.Services.AddHttpClient();
+builder.Services.AddSingleton<FileProcessorHost>();
 builder.Services.AddScoped<IOtpDeliveryService, Msg91OtpDeliveryService>();
 builder.Services.AddScoped<IEmailService, AmazonSesEmailService>();
 builder.Services.AddScoped<IEmailOtpService, EmailOtpService>();

@@ -54,6 +54,19 @@ public sealed class UserMatchesControllerTests
     }
 
     [Fact]
+    public async Task GetUserMatches_AdminUsesUnscopedMatchQuery()
+    {
+        var matchesService = new CapturingUserMatchesService();
+        var controller = CreateController(Guid.NewGuid(), matchesService, isAdmin: true);
+
+        var result = await controller.GetUserMatches(null, null, null, null, null, 1, 20);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.True(matchesService.AllMatchesWasCalled);
+        Assert.False(matchesService.WasCalled);
+    }
+
+    [Fact]
     public async Task RejectMatch_UsesAuthenticatedBrokerAndStructuredReason()
     {
         var unlockService = new CapturingUnlockService();
@@ -75,7 +88,8 @@ public sealed class UserMatchesControllerTests
     private static UserMatchesController CreateController(
         Guid userId,
         IUserMatchesService matchesService,
-        IUnlockService? unlockService = null)
+        IUnlockService? unlockService = null,
+        bool isAdmin = false)
     {
         var controller = new UserMatchesController(
             matchesService,
@@ -87,7 +101,9 @@ public sealed class UserMatchesControllerTests
             HttpContext = new DefaultHttpContext
             {
                 User = new ClaimsPrincipal(new ClaimsIdentity(
-                    [new Claim(ClaimTypes.NameIdentifier, userId.ToString())],
+                    isAdmin
+                        ? [new Claim(ClaimTypes.NameIdentifier, userId.ToString()), new Claim(ClaimTypes.Role, "Admin")]
+                        : [new Claim(ClaimTypes.NameIdentifier, userId.ToString())],
                     authenticationType: "test"))
             }
         };
@@ -97,6 +113,7 @@ public sealed class UserMatchesControllerTests
     private sealed class CapturingUserMatchesService : IUserMatchesService
     {
         public bool WasCalled { get; private set; }
+        public bool AllMatchesWasCalled { get; private set; }
         public string? TransactionType { get; private set; }
         public int? ListingId { get; private set; }
         public int? RequirementId { get; private set; }
@@ -114,6 +131,18 @@ public sealed class UserMatchesControllerTests
             TransactionType = transactionType;
             ListingId = listingId;
             RequirementId = requirementId;
+            return Task.FromResult(new UserMatchesResponseDto());
+        }
+
+        public Task<UserMatchesResponseDto> GetAllMatchesAsync(
+            string? transactionType = null,
+            int? listingId = null,
+            int? requirementId = null,
+            int? matchId = null,
+            int page = 1,
+            int limit = 20)
+        {
+            AllMatchesWasCalled = true;
             return Task.FromResult(new UserMatchesResponseDto());
         }
 

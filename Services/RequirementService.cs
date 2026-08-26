@@ -33,13 +33,31 @@ public class RequirementService : IRequirementService
         PaginationDto pagination,
         string? transactionType = null)
     {
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        return await GetRequirementsAsync(userId, brokerId, pagination, transactionType);
+    }
+
+    public Task<MyRequirementsResponseDto> GetAllRequirementsAsync(
+        PaginationDto pagination,
+        string? transactionType = null) =>
+        GetRequirementsAsync(null, null, pagination, transactionType);
+
+    private async Task<MyRequirementsResponseDto> GetRequirementsAsync(
+        Guid? userId,
+        int? brokerId,
+        PaginationDto pagination,
+        string? transactionType)
+    {
         var pageNumber = pagination.Page > 0 ? pagination.Page : 1;
         var limit = pagination.Limit > 0 ? pagination.Limit : 20;
         var skip = (pageNumber - 1) * limit;
 
         var query = _dbContext.PropertyRequests
             .AsNoTracking()
-            .Where(p => p.UserId == userId && p.ListingType == "DEMAND");
+            .Where(p => p.ListingType == "DEMAND");
+
+        if (userId.HasValue)
+            query = query.Where(p => p.UserId == userId.Value);
 
         if (!string.IsNullOrWhiteSpace(transactionType))
         {
@@ -103,14 +121,12 @@ public class RequirementService : IRequirementService
             };
         }).ToList();
 
-        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        var canonicalQuery = _dbContext.Requirements.AsNoTracking();
         if (brokerId.HasValue)
-        {
-            var canonicalQuery = _dbContext.Requirements
-                .AsNoTracking()
-                .Where(requirement => requirement.BrokerId == brokerId.Value);
+            canonicalQuery = canonicalQuery.Where(requirement => requirement.BrokerId == brokerId.Value);
 
-            if (!string.IsNullOrWhiteSpace(transactionType))
+        if (!string.IsNullOrWhiteSpace(transactionType))
+        {
             {
                 var normalizedTransactionType = transactionType.Trim().ToUpperInvariant().Replace('-', '_').Replace('/', '_');
                 if (normalizedTransactionType is "RENT" or "RENTAL" or "LEASE")
@@ -131,17 +147,19 @@ public class RequirementService : IRequirementService
                 }
             }
 
-            var canonical = await canonicalQuery.OrderByDescending(requirement => requirement.CreatedAt).ToListAsync();
-            var canonicalIds = canonical.Select(requirement => requirement.Id).ToArray();
-            var matchCounts = canonicalIds.Length == 0
-                ? new Dictionary<int, int>()
-                : await _dbContext.Matches.AsNoTracking()
-                    .Where(match => canonicalIds.Contains(match.RequirementId))
-                    .GroupBy(match => match.RequirementId)
-                    .Select(group => new { RequirementId = group.Key, Count = group.Count() })
-                    .ToDictionaryAsync(row => row.RequirementId, row => row.Count);
+        }
 
-            responseItems.AddRange(canonical.Select(requirement =>
+        var canonical = await canonicalQuery.OrderByDescending(requirement => requirement.CreatedAt).ToListAsync();
+        var canonicalIds = canonical.Select(requirement => requirement.Id).ToArray();
+        var matchCounts = canonicalIds.Length == 0
+            ? new Dictionary<int, int>()
+            : await _dbContext.Matches.AsNoTracking()
+                .Where(match => canonicalIds.Contains(match.RequirementId))
+                .GroupBy(match => match.RequirementId)
+                .Select(group => new { RequirementId = group.Key, Count = group.Count() })
+                .ToDictionaryAsync(row => row.RequirementId, row => row.Count);
+
+        responseItems.AddRange(canonical.Select(requirement =>
             {
                 var id = requirement.Id.ToString();
                 var configuration = requirement.Configurations?.FirstOrDefault() ?? string.Empty;
@@ -179,7 +197,6 @@ public class RequirementService : IRequirementService
                     Status = NormalizeStatus(requirement.Status)
                 };
             }));
-        }
 
         responseItems = responseItems
             .OrderByDescending(item => item.PostedAt)
@@ -192,9 +209,7 @@ public class RequirementService : IRequirementService
             Success = true,
             Metadata = new MetadataDto
             {
-                TotalCount = requirements.Count + (brokerId.HasValue
-                    ? await CountCanonicalRequirementsAsync(brokerId.Value, transactionType)
-                    : 0),
+                TotalCount = requirements.Count + await CountCanonicalRequirementsAsync(brokerId, transactionType),
                 Page = pageNumber,
                 Limit = limit
             },
@@ -281,9 +296,11 @@ public class RequirementService : IRequirementService
         };
     }
 
-    private async Task<int> CountCanonicalRequirementsAsync(int brokerId, string? transactionType)
+    private async Task<int> CountCanonicalRequirementsAsync(int? brokerId, string? transactionType)
     {
-        var query = _dbContext.Requirements.AsNoTracking().Where(requirement => requirement.BrokerId == brokerId);
+        var query = _dbContext.Requirements.AsNoTracking();
+        if (brokerId.HasValue)
+            query = query.Where(requirement => requirement.BrokerId == brokerId.Value);
         if (string.IsNullOrWhiteSpace(transactionType)) return await query.CountAsync();
         var rental = IsRentalRequirement(transactionType);
         return await query.CountAsync(requirement => rental
