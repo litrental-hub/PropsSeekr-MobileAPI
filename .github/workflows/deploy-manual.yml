@@ -1,235 +1,47 @@
-name: Manual Deploy
+name: Manual Mobile API Deployment
 
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Docker image tag to deploy (e.g. 20260823-1400-abc1234, latest, or a git SHA)'
+        description: Immutable ECR image tag to deploy, for example sha-<commit SHA>
         required: true
-        default: 'latest'
         type: string
-      environment:
-        description: 'Target environment'
-        required: true
-        default: 'development'
-        type: choice
-        options:
-          - development
-          - staging
-          - production
       confirm:
-        description: 'Type "deploy" to confirm'
+        description: Type deploy to confirm
         required: true
         type: string
 
-env:
-  ECR_REPOSITORY: propseekr-mobile-api
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: mobile-api-production
+  cancel-in-progress: false
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Validate inputs
-  # ──────────────────────────────────────────────
-  validate:
-    name: ✅ Validate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Confirm deployment
-        run: |
-          if [ "${{ inputs.confirm }}" != "deploy" ]; then
-            echo "❌ Deployment not confirmed. Type 'deploy' in the confirm field."
-            exit 1
-          fi
-          echo "✅ Deployment confirmed for ${{ inputs.environment }} with tag: ${{ inputs.image_tag }}"
-
-  # ──────────────────────────────────────────────
-  # Verify image exists in ECR
-  # ──────────────────────────────────────────────
-  verify-image:
-    name: 🔍 Verify Image
-    runs-on: ubuntu-latest
-    needs: validate
-    outputs:
-      full_image: ${{ steps.verify.outputs.full_image }}
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: propseekr-api-verify-${{ github.run_id }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Verify image exists in ECR
-        id: verify
-        run: |
-          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
-          FULL_IMAGE="${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${{ inputs.image_tag }}"
-
-          echo "🔍 Checking if image exists: ${FULL_IMAGE}"
-
-          aws ecr describe-images \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
-            --image-ids imageTag=${{ inputs.image_tag }} \
-            --query 'imageDetails[0].imagePushedAt' \
-            --output text
-
-          if [ $? -ne 0 ]; then
-            echo "❌ Image tag '${{ inputs.image_tag }}' not found in ECR!"
-            echo ""
-            echo "Available recent tags:"
-            aws ecr describe-images \
-              --repository-name ${{ env.ECR_REPOSITORY }} \
-              --query 'sort_by(imageDetails,& imagePushedAt)[-10:].imageTags[]' \
-              --output table
-            exit 1
-          fi
-
-          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
-          echo "✅ Image verified: ${FULL_IMAGE}"
-
-  # ──────────────────────────────────────────────
-  # Deploy to ECS
-  # ──────────────────────────────────────────────
   deploy:
-    name: 🚀 Deploy to ${{ inputs.environment }}
+    if: inputs.confirm == 'deploy'
     runs-on: ubuntu-latest
-    needs: verify-image
-    environment:
-      name: ${{ inputs.environment }}
+    environment: production
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: propseekr-api-manual-deploy-${{ github.run_id }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Snapshot current task definition (for rollback)
-        id: snapshot
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          echo "Using cluster: $CLUSTER_NAME, service: $SERVICE_NAME"
-
-          CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster "$CLUSTER_NAME" \
-            --services "$SERVICE_NAME" \
-            --query 'services[0].taskDefinition' \
-            --output text)
-
-          CURRENT_IMAGE=$(aws ecs describe-task-definition \
-            --task-definition "${CURRENT_TASK_DEF}" \
-            --query 'taskDefinition.containerDefinitions[0].image' \
-            --output text)
-
-          echo "📸 Current state snapshot:"
-          echo "   Task Def:  ${CURRENT_TASK_DEF}"
-          echo "   Image:     ${CURRENT_IMAGE}"
-          echo ""
-          echo "current_task_def=${CURRENT_TASK_DEF}" >> $GITHUB_OUTPUT
-          echo "current_image=${CURRENT_IMAGE}" >> $GITHUB_OUTPUT
-
-      - name: Update task definition with new image
-        id: update
-        run: |
-          NEW_IMAGE="${{ needs.verify-image.outputs.full_image }}"
-          echo "🔄 Updating image to: ${NEW_IMAGE}"
-
-          # Get current task definition
-          aws ecs describe-task-definition \
-            --task-definition ${{ steps.snapshot.outputs.current_task_def }} \
-            --query 'taskDefinition' > task-def.json
-
-          # Update image
-          jq --arg IMAGE "${NEW_IMAGE}" \
-            '.containerDefinitions[0].image = $IMAGE' task-def.json > updated.json
-
-          # Clean fields for registration
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
-            updated.json > register.json
-
-          # Register new task definition
-          NEW_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://register.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "new_task_def_arn=${NEW_ARN}" >> $GITHUB_OUTPUT
-          echo "✅ Registered new task definition: ${NEW_ARN}"
-
-      - name: Deploy to ECS
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          aws ecs update-service \
-            --cluster "$CLUSTER_NAME" \
-            --service "$SERVICE_NAME" \
-            --task-definition ${{ steps.update.outputs.new_task_def_arn }} \
-            --force-new-deployment \
-            --query 'service.serviceName' \
-            --output text
-
-          echo "✅ Deployment triggered."
-
-      - name: Wait for stability
-        run: |
-          CLUSTER_NAME="${{ secrets.ECS_CLUSTER }}"
-          if [ -z "$CLUSTER_NAME" ]; then CLUSTER_NAME="default"; fi
-
-          SERVICE_NAME="${{ secrets.ECS_SERVICE }}"
-          if [ -z "$SERVICE_NAME" ]; then SERVICE_NAME="propseekr-mobile-api"; fi
-
-          echo "⏳ Waiting for service to stabilize..."
-          aws ecs wait services-stable \
-            --cluster "$CLUSTER_NAME" \
-            --services "$SERVICE_NAME" || true
-          echo "✅ Service stabilized."
-
-      - name: Health check
-        run: |
-          HEALTH_URL="${{ secrets.HEALTH_CHECK_URL }}"
-          if [ -z "${HEALTH_URL}" ]; then
-            echo "⚠️  HEALTH_CHECK_URL not set — skipping."
-            exit 0
-          fi
-
-          echo "🏥 Checking: ${HEALTH_URL}/hello"
-          for i in $(seq 1 20); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${HEALTH_URL}/hello" 2>/dev/null || echo "000")
-            if [ "${STATUS}" = "200" ]; then
-              echo "✅ Health check passed!"
-              exit 0
-            fi
-            echo "   Attempt ${i}/20 — Status: ${STATUS}"
-            sleep 15
-          done
-          echo "❌ Health check failed!"
-          exit 1
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "  MANUAL DEPLOYMENT SUMMARY"
-          echo "=========================================="
-          echo "  Environment: ${{ inputs.environment }}"
-          echo "  Image Tag:   ${{ inputs.image_tag }}"
-          echo "  Full Image:  ${{ needs.verify-image.outputs.full_image }}"
-          echo "  Previous:    ${{ steps.snapshot.outputs.current_image }}"
-          echo "  Actor:       ${GITHUB_ACTOR}"
-          echo "  Time:        $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-          echo "=========================================="
-          echo ""
-          echo "  To rollback: re-run this workflow with the previous image tag."
-          echo "=========================================="
+          role-to-assume: ${{ vars.AWS_GITHUB_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy selected immutable image
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+          ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+          IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:${{ inputs.image_tag }}
+          HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
+          HEALTH_CHECK_PATH: /hello
+        run: bash scripts/deploy-ecs.sh
