@@ -17,6 +17,7 @@ readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-10}"
 service_updated=false
 previous_task_definition=""
 new_task_definition=""
+deployment_arn=""
 
 task_definition_file="task-definition.json"
 register_file="task-definition-register.json"
