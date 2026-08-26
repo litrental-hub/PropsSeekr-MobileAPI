@@ -283,11 +283,13 @@ while [[ -z "${deployment_arn}" ]]; do
         head -n 1
     )"
 
-    # Fallback: if no exact revision match, take the latest service deployment
-    if [[ -z "${deployment_arn}" || "${deployment_arn}" == "null" ]]; then
-        deployment_arn="$(
-            jq -r '.serviceDeployments[0].serviceDeploymentArn // empty' <<< "${deployment_json}"
-        )"
+    # Fallback: if no exact revision match after 5 attempts, take the latest service deployment
+    if [[ $record_checks -gt 5 ]]; then
+        if [[ -z "${deployment_arn}" || "${deployment_arn}" == "null" ]]; then
+            deployment_arn="$(
+                jq -r '.serviceDeployments[0].serviceDeploymentArn // empty' <<< "${deployment_json}"
+            )"
+        fi
     fi
 
     if [[ -z "${deployment_arn}" || "${deployment_arn}" == "null" ]]; then
