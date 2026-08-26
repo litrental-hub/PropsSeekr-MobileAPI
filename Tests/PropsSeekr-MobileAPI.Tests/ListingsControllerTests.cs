@@ -69,7 +69,7 @@ public sealed class ListingsControllerTests
             db,
             brokerIdentity,
             listings,
-            new StubAutomatedMatchingService(),
+            new StubMatchingPipelineService(),
             NullLogger<ListingsController>.Instance);
         controller.ControllerContext = new ControllerContext
         {
@@ -120,16 +120,16 @@ public sealed class ListingsControllerTests
         }
     }
 
-    private sealed class StubAutomatedMatchingService : IAutomatedMatchingService
+    private sealed class StubMatchingPipelineService : IMatchingPipelineService
     {
-        public Task<IReadOnlyList<int>> RunForListingAsync(
+        public Task TriggerForListingAsync(
             int listingId,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<int>>([]);
+            Task.CompletedTask;
 
-        public Task<IReadOnlyList<int>> RunForRequirementAsync(
+        public Task TriggerForRequirementAsync(
             int requirementId,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<int>>([]);
+            Task.CompletedTask;
     }
 }
