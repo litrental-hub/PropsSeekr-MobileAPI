@@ -9,6 +9,7 @@ public class AuthenticatedUserDto
     public string? Email { get; set; }
     public bool IsMobileVerified { get; set; }
     public int Credits { get; set; }
+    public string Role { get; set; } = "User";
 }
 
 public class LoginResponseDto
@@ -18,5 +19,6 @@ public class LoginResponseDto
     public string Token { get; set; } = string.Empty;
     public string RefreshToken { get; set; } = string.Empty;
     public DateTime ExpiresAt { get; set; }
+    public string Role { get; set; } = "User";
     public AuthenticatedUserDto User { get; set; } = new();
 }

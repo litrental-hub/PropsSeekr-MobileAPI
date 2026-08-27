@@ -120,61 +120,46 @@ public class AuthService : IAuthService
         };
     }
 
-    public async Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request)
-    {
-        var userName = NormalizeRequired(request.UserName, "Username");
-        var password = request.Password;
-
-        var admin = await _dbContext.AdminUsers.FirstOrDefaultAsync(a => a.UserName == userName && a.IsActive);
-        if (admin == null || !VerifyPassword(password, admin.PasswordHash))
-        {
-            throw new Exception("Invalid username or password.");
-        }
-
-        var token = GenerateAdminJwtToken(admin, out var expiresAt);
-
-        return new AdminLoginResponseDto
-        {
-            Token = token,
-            ExpiresAt = expiresAt,
-            UserName = admin.UserName
-        };
-    }
-
     public async Task<LoginResponseDto> LoginAsync(LoginRequestDto request)
     {
-        var identifier = NormalizeRequired(request.Identifier, "Mobile number or Email").ToLowerInvariant();
+        var identifier = NormalizeRequired(request.Identifier, "Username, mobile number, or email").ToLowerInvariant();
         var password = request.Password;
 
-        // Find user by Mobile Number OR Email Address
+        // Every identity lives in Users. Roles determine authorization after
+        // a successful login; they do not select a different login workflow.
         var user = await _dbContext.Users.FirstOrDefaultAsync(u =>
-            u.MobileNumber == identifier ||
-            (u.Email != null && u.Email.ToLower() == identifier));
+            u.IsActive &&
+            ((u.UserName != null && u.UserName.ToLower() == identifier) ||
+             (u.MobileNumber != null && u.MobileNumber == identifier) ||
+             (u.Email != null && u.Email.ToLower() == identifier)));
 
         if (user == null || !VerifyPassword(password, user.PasswordHash))
         {
-            throw new Exception("Invalid mobile number/email or password.");
+            throw new Exception("Invalid username, mobile number, email, or password.");
         }
 
-        var token = GenerateJwtToken(user, out var expiresAt);
+        var role = NormalizeRole(user.Role);
+        var token = GenerateJwtToken(user, out var expiresAt, role);
         var refreshToken = GenerateRefreshToken();
 
         return new LoginResponseDto
         {
             Success = true,
-            Message = "Login successful.",
+            Message = role == "Admin" ? "Admin login successful." : "Login successful.",
             Token = token,
             RefreshToken = refreshToken,
             ExpiresAt = expiresAt,
+            Role = role,
             User = new AuthenticatedUserDto
             {
                 Id = user.Id,
                 BrokerId = user.BrokerId,
                 Name = user.Name,
-                MobileNumber = user.MobileNumber,
+                MobileNumber = user.MobileNumber ?? string.Empty,
                 Email = user.Email,
                 IsMobileVerified = user.IsMobileVerified,
-                Credits = user.Credits
+                Credits = user.Credits,
+                Role = role
             }
         };
     }
@@ -338,7 +323,7 @@ public class AuthService : IAuthService
         }
     }
 
-    private string GenerateJwtToken(User user, out DateTime expiresAt)
+    private string GenerateJwtToken(User user, out DateTime expiresAt, string? role = null)
     {
         var jwtKey = _configuration["Jwt:Key"];
         if (string.IsNullOrEmpty(jwtKey))
@@ -356,8 +341,9 @@ public class AuthService : IAuthService
         {
             new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
             new Claim(ClaimTypes.Name, user.Name),
-            new Claim(ClaimTypes.MobilePhone, user.MobileNumber),
-            new Claim(ClaimTypes.Email, user.Email ?? string.Empty)
+            new Claim(ClaimTypes.MobilePhone, user.MobileNumber ?? string.Empty),
+            new Claim(ClaimTypes.Email, user.Email ?? string.Empty),
+            new Claim(ClaimTypes.Role, NormalizeRole(role ?? user.Role))
         };
 
         var token = new JwtSecurityToken(
@@ -370,36 +356,6 @@ public class AuthService : IAuthService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    private string GenerateAdminJwtToken(AdminUser admin, out DateTime expiresAt)
-    {
-        var jwtKey = _configuration["Jwt:Key"];
-        if (string.IsNullOrEmpty(jwtKey))
-        {
-            throw new InvalidOperationException("Jwt:Key is not configured.");
-        }
-
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var expiresMinutes = _configuration.GetValue<int>("Jwt:ExpiresMinutes", 60);
-        expiresAt = DateTime.UtcNow.AddMinutes(expiresMinutes);
-
-        var claims = new[]
-        {
-            new Claim(ClaimTypes.NameIdentifier, admin.Id.ToString()),
-            new Claim(ClaimTypes.Name, admin.UserName),
-            new Claim(ClaimTypes.Role, "Admin")
-        };
-
-        var token = new JwtSecurityToken(
-            issuer: _configuration["Jwt:Issuer"],
-            audience: _configuration["Jwt:Audience"],
-            claims: claims,
-            expires: expiresAt,
-            signingCredentials: credentials);
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
-    }
     private static string HashPassword(string password)
     {
         if (string.IsNullOrWhiteSpace(password))
@@ -418,6 +374,11 @@ public class AuthService : IAuthService
 
         return $"PBKDF2-SHA256${PasswordHashIterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
     }
+
+    private static string NormalizeRole(string? role) =>
+        string.Equals(role?.Trim(), "Admin", StringComparison.OrdinalIgnoreCase)
+            ? "Admin"
+            : "User";
 
     private static bool VerifyPassword(string password, string storedHash)
     {

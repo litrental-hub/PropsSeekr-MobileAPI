@@ -29,11 +29,6 @@ builder.Logging.AddDebug();
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
-if (connectionString != null)
-{
-    connectionString = connectionString.Replace("]QI[:c[scyzMBo?a)1c_FB-xQw<0", "aman_anshul");
-}
-
 var secretName = builder.Configuration["AWS:DatabaseSecretName"];
 if (!string.IsNullOrWhiteSpace(secretName))
 {

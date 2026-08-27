@@ -34,16 +34,28 @@ public class RequirementService : IRequirementService
         string? transactionType = null)
     {
         var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
-        return await GetRequirementsAsync(userId, brokerId, pagination, transactionType);
+        if (!brokerId.HasValue)
+        {
+            return new MyRequirementsResponseDto
+            {
+                Success = true,
+                Metadata = new MetadataDto
+                {
+                    Page = pagination.Page > 0 ? pagination.Page : 1,
+                    Limit = pagination.Limit > 0 ? pagination.Limit : 20
+                }
+            };
+        }
+
+        return await GetRequirementsAsync(brokerId.Value, pagination, transactionType);
     }
 
     public Task<MyRequirementsResponseDto> GetAllRequirementsAsync(
         PaginationDto pagination,
         string? transactionType = null) =>
-        GetRequirementsAsync(null, null, pagination, transactionType);
+        GetRequirementsAsync(null, pagination, transactionType);
 
     private async Task<MyRequirementsResponseDto> GetRequirementsAsync(
-        Guid? userId,
         int? brokerId,
         PaginationDto pagination,
         string? transactionType)
@@ -56,8 +68,9 @@ public class RequirementService : IRequirementService
             .AsNoTracking()
             .Where(p => p.ListingType == "DEMAND");
 
-        if (userId.HasValue)
-            query = query.Where(p => p.UserId == userId.Value);
+        // Legacy PropertyRequests are retained for historical data only; they
+        // are not the matching source of truth and must not appear in /mine.
+        query = query.Where(_ => false);
 
         if (!string.IsNullOrWhiteSpace(transactionType))
         {
@@ -80,9 +93,11 @@ public class RequirementService : IRequirementService
             }
         }
 
-        var requirements = await query.OrderByDescending(p => p.PostedAt).ToListAsync();
+        // Do not materialize the legacy PropertyRequests projection. Canonical
+        // Requirements is the sole source for this endpoint and for matching.
+        var requirements = new List<PropertyRequest>();
 
-        var responseItems = requirements.Select(p => {
+        var legacyResponseItems = requirements.Select(p => {
             var requiredArea = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson) : null;
             return new RequirementListItemDto
             {
@@ -136,7 +151,7 @@ public class RequirementService : IRequirementService
                         requirement.RequirementType == "RENTAL" ||
                         requirement.RequirementType == "LEASE");
                 }
-                else
+                else if (normalizedTransactionType is "BUY_SELL" or "BUY" or "SELL" or "SALE" or "PURCHASE")
                 {
                     canonicalQuery = canonicalQuery.Where(requirement =>
                         requirement.RequirementType == "BUY" ||
@@ -144,6 +159,10 @@ public class RequirementService : IRequirementService
                         requirement.RequirementType == "BUY_SELL" ||
                         requirement.RequirementType == "SALE" ||
                         requirement.RequirementType == "PURCHASE");
+                }
+                else
+                {
+                    throw new ArgumentException("transactionType must be RENTAL or BUY_SELL.", nameof(transactionType));
                 }
             }
 
@@ -159,7 +178,7 @@ public class RequirementService : IRequirementService
                 .Select(group => new { RequirementId = group.Key, Count = group.Count() })
                 .ToDictionaryAsync(row => row.RequirementId, row => row.Count);
 
-        responseItems.AddRange(canonical.Select(requirement =>
+        var responseItems = canonical.Select(requirement =>
             {
                 var id = requirement.Id.ToString();
                 var configuration = requirement.Configurations?.FirstOrDefault() ?? string.Empty;
@@ -196,7 +215,7 @@ public class RequirementService : IRequirementService
                     PostedAt = requirement.CreatedAt ?? DateTime.MinValue,
                     Status = NormalizeStatus(requirement.Status)
                 };
-            }));
+            }).ToList();
 
         responseItems = responseItems
             .OrderByDescending(item => item.PostedAt)
@@ -209,7 +228,7 @@ public class RequirementService : IRequirementService
             Success = true,
             Metadata = new MetadataDto
             {
-                TotalCount = requirements.Count + await CountCanonicalRequirementsAsync(brokerId, transactionType),
+                TotalCount = await CountCanonicalRequirementsAsync(brokerId, transactionType),
                 Page = pageNumber,
                 Limit = limit
             },
