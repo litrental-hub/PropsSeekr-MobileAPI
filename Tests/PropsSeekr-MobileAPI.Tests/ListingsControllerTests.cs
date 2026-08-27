@@ -59,11 +59,26 @@ public sealed class ListingsControllerTests
         Assert.Null(listings.BrokerId);
     }
 
+    [Fact]
+    public async Task GetMyListings_AdminUsesUnscopedQuery()
+    {
+        var listings = new CapturingBrokerListingsService();
+        await using var db = EmptyDbContext();
+        var controller = Controller(db, new StubBrokerIdentityService(42), listings, Guid.NewGuid(), isAdmin: true);
+
+        var result = await controller.GetMyListings(1, 20);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.True(listings.AllListingsWasCalled);
+        Assert.Null(listings.BrokerId);
+    }
+
     private static ListingsController Controller(
         AppDbContext db,
         IBrokerIdentityService brokerIdentity,
         IBrokerListingsService listings,
-        Guid userId)
+        Guid userId,
+        bool isAdmin = false)
     {
         var controller = new ListingsController(
             db,
@@ -76,7 +91,9 @@ public sealed class ListingsControllerTests
             HttpContext = new DefaultHttpContext
             {
                 User = new ClaimsPrincipal(new ClaimsIdentity(
-                    [new Claim(ClaimTypes.NameIdentifier, userId.ToString())],
+                    isAdmin
+                        ? [new Claim(ClaimTypes.NameIdentifier, userId.ToString()), new Claim(ClaimTypes.Role, "Admin")]
+                        : [new Claim(ClaimTypes.NameIdentifier, userId.ToString())],
                     "test"))
             }
         };
@@ -98,8 +115,20 @@ public sealed class ListingsControllerTests
     private sealed class CapturingBrokerListingsService : IBrokerListingsService
     {
         public int? BrokerId { get; private set; }
+        public bool AllListingsWasCalled { get; private set; }
         public int Page { get; private set; }
         public int Limit { get; private set; }
+
+        public Task<GetBrokerListingsResponseDto> GetAllListingsAsync(
+            int page,
+            int limit,
+            string? transactionType = null,
+            string? status = null,
+            CancellationToken cancellationToken = default)
+        {
+            AllListingsWasCalled = true;
+            return Task.FromResult(new GetBrokerListingsResponseDto { Page = page, Limit = limit });
+        }
 
         public Task<GetBrokerListingsResponseDto> GetMyListingsAsync(
             int brokerId,

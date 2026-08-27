@@ -4,7 +4,6 @@ namespace PropSeekr.Services.Interfaces;
 
 public interface IAuthService
 {
-    Task<AdminLoginResponseDto> AdminLoginAsync(AdminLoginRequestDto request);
     Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request);
     Task<LoginResponseDto> LoginAsync(LoginRequestDto request);
     Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request);

@@ -7,7 +7,6 @@ namespace PropSeekr.Data;
 public class AppDbContext : DbContext
 {
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
-    public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
     public DbSet<EmailOtpRecord> EmailOtpRecords => Set<EmailOtpRecord>();
@@ -41,6 +40,9 @@ public class AppDbContext : DbContext
         b.Entity<User>().HasIndex(x => x.MobileNumber).IsUnique();
         b.Entity<User>().HasIndex(x => x.Email).IsUnique();
         b.Entity<User>().Property(x => x.BrokerId).HasColumnName("BrokerId");
+        b.Entity<User>().Property(x => x.Role).HasMaxLength(30).HasDefaultValue("User");
+        b.Entity<User>().Property(x => x.UserName).HasMaxLength(100);
+        b.Entity<User>().Property(x => x.IsActive).HasDefaultValue(true);
         b.Entity<PropertyRequest>().Property(x => x.Location).HasColumnType("geography (point)");
         b.Entity<PropertyRequest>().HasIndex(x => x.Location).HasMethod("GIST");
         b.Entity<UnlockedProperty>().HasIndex(x => new { x.UserId, x.PropertyRequestId }).IsUnique();

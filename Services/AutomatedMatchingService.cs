@@ -71,19 +71,6 @@ public sealed class AutomatedMatchingService : IAutomatedMatchingService
         return created.Select(match => match.Id).ToList();
     }
 
-    private static Match NewMatch(Listing listing, Requirement requirement) => new()
-    {
-        ListingId = listing.Id,
-        RequirementId = requirement.Id,
-        ListingBrokerId = listing.BrokerId,
-        RequirementBrokerId = requirement.BrokerId,
-        MatchScore = 95m,
-        State = "matched",
-        Status = "matched",
-        CreatedAt = DateTime.UtcNow,
-        StatusUpdatedAt = DateTime.UtcNow
-    };
-
     private void AddMatchNotifications(IReadOnlyCollection<Match> createdMatches)
     {
         foreach (var match in createdMatches)

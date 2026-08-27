@@ -30,13 +30,20 @@ public class RequirementsController : ControllerBase
     {
         try
         {
-            var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier);
-            if (userIdClaim == null || !Guid.TryParse(userIdClaim.Value, out var userId))
+            MyRequirementsResponseDto response;
+            if (User.IsInRole("Admin"))
             {
-                return Unauthorized(new { message = "Invalid user" });
+                response = await _requirementService.GetAllRequirementsAsync(pagination, transactionType);
             }
-
-            var response = await _requirementService.GetMyRequirementsAsync(userId, pagination, transactionType);
+            else
+            {
+                var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !Guid.TryParse(userIdClaim.Value, out var userId))
+                {
+                    return Unauthorized(new { message = "Invalid user" });
+                }
+                response = await _requirementService.GetMyRequirementsAsync(userId, pagination, transactionType);
+            }
             return Ok(response);
         }
         catch (Exception ex)

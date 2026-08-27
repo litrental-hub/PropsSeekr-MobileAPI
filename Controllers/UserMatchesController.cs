@@ -59,7 +59,9 @@ public class UserMatchesController : ControllerBase
             }
 
             var txType = type ?? transactionType;
-            var response = await _userMatchesService.GetUserMatchesAsync(userId, txType, listingId, requirementId, matchId, page, limit);
+            var response = User.IsInRole("Admin")
+                ? await _userMatchesService.GetAllMatchesAsync(txType, listingId, requirementId, matchId, page, limit)
+                : await _userMatchesService.GetUserMatchesAsync(userId, txType, listingId, requirementId, matchId, page, limit);
             return Ok(response);
         }
         catch (KeyNotFoundException ex)

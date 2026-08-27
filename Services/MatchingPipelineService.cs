@@ -1,28 +1,22 @@
-using System.Text;
 using System.Text.Json;
-using Amazon;
-using Amazon.Lambda;
-using Amazon.Lambda.Model;
-using Amazon.Runtime;
+using Amazon.Lambda.APIGatewayEvents;
+using PropSeekr.FileProcessing;
 using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Services;
 
 /// <summary>Starts the shared embedding + stored-procedure pipeline for one new UI record.</summary>
-public sealed class MatchingPipelineService : IMatchingPipelineService, IDisposable
+public sealed class MatchingPipelineService : IMatchingPipelineService
 {
-    private readonly IAmazonLambda _lambda;
-    private readonly string _functionName;
+    private readonly FileProcessorHost _processorHost;
+    private readonly ILogger<MatchingPipelineService> _logger;
 
-    public MatchingPipelineService(IConfiguration configuration)
+    public MatchingPipelineService(
+        FileProcessorHost processorHost,
+        ILogger<MatchingPipelineService> logger)
     {
-        _functionName = configuration["MatchingPipeline:FunctionName"] ?? "propseekr-file-processor";
-        var region = RegionEndpoint.GetBySystemName(configuration["AWS:Region"] ?? "ap-south-1");
-        var accessKey = configuration["AWS:AccessKeyId"];
-        var secretKey = configuration["AWS:SecretAccessKey"];
-        _lambda = string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey)
-            ? new AmazonLambdaClient(region)
-            : new AmazonLambdaClient(new BasicAWSCredentials(accessKey, secretKey), region);
+        _processorHost = processorHost;
+        _logger = logger;
     }
 
     public Task TriggerForListingAsync(int listingId, CancellationToken cancellationToken = default) =>
@@ -33,7 +27,9 @@ public sealed class MatchingPipelineService : IMatchingPipelineService, IDisposa
 
     private async Task TriggerAsync(object body, CancellationToken cancellationToken)
     {
-        var eventPayload = JsonSerializer.Serialize(new
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var eventPayload = JsonSerializer.SerializeToElement(new
         {
             path = "/embed",
             httpMethod = "POST",
@@ -42,16 +38,11 @@ public sealed class MatchingPipelineService : IMatchingPipelineService, IDisposa
             body = JsonSerializer.Serialize(body)
         });
 
-        var response = await _lambda.InvokeAsync(new InvokeRequest
-        {
-            FunctionName = _functionName,
-            InvocationType = InvocationType.Event,
-            Payload = eventPayload
-        }, cancellationToken);
+        var response = await _processorHost.Processor.FunctionHandler(
+            eventPayload,
+            new RestLambdaContext(_logger, Guid.NewGuid().ToString("N")));
 
         if (response.StatusCode is < 200 or >= 300)
-            throw new InvalidOperationException($"Matching pipeline invocation returned HTTP {response.StatusCode}.");
+            throw new InvalidOperationException($"Matching pipeline returned HTTP {response.StatusCode}.");
     }
-
-    public void Dispose() => _lambda.Dispose();
 }
