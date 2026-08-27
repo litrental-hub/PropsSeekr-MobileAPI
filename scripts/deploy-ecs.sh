@@ -401,7 +401,12 @@ echo ""
 echo "7/7 Verifying application health..."
 
 if [[ -n "${HEALTH_CHECK_URL:-}" ]]; then
-    health_url="${HEALTH_CHECK_URL%/}${HEALTH_CHECK_PATH}"
+    # Strip trailing slash from base URL
+    health_url="${HEALTH_CHECK_URL%/}"
+    # If the URL doesn't already end with the health path, append it
+    if [[ "${health_url}" != *"${HEALTH_CHECK_PATH}" ]]; then
+        health_url="${health_url}${HEALTH_CHECK_PATH}"
+    fi
     echo "Health check URL: ${health_url}"
 
     # Wait for the HTTP endpoint to return 200 OK
