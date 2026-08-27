@@ -1,13 +1,11 @@
-# Build from the workspace root so the linked Lambda implementation remains
-# available: docker build -f PropsSeekr-MobileAPI/Dockerfile -t propseekr-mobileapi .
+# Build from this project directory: docker build -t propseekr-mobileapi .
 # Build stage
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-COPY ["PropsSeekr-MobileAPI/PropSeekr.csproj", "PropsSeekr-MobileAPI/"]
-RUN dotnet restore "PropsSeekr-MobileAPI/PropSeekr.csproj"
-COPY PropsSeekr-MobileAPI/ PropsSeekr-MobileAPI/
-COPY PropsSeekr-matchingapi/ PropsSeekr-matchingapi/
-WORKDIR /src/PropsSeekr-MobileAPI
+COPY ["PropSeekr.csproj", "./"]
+RUN dotnet restore "PropSeekr.csproj"
+COPY . .
+WORKDIR /src
 RUN dotnet build "PropSeekr.csproj" -c Release -o /app/build
 
 # Publish stage

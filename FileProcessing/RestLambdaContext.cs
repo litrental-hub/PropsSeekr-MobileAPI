@@ -6,9 +6,14 @@ namespace PropSeekr.FileProcessing;
 internal sealed class RestLambdaContext : ILambdaContext
 {
     public RestLambdaContext(ILogger logger, HttpContext httpContext)
+        : this(logger, httpContext.TraceIdentifier)
+    {
+    }
+
+    public RestLambdaContext(ILogger logger, string requestId)
     {
         Logger = new AspNetLambdaLogger(logger);
-        AwsRequestId = httpContext.TraceIdentifier;
+        AwsRequestId = requestId;
         FunctionName = "mobile-api-file-processor";
     }
 

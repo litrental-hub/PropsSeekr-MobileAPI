@@ -26,7 +26,6 @@
     <PackageReference Include="AWSSDK.SimpleEmail" Version="3.7.401" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="3.7.400.27" />
     <PackageReference Include="AWSSDK.ElasticLoadBalancingV2" Version="3.7.401" />
-    <PackageReference Include="AWSSDK.Lambda" Version="3.7.400" />
     <PackageReference Include="Amazon.Lambda.APIGatewayEvents" Version="2.7.0" />
     <PackageReference Include="Amazon.Lambda.Core" Version="2.3.0" />
     <PackageReference Include="Amazon.Lambda.Serialization.SystemTextJson" Version="2.4.3" />
@@ -36,32 +35,7 @@
     <PackageReference Include="Pgvector" Version="0.2.0" />
   </ItemGroup>
 
-  <!--
-    Compile the established file-processor implementation in this REST host.
-    Keeping these files linked (rather than copied or rewritten) ensures the
-    extraction, normalization, ingestion, embedding and matching rules remain
-    byte-for-byte aligned with the Lambda during the migration.
-  -->
-  <ItemGroup>
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\Function.cs"
-             Link="FileProcessor\Function.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\FileUploadService.cs"
-             Link="FileProcessor\FileUploadService.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\IngestService.cs"
-             Link="FileProcessor\IngestService.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\ListingFormService.cs"
-             Link="FileProcessor\ListingFormService.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\MatchesApiService.cs"
-             Link="FileProcessor\MatchesApiService.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\GeocodingService.cs"
-             Link="FileProcessor\GeocodingService.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\PropertyListing.cs"
-             Link="FileProcessor\PropertyListing.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\PropertyListingNormalizer.cs"
-             Link="FileProcessor\PropertyListingNormalizer.cs" />
-    <Compile Include="..\PropsSeekr-matchingapi\LIT_Rental_Lambda\propseekr-file-processor\propseekr-file-processor\Interfaces\IHandleIngest.cs"
-             Link="FileProcessor\Interfaces\IHandleIngest.cs" />
-  </ItemGroup>
+  <!-- The file-processor implementation is vendored in FileProcessor/. -->
 
   <ItemGroup>
     <Compile Remove="scratch\**" />
