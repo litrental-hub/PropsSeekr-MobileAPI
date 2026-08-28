@@ -7,4 +7,6 @@ public class CreateRequirementResponseDto
     public string Message { get; set; } = "Requirement posted successfully.";
     public int MatchCount { get; set; }
     public bool EmbeddingCompleted { get; set; }
+    public string EmbeddingStatus { get; set; } = "queued";
+    public Guid EmbeddingJobId { get; set; }
 }

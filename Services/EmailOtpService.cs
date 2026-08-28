@@ -211,7 +211,6 @@ public class EmailOtpService : IEmailOtpService
                     MobileNumber = user.MobileNumber,
                     Email = user.Email,
                     IsMobileVerified = user.IsMobileVerified,
-                    Credits = user.Credits
                 };
             }
 

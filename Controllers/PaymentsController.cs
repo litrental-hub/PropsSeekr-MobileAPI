@@ -26,61 +26,14 @@ public class PaymentsController : ControllerBase
     }
 
     [HttpPost("initiate")]
-    [Authorize]
-    public async Task<IActionResult> InitiatePayment([FromBody] InitiatePaymentRequestDto request)
+    [Obsolete("Use POST /api/v1/payment/order instead.")]
+    public IActionResult InitiatePayment()
     {
-        if (!TryGetCurrentUserId(out var userId))
+        return StatusCode(StatusCodes.Status410Gone, new
         {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        var callerUser = await _dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId);
-        if (callerUser == null || !callerUser.BrokerId.HasValue || callerUser.BrokerId.Value != request.BrokerId)
-        {
-            return Unauthorized(new { message = "You can only initiate payments for your own broker profile." });
-        }
-
-        var broker = await _dbContext.Brokers.FindAsync(request.BrokerId);
-        if (broker == null)
-        {
-            return NotFound(new { success = false, message = "Broker not found." });
-        }
-
-        var pack = await _dbContext.CreditPacks.FindAsync(request.CreditPackId);
-        if (pack == null || !pack.Active)
-        {
-            return NotFound(new { success = false, message = "Active credit pack not found." });
-        }
-
-        try
-        {
-            var payment = new Payment
-            {
-                BrokerId = request.BrokerId,
-                CreditPackId = request.CreditPackId,
-                Amount = pack.Price,
-                Currency = "INR",
-                Gateway = "razorpay",
-                GatewayTxnId = "txn_" + Guid.NewGuid().ToString("N").Substring(0, 12),
-                Status = "initiated",
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-
-            _dbContext.Payments.Add(payment);
-            await _dbContext.SaveChangesAsync();
-
-            return Ok(new
-            {
-                payment_id = payment.Id,
-                gateway_redirect_url = $"https://gateway.example/pay/{payment.GatewayTxnId}"
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to initiate payment for broker {BrokerId}", request.BrokerId);
-            return BadRequest(new { success = false, message = ex.Message });
-        }
+            success = false,
+            message = "Legacy payment initiation is retired. Use canonical Razorpay routes at POST /api/v1/payment/order and POST /api/v1/payment/verify."
+        });
     }
 
     [HttpPost("webhook")]
@@ -186,7 +139,6 @@ public class PaymentsController : ControllerBase
                 var broker = await _dbContext.Brokers.FirstOrDefaultAsync(b => b.Id == payment.BrokerId);
                 if (broker != null)
                 {
-                    broker.CreditBalance = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
                     _dbContext.Brokers.Update(broker);
                 }
             }

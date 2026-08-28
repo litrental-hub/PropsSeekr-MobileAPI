@@ -111,7 +111,7 @@ public sealed class BrokerListingsService : IBrokerListingsService
         // Count only by listing_id. This intentionally avoids materializing Match rows.
         var matchCounts = await _db.Matches
             .AsNoTracking()
-            .Where(match => listingIds.Contains(match.ListingId))
+            .Where(match => listingIds.Contains(match.ListingId) && match.Status == "MATCHED")
             .GroupBy(match => match.ListingId)
             .Select(group => new { ListingId = group.Key, Count = group.Count() })
             .ToDictionaryAsync(row => row.ListingId, row => row.Count, cancellationToken);
@@ -164,6 +164,7 @@ public sealed class BrokerListingsService : IBrokerListingsService
             TotalCount = totalCount,
             Page = page,
             Limit = limit,
+            IsAdminView = !brokerId.HasValue,
             Data = items
         };
     }

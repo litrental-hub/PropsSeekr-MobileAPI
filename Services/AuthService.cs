@@ -158,7 +158,6 @@ public class AuthService : IAuthService
                 MobileNumber = user.MobileNumber ?? string.Empty,
                 Email = user.Email,
                 IsMobileVerified = user.IsMobileVerified,
-                Credits = user.Credits,
                 Role = role
             }
         };

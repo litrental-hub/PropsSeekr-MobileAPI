@@ -40,6 +40,7 @@ Broker account -> broker identity -> listing or requirement
 - `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It first uses `User.BrokerId`, then falls back to the final ten digits of the mobile number and persists the link.
 - Broker-scoped actions must derive the broker ID from the authenticated user. Do not trust a client-supplied broker ID for authenticated create, match, wallet, or reveal operations.
 - Admin list endpoints intentionally remove broker ownership scope. Currently this applies to `/listings/mine`, `/requirements/mine`, `/user-matches`, and the admin search projection.
+- Internal service endpoints (file processor, matching run/expiration, monthly credit grant, credit deduction, and WhatsApp intake) require an `X-Internal-Service-Key` header matching `InternalService:ApiKey` or `INTERNAL_SERVICE_API_KEY`.
 
 The custom `Authentication/JwtAuthenticationHandler.cs` is not registered by `Program.cs`; the active implementation is ASP.NET's standard JWT bearer handler. Do not base new behavior on the custom handler unless registration is deliberately changed and tested.
 
@@ -68,8 +69,7 @@ Listing
 
 Important sources of truth:
 
-- `listings_table` and `requirements_table` are the underlying ingestion/matching tables in the deployed legacy schema.
-- `listings` and `requirements` are the EF-facing active views/tables used by much of the API. Existing migrations create at least the `requirements` active view over `requirements_table`; deployments must confirm the corresponding database objects before changing mappings.
+- `listings` and `requirements` are the canonical EF-facing tables and stored procedure targets used across the API, matching engine (`sp_run_matching_engine`), and marketplace search (`SearchPropertyService.cs` / `POST /api/v1/search/properties`). All marketplace search queries for normal users and admins query canonical `listings` and `requirements`. Legacy `PropertyRequests` routes (`PropertyInventoryController.cs`) are retired with 410 Gone.
 - `matches` is the canonical listing-to-requirement result table. `matchid` is the unlock identity.
 - `credit_wallets` and `credit_transactions` are canonical for current token flows.
 - `reveals` is the authority for whether contact information can be returned. Match state alone is not sufficient.

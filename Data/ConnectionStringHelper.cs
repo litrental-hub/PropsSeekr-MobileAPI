@@ -6,15 +6,17 @@ public static class ConnectionStringHelper
 {
     public static string Build(IConfiguration configuration)
     {
+        var host = Environment.GetEnvironmentVariable("DB_HOST")?.Trim();
         var baseConnectionString = configuration.GetConnectionString("DefaultConnection");
-        if (string.IsNullOrWhiteSpace(baseConnectionString))
+        if (string.IsNullOrWhiteSpace(baseConnectionString) && string.IsNullOrWhiteSpace(host))
         {
-            throw new InvalidOperationException("DefaultConnection is not configured.");
+            throw new InvalidOperationException("Configure ConnectionStrings:DefaultConnection or DB_HOST for the database connection.");
         }
 
-        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString);
+        var builder = string.IsNullOrWhiteSpace(baseConnectionString)
+            ? new NpgsqlConnectionStringBuilder()
+            : new NpgsqlConnectionStringBuilder(baseConnectionString);
 
-        var host = Environment.GetEnvironmentVariable("DB_HOST");
         if (!string.IsNullOrWhiteSpace(host))
         {
             builder.Host = host;
@@ -39,7 +41,8 @@ public static class ConnectionStringHelper
             builder.Database = database;
         }
 
-        var username = Environment.GetEnvironmentVariable("DB_USER");
+        var username = Environment.GetEnvironmentVariable("DB_USERNAME")?.Trim()
+                       ?? Environment.GetEnvironmentVariable("DB_USER")?.Trim();
         if (!string.IsNullOrWhiteSpace(username))
         {
             builder.Username = username;

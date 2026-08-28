@@ -226,42 +226,9 @@ public class UserMatchesController : ControllerBase
     /// Deducts credits and creates reveal record.
     /// </summary>
     [HttpPost("matches/{matchId}/reveal")]
-    public async Task<IActionResult> RevealMatch(int matchId, [FromBody] UnlockPropertyRequestDto request)
+    public IActionResult RevealMatch(int matchId, [FromBody] UnlockPropertyRequestDto request)
     {
-        if (!TryGetCurrentUserId(out var userId))
-        {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        if (matchId != request.MatchId)
-        {
-            return BadRequest(new { message = "MatchId mismatch." });
-        }
-        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
-        if (!brokerId.HasValue) return Unauthorized(new { message = "No broker profile is linked to this account." });
-
-        try
-        {
-            var response = await _unlockService.UnlockMatchAsync(brokerId.Value, request);
-            if (!response.Success)
-            {
-                return BadRequest(response);
-            }
-            return Ok(response);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(new { message = ex.Message });
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error revealing match {MatchId} for user {UserId}", matchId, userId);
-            return BadRequest(new { success = false, message = ex.Message });
-        }
+        return StatusCode(StatusCodes.Status410Gone, new { message = "Direct reveal is retired. Confirm the match through POST /api/v1/user-matches/matches/{matchId}/confirm." });
     }
 
     /// <summary>
@@ -270,51 +237,15 @@ public class UserMatchesController : ControllerBase
     /// </summary>
     [HttpPost("unlock")]
     [Obsolete("Use POST /matches/{matchId}/reveal instead")]
-    public async Task<IActionResult> UnlockProperty([FromBody] UnlockPropertyRequestDto request)
+    public IActionResult UnlockProperty([FromBody] UnlockPropertyRequestDto request)
     {
-        if (!TryGetCurrentUserId(out var userId))
-        {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        try
-        {
-            var response = await _userMatchesService.UnlockPropertyAsync(userId, request);
-            if (!response.Success)
-            {
-                return BadRequest(response);
-            }
-            return Ok(response);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(new { message = ex.Message });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error unlocking match {MatchId} for user {UserId}", request.MatchId, userId);
-            return BadRequest(new { success = false, message = ex.Message });
-        }
+        return StatusCode(StatusCodes.Status410Gone, new { message = "The legacy unlock route is retired. Use POST /api/v1/user-matches/matches/{matchId}/confirm." });
     }
 
     [HttpGet("unlocked")]
-    public async Task<IActionResult> GetUnlockedProperties([FromQuery] int page = 1, [FromQuery] int limit = 20)
+    public IActionResult GetUnlockedProperties([FromQuery] int page = 1, [FromQuery] int limit = 20)
     {
-        if (!TryGetCurrentUserId(out var userId))
-        {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        try
-        {
-            var response = await _userMatchesService.GetUnlockedPropertiesAsync(userId, page, limit);
-            return Ok(response);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error retrieving unlocked properties for user {UserId}", userId);
-            return BadRequest(new { success = false, message = ex.Message });
-        }
+        return StatusCode(StatusCodes.Status410Gone, new { message = "Legacy unlocked-property history is retired. Use GET /api/v1/user-matches and its reveal fields." });
     }
 
     private bool TryGetCurrentUserId(out Guid userId)

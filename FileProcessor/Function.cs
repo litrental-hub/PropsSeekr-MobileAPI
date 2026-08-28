@@ -494,7 +494,7 @@ namespace propseekr_file_processor
                             target = t.ToLower();
                     }
                     if (root.TryGetProperty("batch_size", out var bsEl) && bsEl.TryGetInt32(out var bs))
-                        batchSize = bs;
+                        batchSize = Math.Clamp(bs, 1, 100);
                     if (root.TryGetProperty("listing_id", out var listingIdEl) && listingIdEl.TryGetInt32(out var parsedListingId))
                         listingId = parsedListingId;
                     if (root.TryGetProperty("requirement_id", out var requirementIdEl) && requirementIdEl.TryGetInt32(out var parsedRequirementId))

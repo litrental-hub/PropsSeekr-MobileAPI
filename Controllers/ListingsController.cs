@@ -13,6 +13,8 @@ using PropSeekr.Models;
 using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
 
+using PropSeekr.Attributes;
+
 namespace PropSeekr.Controllers;
 
 [Authorize]
@@ -133,7 +135,7 @@ public class ListingsController : ControllerBase
     }
 
     [HttpPost("whatsapp-intake")]
-    [AllowAnonymous] // Allow lambda integration to hit it without user bearer tokens
+    [RequireInternalServiceKey]
     public async Task<IActionResult> WhatsappIntake([FromBody] CreateListingRequestDto request)
     {
         return await SaveListingInternal(request, "whatsapp");
@@ -343,6 +345,24 @@ public class ListingsController : ControllerBase
             return NotFound(new { success = false, message = "Listing not found." });
         }
 
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdClaim, out var userId))
+        {
+            return Unauthorized(new { success = false, message = "Invalid authenticated user." });
+        }
+
+        var isAdmin = User.IsInRole("Admin");
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+
+        if (!isAdmin && (!brokerId.HasValue || listing.BrokerId != brokerId.Value))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                success = false,
+                message = "You can only update your own listings."
+            });
+        }
+
         // Apply fields if supplied in patch payload
         if (request.PropertyType != null)
         {
@@ -352,6 +372,24 @@ public class ListingsController : ControllerBase
         if (request.Locality != null)
         {
             listing.ProjectName = request.Locality;
+        }
+
+        if (request.City != null)
+        {
+            listing.City = request.City;
+        }
+
+        var effectiveCity = request.City ?? listing.City;
+        var effectiveLocality = request.Locality ?? listing.ProjectName;
+        if (request.Latitude.HasValue && request.Longitude.HasValue &&
+            !string.IsNullOrWhiteSpace(effectiveCity) && !string.IsNullOrWhiteSpace(effectiveLocality))
+        {
+            listing.MasterId = await MasterLocationResolver.ResolveAsync(
+                _dbContext,
+                effectiveCity,
+                effectiveLocality,
+                request.Latitude.Value,
+                request.Longitude.Value);
         }
 
         if (request.Price.HasValue)

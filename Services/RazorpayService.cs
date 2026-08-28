@@ -372,12 +372,7 @@ public class RazorpayService : IRazorpayService
             CreatedAt = DateTime.UtcNow
         });
 
-        // Compatibility-only mirrors. No API should use these columns as the
-        // source of truth after this change.
-        user.Credits = total;
         user.ModifiedDate = DateTime.UtcNow;
-        var broker = await _context.Brokers.FirstOrDefaultAsync(item => item.Id == brokerId);
-        if (broker is not null) broker.CreditBalance = total;
 
         await _context.SaveChangesAsync();
         return total;

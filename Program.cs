@@ -128,16 +128,17 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IProfileService, ProfileService>();
 builder.Services.AddScoped<ISearchPropertyService, SearchPropertyService>();
 builder.Services.AddScoped<IRequirementService, RequirementService>();
-builder.Services.AddScoped<IPropertyInventoryService, PropertyInventoryService>();
 builder.Services.AddScoped<IBrokerInventoryService, BrokerInventoryService>();
 builder.Services.AddScoped<IRazorpayService, RazorpayService>();
 builder.Services.AddScoped<IUserMatchesService, UserMatchesService>();
-builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IUnlockService, UnlockService>();
 builder.Services.AddScoped<IBrokerIdentityService, BrokerIdentityService>();
 builder.Services.AddScoped<IBrokerListingsService, BrokerListingsService>();
 builder.Services.AddScoped<IAutomatedMatchingService, AutomatedMatchingService>();
 builder.Services.AddScoped<IMatchingPipelineService, MatchingPipelineService>();
+builder.Services.AddScoped<IEmbeddingJobService, EmbeddingJobService>();
+builder.Services.AddScoped<MatchInvalidationService>();
+builder.Services.AddHostedService<EmbeddingJobWorker>();
 
 builder.Services.AddAuthorization();
 
@@ -229,6 +230,13 @@ if (builder.Configuration.GetValue<bool>("Database:ApplyMigrationsOnStartup"))
     using var scope = app.Services.CreateScope();
     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     dbContext.Database.Migrate();
+
+    var scriptPath = Path.Combine(app.Environment.ContentRootPath, "scripts", "harden-matching-engine.sql");
+    if (File.Exists(scriptPath))
+    {
+        var sql = File.ReadAllText(scriptPath);
+        dbContext.Database.ExecuteSqlRaw(sql);
+    }
 }
 
 var webRootPath = app.Environment.WebRootPath;

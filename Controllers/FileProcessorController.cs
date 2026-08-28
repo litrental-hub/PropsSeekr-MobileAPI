@@ -6,6 +6,8 @@ using Microsoft.AspNetCore.Mvc;
 using PropSeekr.FileProcessing;
 using propseekr_file_processor;
 
+using PropSeekr.Attributes;
+
 namespace PropSeekr.Controllers;
 
 /// <summary>
@@ -15,7 +17,7 @@ namespace PropSeekr.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/v1/file-processor")]
-[AllowAnonymous] // Protect through an internal network/API gateway policy before public deployment.
+[RequireInternalServiceKey]
 public sealed class FileProcessorController : ControllerBase
 {
     private readonly ILogger<FileProcessorController> _logger;
