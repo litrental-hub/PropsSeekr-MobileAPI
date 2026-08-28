@@ -1,12 +1,12 @@
 #!/bin/bash
 # Database migration script for PropSeekr unlock refactor
 
-# Database credentials
-DB_HOST="propseekr-db.cveo6kcqsisw.ap-south-1.rds.amazonaws.com"
-DB_PORT="5432"
-DB_USER="postgres"
-DB_PASSWORD="08848bbeba4892b40fd6f720dcee07de3936e6e3"
-DB_NAME="PropSeekr"
+# Database credentials must be supplied by the deployment environment.
+: "${DB_HOST:?Set DB_HOST}"
+: "${DB_PORT:=5432}"
+: "${DB_USER:?Set DB_USER}"
+: "${DB_PASSWORD:?Set DB_PASSWORD}"
+: "${DB_NAME:?Set DB_NAME}"
 
 # Connection string
 CONN_STRING="Server=$DB_HOST;Port=$DB_PORT;Database=$DB_NAME;User Id=$DB_USER;Password=$DB_PASSWORD;"

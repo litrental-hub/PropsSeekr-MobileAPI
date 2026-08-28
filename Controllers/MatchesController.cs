@@ -9,6 +9,7 @@ using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
+using PropSeekr.Services;
 
 namespace PropSeekr.Controllers;
 
@@ -75,7 +76,7 @@ public class MatchesController : ControllerBase
         var isAvailable = (listing?.Status?.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase) == true || listing?.Status?.Equals("active", StringComparison.OrdinalIgnoreCase) == true) &&
                           (requirement?.Status?.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase) == true || requirement?.Status?.Equals("active", StringComparison.OrdinalIgnoreCase) == true);
 
-        var scorePercent = (int)(match.MatchScore ?? 95);
+        var scorePercent = (int)(match.MatchScore ?? 0);
         string matchQuality = "Excellent Match";
         if (scorePercent >= 95) matchQuality = "Excellent Match";
         else if (scorePercent >= 80) matchQuality = "Good Match";
@@ -84,54 +85,47 @@ public class MatchesController : ControllerBase
         // Formatted Property
         var propertyFor = (listing?.ListingType?.Equals("RENT", StringComparison.OrdinalIgnoreCase) == true || 
                            listing?.ListingType?.Equals("RENTAL", StringComparison.OrdinalIgnoreCase) == true) ? "For Rent" : "For Sale";
-        var propertyType = listing?.PropertyType ?? "Independent House";
-        var propertyConfig = listing?.Configuration ?? "3BHK";
+        var propertyType = listing?.PropertyType ?? string.Empty;
+        var propertyConfig = listing?.Configuration ?? string.Empty;
         var propertyPrice = FormatPrice(listing?.Price, listing?.PriceUnit, listing?.ListingType);
         var propertySize = FormatSize(listing?.Size);
-        var propertyLocation = listing?.ProjectName ?? "Nipania";
-        var propertyCity = listing?.City ?? "Indore";
+        var propertyLocation = listing?.ProjectName ?? string.Empty;
+        var propertyCity = listing?.City ?? string.Empty;
         var propertyBrokerName = isConfirmed ? (match.ListingBroker?.Name ?? $"Broker {match.ListingBroker?.PhoneNumber}") : "Broker (Masked)";
         var propertyBrokerPhone = isConfirmed ? (match.ListingBroker?.PhoneNumber ?? "N/A") : "XXXXXXXXXX";
-        var propertyGroupName = listing?.GroupName ?? "Whatsapp";
+        var propertyGroupName = listing?.GroupName ?? string.Empty;
         var propertyMsgTime = listing?.MessageDatetime?.ToString("dd/MM/yyyy HH:mm") ?? "-";
         var propertyRawText = MaskRawText(listing?.RawMessageText, isConfirmed);
 
         // Formatted Buyer
         var buyerLookingFor = (requirement?.RequirementType?.Equals("RENT", StringComparison.OrdinalIgnoreCase) == true || 
                                requirement?.RequirementType?.Equals("RENTAL", StringComparison.OrdinalIgnoreCase) == true) ? "Wants to Rent" : "Wants to Buy";
-        var buyerType = requirement?.PropertyType ?? "Independent House";
+        var buyerType = requirement?.PropertyType ?? string.Empty;
         var buyerBudget = FormatBudget(requirement?.Budget, requirement?.BudgetUnit, requirement?.RequirementType);
         var buyerSize = FormatSize(requirement?.Size);
-        var buyerLocation = requirement?.City ?? "Nipania"; // Fallback to City or general locality
-        var buyerCity = requirement?.City ?? "Indore";
+        var buyerLocation = requirement?.City ?? string.Empty;
+        var buyerCity = requirement?.City ?? string.Empty;
         var buyerBrokerName = isConfirmed ? (match.RequirementBroker?.Name ?? $"Broker {match.RequirementBroker?.PhoneNumber}") : "Broker (Masked)";
         var buyerBrokerPhone = isConfirmed ? (match.RequirementBroker?.PhoneNumber ?? "N/A") : "XXXXXXXXXX";
-        var buyerGroupName = requirement?.GroupName ?? "Whatsapp";
+        var buyerGroupName = requirement?.GroupName ?? string.Empty;
         var buyerMsgTime = requirement?.MessageDatetime?.ToString("dd/MM/yyyy HH:mm") ?? "-";
         var buyerRawText = MaskRawText(requirement?.RawMessageText, isConfirmed);
 
         // Match Details comparisons
-        var locationComparison = "✅ Same area"; // Since we matched, default to same area
-        var priceComparison = "✅ Within budget";
+        var locationComparison = !string.IsNullOrWhiteSpace(propertyCity) &&
+                                 string.Equals(propertyCity, buyerCity, StringComparison.OrdinalIgnoreCase)
+            ? "Same city"
+            : "Not enough data";
+        var priceComparison = "Not enough data";
         if (listing?.Price.HasValue == true && requirement?.Budget.HasValue == true)
         {
-            if (listing.Price.Value > requirement.Budget.Value)
-            {
-                priceComparison = "⚠️ Slightly over";
-            }
+            priceComparison = listing.Price.Value > requirement.Budget.Value ? "Above budget" : "Within budget";
         }
-        var sizeComparison = "✅ Matches";
+        var sizeComparison = "Not enough data";
         if (listing?.Size.HasValue == true && requirement?.Size.HasValue == true)
         {
             var diff = Math.Abs(listing.Size.Value - requirement.Size.Value);
-            if (diff > 0 && diff <= 200)
-            {
-                sizeComparison = "⚠️ Approximate";
-            }
-            else if (diff > 200)
-            {
-                sizeComparison = "❌ Size mismatch";
-            }
+            sizeComparison = diff == 0 ? "Exact" : diff <= 200 ? "Approximate" : "Different";
         }
 
         // AI Verification fields
@@ -308,8 +302,6 @@ public class MatchesController : ControllerBase
 
     private static string MaskRawText(string? text, bool isConfirmed)
     {
-        if (string.IsNullOrEmpty(text)) return string.Empty;
-        if (isConfirmed) return text;
-        return System.Text.RegularExpressions.Regex.Replace(text, @"\b\d{10}\b|\b\d{5}-\d{5}\b", "XXXXXXXXXX");
+        return ContactRedaction.Redact(text, isConfirmed);
     }
 }

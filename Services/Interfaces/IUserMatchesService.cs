@@ -4,6 +4,8 @@ namespace PropSeekr.Services.Interfaces;
 
 public interface IUserMatchesService
 {
+    Task<MatchDetailResponseDto> GetMatchDetailsAsync(Guid userId, int matchId, bool allowAdminAccess = false);
+
     /// <summary>Returns every match for an authorized administrative view.</summary>
     Task<UserMatchesResponseDto> GetAllMatchesAsync(
         string? transactionType = null,

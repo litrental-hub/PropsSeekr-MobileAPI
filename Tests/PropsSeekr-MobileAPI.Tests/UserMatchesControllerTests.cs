@@ -67,6 +67,21 @@ public sealed class UserMatchesControllerTests
     }
 
     [Fact]
+    public async Task GetMatchDetails_ForwardsAuthenticatedUserAndMatchId()
+    {
+        var userId = Guid.NewGuid();
+        var matchesService = new CapturingUserMatchesService();
+        var controller = CreateController(userId, matchesService);
+
+        var result = await controller.GetMatchDetails(2297634);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(userId, matchesService.DetailUserId);
+        Assert.Equal(2297634, matchesService.DetailMatchId);
+        Assert.False(matchesService.DetailAllowsAdmin);
+    }
+
+    [Fact]
     public async Task RejectMatch_UsesAuthenticatedBrokerAndStructuredReason()
     {
         var unlockService = new CapturingUnlockService();
@@ -117,6 +132,17 @@ public sealed class UserMatchesControllerTests
         public string? TransactionType { get; private set; }
         public int? ListingId { get; private set; }
         public int? RequirementId { get; private set; }
+        public Guid? DetailUserId { get; private set; }
+        public int? DetailMatchId { get; private set; }
+        public bool DetailAllowsAdmin { get; private set; }
+
+        public Task<MatchDetailResponseDto> GetMatchDetailsAsync(Guid userId, int matchId, bool allowAdminAccess = false)
+        {
+            DetailUserId = userId;
+            DetailMatchId = matchId;
+            DetailAllowsAdmin = allowAdminAccess;
+            return Task.FromResult(new MatchDetailResponseDto());
+        }
 
         public Task<UserMatchesResponseDto> GetUserMatchesAsync(
             Guid userId,

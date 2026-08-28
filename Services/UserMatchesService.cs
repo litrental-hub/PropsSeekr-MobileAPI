@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
@@ -37,6 +39,156 @@ public sealed class UserMatchesService : IUserMatchesService
     {
         var brokerId = await RequireBrokerIdAsync(userId);
         return await QueryMatchesAsync(brokerId, transactionType, listingId, requirementId, matchId, page, limit, onlyRevealed: false);
+    }
+
+    public async Task<MatchDetailResponseDto> GetMatchDetailsAsync(Guid userId, int matchId, bool allowAdminAccess = false)
+    {
+        if (matchId <= 0) throw new ArgumentException("matchId must be greater than zero.");
+
+        int? brokerId = allowAdminAccess ? null : await RequireBrokerIdAsync(userId);
+        var match = await _db.Matches
+            .AsNoTracking()
+            .Include(item => item.Listing)
+            .Include(item => item.Requirement)
+            .Include(item => item.ListingBroker)
+            .Include(item => item.RequirementBroker)
+            .SingleOrDefaultAsync(item => item.Id == matchId)
+            ?? throw new KeyNotFoundException("Match not found.");
+
+        if (brokerId.HasValue && match.ListingBrokerId != brokerId && match.RequirementBrokerId != brokerId)
+            throw new UnauthorizedAccessException("You are not a party to this match.");
+
+        var isRevealed = await _db.Reveals.AsNoTracking().AnyAsync(item => item.MatchId == match.Id);
+        var contactVisible = brokerId.HasValue && isRevealed;
+        var listingDetails = await _db.ListingDetails.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.ListingId == match.ListingId);
+        var media = await _db.ListingMedia.AsNoTracking()
+            .Where(item => item.ListingId == match.ListingId)
+            .OrderBy(item => item.SortOrder)
+            .ThenBy(item => item.Id)
+            .ToListAsync();
+        var sizes = await _db.ListingSizes.AsNoTracking()
+            .Where(item => item.ListingId == match.ListingId)
+            .OrderBy(item => item.Id)
+            .ToListAsync();
+        var connectionRequest = await _db.MatchConnectionRequests.AsNoTracking()
+            .Where(item => item.MatchId == match.Id)
+            .OrderByDescending(item => item.Id)
+            .FirstOrDefaultAsync();
+
+        var currentBrokerConfirmation = brokerId.HasValue
+            ? await _db.MatchConfirmations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.MatchId == match.Id && item.BrokerId == brokerId.Value)
+            : null;
+
+        ContactDetailsDto? contact = null;
+        if (brokerId is int currentBrokerId && isRevealed)
+        {
+            var counterpartyId = match.ListingBrokerId == currentBrokerId
+                ? match.RequirementBrokerId
+                : match.ListingBrokerId;
+            var counterparty = match.ListingBrokerId == currentBrokerId
+                ? match.RequirementBroker
+                : match.ListingBroker;
+            var email = await _db.Users.AsNoTracking()
+                .Where(item => item.BrokerId == counterpartyId)
+                .Select(item => item.Email)
+                .FirstOrDefaultAsync();
+            if (counterparty is not null)
+            {
+                contact = new ContactDetailsDto
+                {
+                    OwnerName = counterparty.Name ?? "Counterparty Broker",
+                    OwnerMobile = counterparty.PhoneNumber,
+                    OwnerEmail = email
+                };
+            }
+        }
+
+        var state = match.State?.ToLowerInvariant() ?? "matched";
+        if (state == "pending_confirmation" && currentBrokerConfirmation?.WindowExpiresAt <= DateTime.UtcNow)
+            state = "expired";
+
+        var listing = match.Listing;
+        var requirement = match.Requirement;
+        var detailsJson = ParseDetails(listingDetails?.DetailsJson, contactVisible);
+
+        return new MatchDetailResponseDto
+        {
+            Data = new MatchDetailDto
+            {
+                MatchId = match.Id,
+                ListingId = match.ListingId,
+                RequirementId = match.RequirementId,
+                MatchScore = match.MatchScore,
+                State = state,
+                CurrentBrokerRole = allowAdminAccess ? "admin" : match.ListingBrokerId == brokerId ? "listing" : "requirement",
+                CurrentBrokerConfirmed = currentBrokerConfirmation?.ConfirmedAt.HasValue == true &&
+                                         currentBrokerConfirmation.WindowExpiresAt > DateTime.UtcNow,
+                IsRevealed = isRevealed,
+                ConnectionRequestStatus = connectionRequest?.Status,
+                UnlockedContact = contact,
+                Property = new ListingMatchDetailDto
+                {
+                    ListingId = match.ListingId,
+                    TransactionType = listing?.ListingType,
+                    PropertyType = listing?.PropertyType,
+                    Configuration = listing?.Configuration,
+                    Price = listing?.Price,
+                    PriceUnit = listing?.PriceUnit,
+                    Size = listing?.Size,
+                    Sizes = sizes.Select(item => new ListingSizeDetailDto
+                    {
+                        SizeSqft = item.SizeSqft,
+                        Label = item.SizeLabel
+                    }).ToList(),
+                    Furnishing = listing?.Furnishing,
+                    Facing = listing?.Facing,
+                    FloorNumber = listing?.FloorNumber,
+                    Status = listing?.Status,
+                    ProjectName = listing?.ProjectName,
+                    Locality = listing?.ProjectName,
+                    RoadInfo = listing?.RoadInfo,
+                    City = listing?.City,
+                    Description = ContactRedaction.Redact(listing?.RawMessageText, contactVisible),
+                    PhotoSharingPreference = listingDetails?.PhotoSharingPreference,
+                    Details = detailsJson,
+                    Media = media.Select(item => new ListingMediaDto
+                    {
+                        MediaId = item.Id,
+                        MediaType = item.MediaType,
+                        Url = $"/user-matches/matches/{match.Id}/media/{item.Id}",
+                        MimeType = item.MimeType,
+                        FileSizeBytes = item.FileSizeBytes,
+                        SortOrder = item.SortOrder
+                    }).ToList(),
+                    CreatedAt = listing?.CreatedAt,
+                    UpdatedAt = listing?.UpdatedAt
+                },
+                Requirement = new RequirementMatchDetailDto
+                {
+                    RequirementId = match.RequirementId,
+                    TransactionType = requirement?.RequirementType,
+                    PropertyType = requirement?.PropertyType,
+                    Configurations = requirement?.Configurations ?? [],
+                    Budget = requirement?.Budget,
+                    BudgetMin = requirement?.BudgetMin,
+                    BudgetType = requirement?.BudgetType,
+                    BudgetUnit = requirement?.BudgetUnit,
+                    Size = requirement?.Size,
+                    SizeMax = requirement?.SizeMax,
+                    RadiusKm = requirement?.RadiusKm,
+                    PreferredProjectNames = requirement?.PreferredProjectNames ?? [],
+                    FurnishingPreference = requirement?.FurnishingPref,
+                    FacingPreference = requirement?.FacingPref,
+                    Status = requirement?.Status,
+                    City = requirement?.City,
+                    Description = ContactRedaction.Redact(requirement?.RawMessageText, contactVisible),
+                    CreatedAt = requirement?.CreatedAt,
+                    UpdatedAt = requirement?.UpdatedAt
+                }
+            }
+        };
     }
 
     public Task<UserMatchesResponseDto> GetAllMatchesAsync(
@@ -234,6 +386,7 @@ public sealed class UserMatchesService : IUserMatchesService
         var listing = match.Listing;
         var requirement = match.Requirement;
         var transactionType = listing?.ListingType ?? requirement?.RequirementType ?? string.Empty;
+        var contactVisible = brokerId.HasValue && isRevealed;
         var title = string.Join(" ", new[] { listing?.Configuration, listing?.PropertyType }.Where(x => !string.IsNullOrWhiteSpace(x)));
         if (string.IsNullOrWhiteSpace(title)) title = listing?.ProjectName ?? "Available Property";
         var requirementTitle = string.Join(" / ", requirement?.Configurations ?? Array.Empty<string>());
@@ -263,7 +416,7 @@ public sealed class UserMatchesService : IUserMatchesService
             OwnerContact = contact,
             UnlockStatus = isRevealed ? "UNLOCKED" : state.ToUpperInvariant(),
             Title = title,
-            Description = listing?.RawMessageText ?? string.Empty,
+            Description = ContactRedaction.Redact(listing?.RawMessageText, contactVisible),
             TransactionType = transactionType,
             Category = listing?.PropertyType ?? requirement?.PropertyType ?? string.Empty,
             City = listing?.City ?? requirement?.City ?? string.Empty,
@@ -280,7 +433,7 @@ public sealed class UserMatchesService : IUserMatchesService
                 Locality = listing?.ProjectName ?? listing?.City ?? string.Empty,
                 PriceLabel = FormatMoney(listing?.Price, listing?.PriceUnit),
                 Title = title,
-                Description = listing?.RawMessageText ?? string.Empty
+                Description = ContactRedaction.Redact(listing?.RawMessageText, contactVisible)
             },
             Requirement = new RequirementMatchSideDto
             {
@@ -289,7 +442,7 @@ public sealed class UserMatchesService : IUserMatchesService
                 Locality = requirement?.City ?? string.Empty,
                 PriceLabel = FormatMoney(requirement?.Budget, requirement?.BudgetUnit),
                 Title = requirementTitle,
-                Description = requirement?.RawMessageText ?? string.Empty
+                Description = ContactRedaction.Redact(requirement?.RawMessageText, contactVisible)
             }
         };
     }
@@ -312,5 +465,47 @@ public sealed class UserMatchesService : IUserMatchesService
         if (age.TotalHours < 1) return $"{(int)age.TotalMinutes}m ago";
         if (age.TotalDays < 1) return $"{(int)age.TotalHours}h ago";
         return $"{(int)age.TotalDays}d ago";
+    }
+
+    private static JsonElement ParseDetails(string? value, bool contactRevealed)
+    {
+        try
+        {
+            var node = JsonNode.Parse(string.IsNullOrWhiteSpace(value) ? "{}" : value) ?? new JsonObject();
+            RedactNode(node, contactRevealed);
+            return JsonSerializer.SerializeToElement(node);
+        }
+        catch (JsonException)
+        {
+            using var document = JsonDocument.Parse("{}");
+            return document.RootElement.Clone();
+        }
+    }
+
+    private static void RedactNode(JsonNode node, bool contactRevealed)
+    {
+        if (contactRevealed) return;
+        if (node is JsonObject jsonObject)
+        {
+            foreach (var key in jsonObject.Select(item => item.Key).ToList())
+            {
+                var child = jsonObject[key];
+                if (child is JsonValue value && value.TryGetValue<string>(out var text))
+                    jsonObject[key] = ContactRedaction.Redact(text, contactRevealed: false);
+                else if (child is not null)
+                    RedactNode(child, contactRevealed: false);
+            }
+        }
+        else if (node is JsonArray jsonArray)
+        {
+            for (var index = 0; index < jsonArray.Count; index++)
+            {
+                var child = jsonArray[index];
+                if (child is JsonValue value && value.TryGetValue<string>(out var text))
+                    jsonArray[index] = ContactRedaction.Redact(text, contactRevealed: false);
+                else if (child is not null)
+                    RedactNode(child, contactRevealed: false);
+            }
+        }
     }
 }

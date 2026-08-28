@@ -4,7 +4,7 @@
 --   * same broker never matches itself;
 --   * transaction and property types must be compatible;
 --   * both sides need a resolved city, and cities must match;
---   * configured localities must be compatible by ID, name, or <= 3 km;
+--   * configured localities must be compatible by ID, name, or the requirement radius;
 --   * fixed-budget requirements need a comparable known listing price;
 --   * vector similarity is used only when both vectors declare the same
 --     Gemini embedding model;
@@ -16,6 +16,12 @@ ALTER TABLE public.listings_table
 
 ALTER TABLE public.requirements_table
     ADD COLUMN IF NOT EXISTS embedding_model text;
+
+ALTER TABLE public.requirements_table
+    ADD COLUMN IF NOT EXISTS budget_min numeric,
+    ADD COLUMN IF NOT EXISTS size_max numeric,
+    ADD COLUMN IF NOT EXISTS radius_km double precision,
+    ADD COLUMN IF NOT EXISTS preferred_project_names text[];
 
 CREATE OR REPLACE PROCEDURE public.sp_run_matching_engine(
     IN p_requirement_id integer DEFAULT NULL,
@@ -46,13 +52,56 @@ BEGIN
             r.requirementid,
             r.broker_id,
             UPPER(COALESCE(r.requirement_type, '')) AS requirement_type,
-            UPPER(COALESCE(r.property_type, 'ANY')) AS property_type,
+            CASE REGEXP_REPLACE(UPPER(COALESCE(r.property_type, 'ANY')), '[^A-Z0-9]', '', 'g')
+                WHEN 'FLAT' THEN 'APARTMENT'
+                WHEN 'FLATAPARTMENT' THEN 'APARTMENT'
+                WHEN 'PENTHOUSE' THEN 'APARTMENT'
+                WHEN 'INDEPENDENTHOUSE' THEN 'INDEPENDENT_HOUSE'
+                WHEN 'HOUSE' THEN 'INDEPENDENT_HOUSE'
+                WHEN 'VILLA' THEN 'BUNGALOW'
+                WHEN 'BUNGALOWVILLA' THEN 'BUNGALOW'
+                WHEN 'LAND' THEN 'PLOT'
+                WHEN 'PLOTLAND' THEN 'PLOT'
+                WHEN 'AGRICULTURALLAND' THEN 'AGRICULTURAL_LAND'
+                WHEN 'FARMLAND' THEN 'AGRICULTURAL_LAND'
+                WHEN 'OFFICESPACE' THEN 'OFFICE'
+                WHEN 'COMMERCIALOFFICE' THEN 'OFFICE'
+                WHEN 'COMMERCIALSPACE' THEN 'OFFICE'
+                WHEN 'RETAIL' THEN 'SHOP'
+                WHEN 'SHOPRETAIL' THEN 'SHOP'
+                WHEN 'SHOWROOM' THEN 'SHOP'
+                WHEN 'GODOWN' THEN 'WAREHOUSE'
+                WHEN 'HOSTEL' THEN 'PG'
+                WHEN 'PGHOSTEL' THEN 'PG'
+                ELSE UPPER(COALESCE(r.property_type, 'ANY'))
+            END AS property_type,
             r.configurations,
             r.budget,
+            r.budget_min,
             UPPER(COALESCE(r.budget_type, '')) AS budget_type,
             UPPER(BTRIM(COALESCE(r.budget_unit, ''))) AS raw_budget_unit,
             r.size,
-            UPPER(COALESCE(r.furnishing_pref, 'ANY')) AS furnishing_pref,
+            r.size_max,
+            COALESCE(NULLIF(r.radius_km, 0), 3.0) AS radius_km,
+            r.preferred_project_names,
+            CASE REGEXP_REPLACE(UPPER(COALESCE(r.furnishing_pref, 'ANY')), '[^A-Z0-9]', '', 'g')
+                WHEN 'BARE' THEN 'UNFURNISHED'
+                WHEN 'SEMI' THEN 'SEMI_FURNISHED'
+                WHEN 'SEMIFURNISHED' THEN 'SEMI_FURNISHED'
+                WHEN 'FULLYFURNISHED' THEN 'FURNISHED'
+                ELSE UPPER(COALESCE(r.furnishing_pref, 'ANY'))
+            END AS furnishing_pref,
+            CASE REGEXP_REPLACE(UPPER(COALESCE(r.facing_pref, 'ANY')), '[^A-Z0-9]', '', 'g')
+                WHEN 'NE' THEN 'NORTH_EAST'
+                WHEN 'NORTHEAST' THEN 'NORTH_EAST'
+                WHEN 'NW' THEN 'NORTH_WEST'
+                WHEN 'NORTHWEST' THEN 'NORTH_WEST'
+                WHEN 'SE' THEN 'SOUTH_EAST'
+                WHEN 'SOUTHEAST' THEN 'SOUTH_EAST'
+                WHEN 'SW' THEN 'SOUTH_WEST'
+                WHEN 'SOUTHWEST' THEN 'SOUTH_WEST'
+                ELSE UPPER(COALESCE(r.facing_pref, 'ANY'))
+            END AS facing_pref,
             r.preferred_locality_ids,
             r.embedding,
             r.embedding_model,
@@ -85,7 +134,13 @@ BEGIN
                 WHEN r.raw_budget_unit IN ('CR', 'CRORE', 'CRORES') THEN r.budget * 10000000
                 WHEN r.raw_budget_unit = 'K' THEN r.budget * 1000
                 ELSE r.budget
-            END AS normalized_budget
+            END AS normalized_budget,
+            CASE
+                WHEN r.raw_budget_unit IN ('LAKH', 'LAC', 'LACS', 'LAKHS') THEN r.budget_min * 100000
+                WHEN r.raw_budget_unit IN ('CR', 'CRORE', 'CRORES') THEN r.budget_min * 10000000
+                WHEN r.raw_budget_unit = 'K' THEN r.budget_min * 1000
+                ELSE r.budget_min
+            END AS normalized_budget_min
         FROM requirement_base r
         WHERE r.resolved_city IS NOT NULL
           AND (r.budget_is_flexible OR r.budget IS NOT NULL)
@@ -100,7 +155,15 @@ BEGIN
                 WHEN r.normalized_budget_unit = 'PER_BIGHA' AND r.size > 0 THEN r.normalized_budget * (r.size / 12000.0)
                 WHEN r.normalized_budget_unit = 'PER_ACRE' AND r.size > 0 THEN r.normalized_budget * (r.size / 43560.0)
                 ELSE NULL
-            END AS computed_budget
+            END AS computed_budget,
+            CASE
+                WHEN r.normalized_budget_min IS NULL THEN NULL
+                WHEN r.normalized_budget_unit IN ('TOTAL', 'PER_MONTH') THEN r.normalized_budget_min
+                WHEN r.normalized_budget_unit = 'PER_SQFT' AND r.size > 0 THEN r.normalized_budget_min * r.size
+                WHEN r.normalized_budget_unit = 'PER_BIGHA' AND r.size > 0 THEN r.normalized_budget_min * (r.size / 12000.0)
+                WHEN r.normalized_budget_unit = 'PER_ACRE' AND r.size > 0 THEN r.normalized_budget_min * (r.size / 43560.0)
+                ELSE NULL
+            END AS computed_budget_min
         FROM requirement_scope r
     ),
     listing_base AS (
@@ -109,12 +172,52 @@ BEGIN
             l.broker_id,
             l.master_id,
             UPPER(COALESCE(l.listing_type, '')) AS listing_type,
-            UPPER(COALESCE(l.property_type, '')) AS property_type,
+            CASE REGEXP_REPLACE(UPPER(COALESCE(l.property_type, '')), '[^A-Z0-9]', '', 'g')
+                WHEN 'FLAT' THEN 'APARTMENT'
+                WHEN 'FLATAPARTMENT' THEN 'APARTMENT'
+                WHEN 'PENTHOUSE' THEN 'APARTMENT'
+                WHEN 'INDEPENDENTHOUSE' THEN 'INDEPENDENT_HOUSE'
+                WHEN 'HOUSE' THEN 'INDEPENDENT_HOUSE'
+                WHEN 'VILLA' THEN 'BUNGALOW'
+                WHEN 'BUNGALOWVILLA' THEN 'BUNGALOW'
+                WHEN 'LAND' THEN 'PLOT'
+                WHEN 'PLOTLAND' THEN 'PLOT'
+                WHEN 'AGRICULTURALLAND' THEN 'AGRICULTURAL_LAND'
+                WHEN 'FARMLAND' THEN 'AGRICULTURAL_LAND'
+                WHEN 'OFFICESPACE' THEN 'OFFICE'
+                WHEN 'COMMERCIALOFFICE' THEN 'OFFICE'
+                WHEN 'COMMERCIALSPACE' THEN 'OFFICE'
+                WHEN 'RETAIL' THEN 'SHOP'
+                WHEN 'SHOPRETAIL' THEN 'SHOP'
+                WHEN 'SHOWROOM' THEN 'SHOP'
+                WHEN 'GODOWN' THEN 'WAREHOUSE'
+                WHEN 'HOSTEL' THEN 'PG'
+                WHEN 'PGHOSTEL' THEN 'PG'
+                ELSE UPPER(COALESCE(l.property_type, ''))
+            END AS property_type,
             l.configuration,
             l.price,
             UPPER(BTRIM(COALESCE(l.price_unit, ''))) AS raw_price_unit,
             l.size,
-            UPPER(COALESCE(l.furnishing, '')) AS furnishing,
+            CASE REGEXP_REPLACE(UPPER(COALESCE(l.furnishing, '')), '[^A-Z0-9]', '', 'g')
+                WHEN 'BARE' THEN 'UNFURNISHED'
+                WHEN 'SEMI' THEN 'SEMI_FURNISHED'
+                WHEN 'SEMIFURNISHED' THEN 'SEMI_FURNISHED'
+                WHEN 'FULLYFURNISHED' THEN 'FURNISHED'
+                ELSE UPPER(COALESCE(l.furnishing, ''))
+            END AS furnishing,
+            CASE REGEXP_REPLACE(UPPER(COALESCE(l.facing, '')), '[^A-Z0-9]', '', 'g')
+                WHEN 'NE' THEN 'NORTH_EAST'
+                WHEN 'NORTHEAST' THEN 'NORTH_EAST'
+                WHEN 'NW' THEN 'NORTH_WEST'
+                WHEN 'NORTHWEST' THEN 'NORTH_WEST'
+                WHEN 'SE' THEN 'SOUTH_EAST'
+                WHEN 'SOUTHEAST' THEN 'SOUTH_EAST'
+                WHEN 'SW' THEN 'SOUTH_WEST'
+                WHEN 'SOUTHWEST' THEN 'SOUTH_WEST'
+                ELSE UPPER(COALESCE(l.facing, ''))
+            END AS facing,
+            l.project_name,
             l.embedding,
             l.embedding_model,
             l.raw_message_text,
@@ -177,17 +280,25 @@ BEGIN
             r.embedding_model AS requirement_embedding_model,
             l.normalized_price,
             r.normalized_budget,
+            r.normalized_budget_min,
             l.normalized_price_unit,
             r.normalized_budget_unit,
             l.computed_price,
             r.computed_budget,
+            r.computed_budget_min,
             r.budget_is_flexible,
             l.size AS listing_size,
             r.size AS requirement_size,
+            r.size_max AS requirement_size_max,
             l.configuration AS listing_configuration,
             r.configurations AS requirement_configurations,
             l.furnishing AS listing_furnishing,
             r.furnishing_pref,
+            l.facing AS listing_facing,
+            r.facing_pref,
+            l.project_name AS listing_project_name,
+            r.preferred_project_names,
+            r.radius_km,
             l.master_id AS listing_master_id,
             l.listing_area,
             l.resolved_city AS listing_city,
@@ -223,7 +334,7 @@ BEGIN
               r.property_type = 'ANY'
               OR l.property_type = r.property_type
               OR (r.property_type IN ('FLAT', 'APARTMENT') AND l.property_type IN ('FLAT', 'APARTMENT', 'PENTHOUSE'))
-              OR (r.property_type IN ('HOUSE', 'VILLA', 'BUNGALOW') AND l.property_type IN ('HOUSE', 'VILLA', 'BUNGALOW', 'DUPLEX'))
+              OR (r.property_type IN ('INDEPENDENT_HOUSE', 'BUNGALOW') AND l.property_type IN ('INDEPENDENT_HOUSE', 'BUNGALOW', 'DUPLEX'))
               OR (r.property_type IN ('OFFICE', 'COMMERCIAL_SPACE') AND l.property_type IN ('OFFICE', 'COMMERCIAL_SPACE'))
               OR (r.property_type IN ('SHOP', 'RETAIL') AND l.property_type IN ('SHOP', 'RETAIL', 'SHOWROOM'))
               OR (r.property_type IN ('GODOWN', 'WAREHOUSE') AND l.property_type IN ('GODOWN', 'WAREHOUSE'))
@@ -236,8 +347,8 @@ BEGIN
                   AND EXISTS (
                       SELECT 1
                       FROM unnest(r.configurations) required_configuration
-                      WHERE UPPER(REGEXP_REPLACE(BTRIM(required_configuration), '\s+', '', 'g'))
-                            = UPPER(REGEXP_REPLACE(BTRIM(l.configuration), '\s+', '', 'g'))
+                      WHERE REGEXP_REPLACE(UPPER(BTRIM(required_configuration)), '[^A-Z0-9]', '', 'g')
+                            = REGEXP_REPLACE(UPPER(BTRIM(l.configuration)), '[^A-Z0-9]', '', 'g')
                   )
               )
           )
@@ -246,7 +357,7 @@ BEGIN
               OR array_length(r.preferred_locality_ids, 1) IS NULL
               OR preferred.is_exact
               OR preferred.locality_similarity >= 0.60
-              OR preferred.distance_km <= 3.0
+              OR preferred.distance_km <= r.radius_km
           )
           AND (
               r.budget_is_flexible
@@ -266,21 +377,34 @@ BEGIN
         SELECT
             c.*,
             CASE
-                WHEN c.is_exact THEN 30
-                WHEN c.locality_similarity >= 0.80 THEN 26
-                WHEN c.locality_similarity >= 0.60 THEN 22
-                WHEN c.distance_km <= 1.0 THEN 24
-                WHEN c.distance_km <= 2.0 THEN 19
-                WHEN c.distance_km <= 3.0 THEN 14
+                WHEN c.is_exact THEN 25
+                WHEN c.locality_similarity >= 0.80 THEN 23
+                WHEN c.locality_similarity >= 0.60 THEN 20
+                WHEN c.distance_km <= 1.0 THEN 22
+                WHEN c.distance_km <= 2.0 THEN 18
+                WHEN c.distance_km <= c.radius_km THEN 14
                 ELSE 10
             END::numeric AS location_score,
             15::numeric AS property_type_score,
             CASE
+                WHEN c.budget_is_flexible
+                     AND c.normalized_budget IS NOT NULL
+                     AND c.normalized_price_unit = c.normalized_budget_unit
+                     AND c.normalized_price <= c.normalized_budget THEN 17
+                WHEN c.budget_is_flexible
+                     AND c.normalized_budget IS NOT NULL
+                     AND c.normalized_price_unit = c.normalized_budget_unit
+                     AND c.normalized_price <= c.normalized_budget * 1.25 THEN 13
                 WHEN c.budget_is_flexible THEN 12
                 WHEN c.normalized_price_unit = c.normalized_budget_unit
+                     AND (c.normalized_budget_min IS NULL OR c.normalized_price >= c.normalized_budget_min)
                      AND c.normalized_price <= c.normalized_budget THEN 20
                 WHEN c.computed_price IS NOT NULL AND c.computed_budget IS NOT NULL
+                     AND (c.computed_budget_min IS NULL OR c.computed_price >= c.computed_budget_min)
                      AND c.computed_price <= c.computed_budget THEN 20
+                WHEN c.normalized_budget_min IS NOT NULL
+                     AND c.normalized_price_unit = c.normalized_budget_unit
+                     AND c.normalized_price < c.normalized_budget_min THEN 15
                 WHEN c.normalized_price_unit = c.normalized_budget_unit
                      AND c.normalized_price <= c.normalized_budget * 1.10 THEN 13
                 WHEN c.computed_price IS NOT NULL AND c.computed_budget IS NOT NULL
@@ -289,9 +413,12 @@ BEGIN
             END::numeric AS price_score,
             CASE
                 WHEN c.requirement_size IS NULL OR c.listing_size IS NULL THEN 5
-                WHEN ABS(c.listing_size - c.requirement_size) / NULLIF(c.requirement_size, 0) <= 0.10 THEN 10
-                WHEN ABS(c.listing_size - c.requirement_size) / NULLIF(c.requirement_size, 0) <= 0.25 THEN 7
-                WHEN ABS(c.listing_size - c.requirement_size) / NULLIF(c.requirement_size, 0) <= 0.40 THEN 3
+                WHEN c.listing_size >= c.requirement_size
+                     AND (c.requirement_size_max IS NULL OR c.listing_size <= c.requirement_size_max) THEN 10
+                WHEN c.listing_size >= c.requirement_size * 0.90
+                     AND (c.requirement_size_max IS NULL OR c.listing_size <= c.requirement_size_max * 1.10) THEN 7
+                WHEN c.listing_size >= c.requirement_size * 0.75
+                     AND (c.requirement_size_max IS NULL OR c.listing_size <= c.requirement_size_max * 1.25) THEN 3
                 ELSE 0
             END::numeric AS size_score,
             CASE
@@ -313,6 +440,27 @@ BEGIN
                 ELSE 0
             END::numeric AS furnishing_score,
             CASE
+                WHEN c.facing_pref IN ('', 'ANY') THEN 2
+                WHEN c.listing_facing = c.facing_pref THEN 2
+                ELSE 0
+            END::numeric AS facing_score,
+            CASE
+                WHEN c.preferred_project_names IS NULL
+                     OR array_length(c.preferred_project_names, 1) IS NULL THEN 3
+                WHEN NULLIF(BTRIM(c.listing_project_name), '') IS NULL THEN 0
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM unnest(c.preferred_project_names) project_name
+                    WHERE LOWER(BTRIM(project_name)) = LOWER(BTRIM(c.listing_project_name))
+                ) THEN 3
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM unnest(c.preferred_project_names) project_name
+                    WHERE similarity(LOWER(BTRIM(project_name)), LOWER(BTRIM(c.listing_project_name))) >= 0.65
+                ) THEN 2
+                ELSE 0
+            END::numeric AS project_score,
+            CASE
                 WHEN c.listing_embedding IS NULL OR c.requirement_embedding IS NULL THEN 0
                 WHEN c.listing_embedding_model IS DISTINCT FROM 'gemini-embedding-001' THEN 0
                 WHEN c.requirement_embedding_model IS DISTINCT FROM c.listing_embedding_model THEN 0
@@ -330,6 +478,8 @@ BEGIN
                 + s.size_score
                 + s.configuration_score
                 + s.furnishing_score
+                + s.facing_score
+                + s.project_score
                 + s.vector_score,
                 2)) AS match_score
         FROM scored s
@@ -360,6 +510,8 @@ BEGIN
             'size_score', size_score,
             'configuration_score', configuration_score,
             'furnishing_score', furnishing_score,
+            'facing_score', facing_score,
+            'project_score', project_score,
             'vector_score', vector_score,
             'distance_km', distance_km,
             'locality_similarity', locality_similarity,
@@ -369,8 +521,10 @@ BEGIN
             'requirement_city', requirement_city,
             'listing_price', normalized_price,
             'requirement_budget', normalized_budget,
+            'requirement_budget_min', normalized_budget_min,
             'listing_price_unit', normalized_price_unit,
             'requirement_budget_unit', normalized_budget_unit,
+            'requirement_radius_km', radius_km,
             'listing_embedding_model', listing_embedding_model,
             'requirement_embedding_model', requirement_embedding_model),
         'MATCHED',

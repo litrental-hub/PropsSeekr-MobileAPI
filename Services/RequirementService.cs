@@ -199,19 +199,34 @@ public class RequirementService : IRequirementService
                     MatchesFound = matchCounts.GetValueOrDefault(requirement.Id),
                     Budget = new BudgetResponseDto
                     {
-                        Min = 0,
+                        Min = Convert.ToInt64(requirement.BudgetMin ?? 0),
                         Max = Convert.ToInt64(requirement.Budget ?? 0),
-                        DisplayValue = requirement.Budget.HasValue ? $"₹{requirement.Budget.Value}" : string.Empty,
+                        DisplayValue = requirement.Budget.HasValue
+                            ? requirement.BudgetMin.HasValue
+                                ? $"₹{requirement.BudgetMin.Value} - ₹{requirement.Budget.Value}"
+                                : $"₹{requirement.Budget.Value}"
+                            : "Flexible",
                         Currency = "INR"
                     },
-                    PreferredLocation = new LocationDto { City = city, Locality = city },
+                    PreferredLocation = new LocationDto
+                    {
+                        City = city,
+                        Locality = city,
+                        RadiusKm = requirement.RadiusKm ?? 3
+                    },
                     RequiredArea = new RequiredAreaDto
                     {
                         Min = Convert.ToInt32(requirement.Size ?? 0),
-                        Max = Convert.ToInt32(requirement.Size ?? 0),
-                        DisplayValue = requirement.Size.HasValue ? $"{requirement.Size.Value} SQFT" : string.Empty,
+                        Max = Convert.ToInt32(requirement.SizeMax ?? requirement.Size ?? 0),
+                        DisplayValue = requirement.Size.HasValue
+                            ? requirement.SizeMax.HasValue
+                                ? $"{requirement.Size.Value} - {requirement.SizeMax.Value} SQFT"
+                                : $"{requirement.Size.Value}+ SQFT"
+                            : string.Empty,
                         Unit = "SQFT"
                     },
+                    PreferredProjects = requirement.PreferredProjectNames ?? [],
+                    BudgetType = requirement.BudgetType ?? "FIXED",
                     PostedAt = requirement.CreatedAt ?? DateTime.MinValue,
                     Status = NormalizeStatus(requirement.Status)
                 };
@@ -238,23 +253,64 @@ public class RequirementService : IRequirementService
 
     public async Task<CreateRequirementResponseDto> AddRequirementAsync(Guid userId, CreateRequirementRequestDto request)
     {
-        if (request.BudgetMax <= 0)
+        var budgetType = InventoryNormalization.BudgetType(request.BudgetType);
+        if (budgetType == "FIXED" && request.BudgetMax <= 0)
             throw new ArgumentException("Budget must be greater than zero.");
+
+        if (request.BudgetMin is < 0)
+            throw new ArgumentException("Minimum budget cannot be negative.");
+
+        if (request.BudgetMin.HasValue && request.BudgetMax > 0 && request.BudgetMin > request.BudgetMax)
+            throw new ArgumentException("Minimum budget cannot exceed maximum budget.");
 
         if (request.MinimumSize <= 0)
             throw new ArgumentException("Minimum size must be greater than zero.");
 
-        if (string.IsNullOrWhiteSpace(request.City) || string.IsNullOrWhiteSpace(request.Locality))
-            throw new ArgumentException("City and locality are required.");
+        if (request.MaximumSize.HasValue && request.MaximumSize < request.MinimumSize)
+            throw new ArgumentException("Maximum size cannot be smaller than minimum size.");
 
-        if (request.Lat == 0 || request.Lng == 0)
-            throw new ArgumentException("Valid GPS coordinates are required.");
+        var preferredLocations = request.PreferredLocations is { Count: > 0 }
+            ? request.PreferredLocations
+            :
+            [
+                new PropSeekr.DTOs.Requirements.PreferredLocationDto
+                {
+                    City = request.City,
+                    Locality = request.Locality,
+                    Lat = request.Lat,
+                    Lng = request.Lng
+                }
+            ];
 
-        if (request.RadiusKm <= 0)
-            throw new ArgumentException("Search radius must be greater than zero.");
+        if (preferredLocations.Any(location =>
+                string.IsNullOrWhiteSpace(location.City) ||
+                string.IsNullOrWhiteSpace(location.Locality)))
+            throw new ArgumentException("City and locality are required for every preferred location.");
+
+        if (preferredLocations.Count > 5)
+            throw new ArgumentException("A requirement can contain at most five preferred localities.");
+
+        if (preferredLocations.Select(location => location.City.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            throw new ArgumentException("All preferred localities must be in the same city.");
+
+        if (preferredLocations.Any(location =>
+                location.Lat is < -90 or > 90 || location.Lng is < -180 or > 180 ||
+                (location.Lat == 0 && location.Lng == 0)))
+            throw new ArgumentException("Valid GPS coordinates are required for every preferred location.");
+
+        if (request.RadiusKm is <= 0 or > 100)
+            throw new ArgumentException("Search radius must be between 0 and 100 km.");
 
         if (string.IsNullOrWhiteSpace(request.PropertyType))
             throw new ArgumentException("Property type is required.");
+
+        var preferredProjectNames = (request.PreferredProjectNames ?? [])
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (preferredProjectNames.Length > 5 || preferredProjectNames.Any(value => value.Length > 255))
+            throw new ArgumentException("Provide at most five project names, each up to 255 characters.");
 
         var normalizedTransactionType = string.IsNullOrWhiteSpace(request.TransactionType) ? string.Empty : request.TransactionType.Trim().ToUpperInvariant();
         if (normalizedTransactionType == "BUY_SELL" || normalizedTransactionType == "BUY" || normalizedTransactionType == "PURCHASE")
@@ -269,32 +325,53 @@ public class RequirementService : IRequirementService
         var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId)
             ?? throw new KeyNotFoundException("No broker profile is linked to this account.");
 
-        var requirement = new Requirement
+        Requirement requirement;
+        await using (var transaction = await _dbContext.Database.BeginTransactionAsync())
         {
-            BrokerId = brokerId,
-            Source = "manual",
-            // The embedding and locality fallback need the structured form values too,
-            // not only an optional free-text note.
-            RawMessageText = BuildRequirementMatchText(request),
-            RequirementType = normalizedTransactionType == "RENTAL" ? "RENT" : "BUY",
-            PropertyType = request.PropertyType.Trim().ToUpperInvariant(),
-            Configurations = request.Configurations.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray(),
-            Budget = request.BudgetMax,
-            BudgetUnit = "TOTAL",
-            Size = request.MinimumSize,
-            FurnishingPref = request.FurnishingPreference,
-            FacingPref = request.FacingPreference,
-            Status = "active",
-            ExpiresAt = DateTime.UtcNow.AddDays(30),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow,
-            FreshnessUpdatedAt = DateTime.UtcNow,
-            City = request.City,
-            PostedBy = "BROKER"
-        };
+            var masterIds = new List<int>();
+            foreach (var location in preferredLocations)
+            {
+                var masterId = await MasterLocationResolver.ResolveAsync(
+                    _dbContext,
+                    location.City,
+                    location.Locality,
+                    location.Lat,
+                    location.Lng);
+                if (!masterIds.Contains(masterId)) masterIds.Add(masterId);
+            }
 
-        _dbContext.Requirements.Add(requirement);
-        await _dbContext.SaveChangesAsync();
+            requirement = new Requirement
+            {
+                BrokerId = brokerId,
+                Source = "manual",
+                RawMessageText = BuildRequirementMatchText(request),
+                RequirementType = normalizedTransactionType == "RENTAL" ? "RENT" : "BUY",
+                PropertyType = InventoryNormalization.PropertyType(request.PropertyType),
+                Configurations = InventoryNormalization.Configurations(request.Configurations),
+                PreferredLocalityIds = masterIds.ToArray(),
+                Budget = request.BudgetMax > 0 ? request.BudgetMax : null,
+                BudgetMin = request.BudgetMin,
+                BudgetUnit = normalizedTransactionType == "RENTAL" ? "PER_MONTH" : "TOTAL",
+                BudgetType = budgetType,
+                Size = request.MinimumSize,
+                SizeMax = request.MaximumSize,
+                RadiusKm = request.RadiusKm,
+                PreferredProjectNames = preferredProjectNames,
+                FurnishingPref = InventoryNormalization.Furnishing(request.FurnishingPreference),
+                FacingPref = InventoryNormalization.Facing(request.FacingPreference),
+                Status = "active",
+                ExpiresAt = DateTime.UtcNow.AddDays(30),
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+                FreshnessUpdatedAt = DateTime.UtcNow,
+                City = preferredLocations[0].City.Trim(),
+                PostedBy = "BROKER"
+            };
+
+            _dbContext.Requirements.Add(requirement);
+            await _dbContext.SaveChangesAsync();
+            await transaction.CommitAsync();
+        }
 
         IReadOnlyList<int> matches = [];
         var embeddingCompleted = true;
@@ -355,8 +432,16 @@ public class RequirementService : IRequirementService
             request.PropertyType,
             request.Locality,
             request.City,
+            string.Join(" ", (request.PreferredLocations ?? []).Select(location => $"{location.Locality} {location.City}")),
             request.MinimumSize > 0 ? $"{request.MinimumSize} sqft" : null,
-            request.BudgetMax > 0 ? $"budget {request.BudgetMax} total" : null,
+            request.MaximumSize.HasValue ? $"maximum {request.MaximumSize.Value} sqft" : null,
+            request.BudgetMin.HasValue ? $"minimum budget {request.BudgetMin.Value}" : null,
+            request.BudgetMax > 0
+                ? $"maximum budget {request.BudgetMax} {(string.Equals(request.TransactionType, "RENTAL", StringComparison.OrdinalIgnoreCase) ? "per month" : "total")}"
+                : null,
+            request.BudgetType,
+            request.RadiusKm > 0 ? $"within {request.RadiusKm} km" : null,
+            string.Join(" ", (request.PreferredProjectNames ?? []).Where(value => !string.IsNullOrWhiteSpace(value))),
             request.FurnishingPreference,
             request.FacingPreference,
             request.AdditionalNotes

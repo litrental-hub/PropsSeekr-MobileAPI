@@ -60,6 +60,10 @@ Listing + Requirement
        -> MatchConnectionRequest
        -> MatchConfirmation (one per broker)
        -> Reveal (at most one per match)
+
+Listing
+  -> ListingDetail (structured form metadata)
+  -> ListingMedia (authorized photo/video metadata)
 ```
 
 Important sources of truth:
@@ -69,13 +73,14 @@ Important sources of truth:
 - `matches` is the canonical listing-to-requirement result table. `matchid` is the unlock identity.
 - `credit_wallets` and `credit_transactions` are canonical for current token flows.
 - `reveals` is the authority for whether contact information can be returned. Match state alone is not sufficient.
+- `listing_details` stores property-type-specific form fields as bounded JSONB plus the owner's photo-sharing preference. `listing_media` stores media metadata and a server-managed relative storage path; neither table participates in matching.
 - `match_connection_requests` records request direction and outcome.
 - `match_confirmations` records each broker's checklist and four-hour expiry.
 - `notifications` mapped as `BrokerNotification` is the canonical broker/matching notification stream used by the mobile UI.
 
 There are legacy parallel models that must not be mixed into new matching work:
 
-- `PropertyRequests` is an older combined supply/demand model. Non-admin search still queries it, but canonical inventory and matching use `Listing` and `Requirement`.
+- `PropertyRequests` is an older combined supply/demand model. Marketplace search no longer queries it; canonical inventory and matching use `Listing` and `Requirement`.
 - `Notification` is a GUID user-notification model with an older unlock path; `BrokerNotification` is the numeric broker notification model used by the current match handshake.
 - `User.Credits` and `UnlockedProperty` belong to the legacy credit/unlock flow; the current match reveal uses `CreditWallet`, `CreditTransaction`, and `Reveal`.
 
@@ -94,22 +99,28 @@ New work should extend the canonical broker/listing/requirement/match/wallet gra
 5. Synchronously waits for targeted embedding and matching.
 6. Returns `embedding_completed` and a match count. A pipeline failure does not roll back the already-created listing.
 
+Manual listing creation can also persist a JSON object in `details` (maximum 32 KB) and `photo_sharing_preference`. Authenticated listing owners upload up to 12 JPG/PNG/WEBP/MP4/MOV/WEBM files through `POST /api/v1/listings/{listingId}/media`. Images are limited to 10 MB and videos to 100 MB by default. Media bytes currently live below the API web root, while database rows store relative paths; production with ephemeral or horizontally scaled API instances must move bytes to durable shared/object storage without changing reveal rules.
+
+Migration `20260828000100_AddListingDetailsAndMedia` creates the two additive tables. Migration `20260828000200_AddRequirementMatchingPreferences` adds requirement range/radius/project columns and updates the active requirements view. Both must be applied explicitly in each target database because startup migrations remain disabled by default. Apply and verify `scripts/harden-matching-engine.sql` after the migrations; compiling the API does not install the procedure.
+
 `POST /api/v1/listings/whatsapp-intake` is anonymous for processor/Lambda compatibility and accepts a broker ID. It must be protected by an internal network or API gateway policy before public deployment.
 
 ### Requirement
 
 `POST /api/v1/requirements`:
 
-1. Validates budget, minimum size, city, locality, GPS coordinates, radius, and property type.
+1. Validates fixed/flexible budget semantics, minimum/maximum size, up to five same-city preferred localities, GPS coordinates, radius from 0-100 km, optional project names, and property type.
 2. Resolves the broker from the authenticated user.
 3. Normalizes `RENTAL` to `RENT` and buy variants to `BUY`.
-4. Creates the canonical requirement.
+4. Creates the canonical requirement with optional `budget_min`, `size_max`, `radius_km`, and `preferred_project_names`. Historical callers remain compatible: fixed budget is the default, one legacy locality is accepted, and a missing stored radius matches at 3 km.
 5. Synchronously invokes targeted embedding and matching.
 6. Returns `embeddingCompleted` and `matchCount`; a pipeline failure leaves the requirement saved.
 
-Current gap: the requirement service validates locality, latitude, longitude, and radius, but the canonical `Requirement` entity does not persist those submitted fields. It stores city and embeds locality in `RawMessageText`; `PreferredLocalityIds` remains unset unless another ingestion path supplies it. Do not assume radius matching is active for manually created requirements.
+Manual listing and requirement creation resolve the submitted/geocoded city, locality, latitude, and longitude into the canonical `master` catalogue in the same database transaction as inventory creation. Listings persist the resulting `MasterId`; requirements persist one to five resolved IDs in `PreferredLocalityIds`. Existing catalogue coordinates are retained, and missing catalogue rows are created under a transaction-level advisory lock.
 
-Current gap: the listing UI obtains GPS coordinates, but its listing payload does not send them and the current listing DTO/model has no direct latitude/longitude fields. Locality resolution relies on `MasterId`, city, project/locality text, or ingestion.
+New manual inventory passes through one normalization layer before persistence. Property-type aliases, BHK spacing, furnishing aliases such as `BARE`/`UNFURNISHED`, and facing abbreviations are stored using canonical values. The procedure applies equivalent normalization at read time so historical records do not require an immediate destructive backfill. Listing creation now persists the existing canonical `floor_number`, `road_info`, `price_status`, and `project_name` fields when supplied by the mobile form.
+
+The mobile listing and requirement forms geocode the property/preferred locality text. They must not attach the broker's current GPS position to an inventory record unless that position is explicitly the property/preferred location.
 
 ## Embedding pipeline
 
@@ -156,9 +167,9 @@ Hard candidate rules:
 - Both records must be active and available.
 - Resolved cities are required and must match case-insensitively.
 - Transaction directions must be compatible: buy demand with sale supply, rental with rental, lease with lease.
-- Property type must be exact or belong to an explicit compatibility family.
+- Property type is normalized across historical aliases, then must be exact or belong to an explicit compatibility family.
 - Configuration must match when the requirement supplies configurations.
-- Locality must be exact, text-similar at least 0.60, or within 3 km when locality IDs exist.
+- Locality must be exact, text-similar at least 0.60, or within the requirement's stored radius when locality IDs exist. Historical rows without a radius default to 3 km.
 - A fixed-budget requirement needs a comparable listing price and allows at most 10% headroom.
 - Price and budget units are normalized across total, monthly, per-square-foot, per-bigha, and per-acre cases.
 
@@ -166,13 +177,17 @@ Score composition totals 100:
 
 | Component | Maximum |
 | --- | ---: |
-| Location | 30 |
+| Location | 25 |
 | Property type | 15 |
 | Price/budget | 20 |
 | Size | 10 |
 | Configuration | 10 |
 | Furnishing | 5 |
+| Facing | 2 |
+| Preferred project | 3 |
 | Vector similarity | 10 |
+
+Minimum and maximum size now use range semantics rather than symmetric closeness: a listing at or above a minimum is not penalized unless it exceeds an optional maximum. Fixed budgets retain the 10% hard ceiling; an optional minimum budget affects score rather than excluding a less-expensive property. Flexible budgets do not hard-reject on price but use a supplied preferred maximum for scoring. Facing and project preferences are soft scores, never hard filters.
 
 Candidates below 35 are excluded. The procedure retains at most 50 automatic matches per targeted listing/requirement scope. For a full rebuild, ranking is capped per requirement rather than globally.
 
@@ -200,6 +215,8 @@ The required sequence is:
 7. One transaction atomically creates the reveal, deducts one token from each wallet, creates both ledger entries, accepts the connection request, updates match state, and creates the outcome notification.
 8. Contact data is returned only when a `reveals` row exists.
 
+Notification presentation is resolved from both the stored notification type and the current linked connection-request status. Broker A receives a distinct `confirm_accepted` outcome when Broker B accepts. Broker B's original `confirm_pending` card also presents as accepted/handled after the request is accepted, rather than continuing to ask for acceptance. Both accepted cards deep-link to the exact revealed match.
+
 Safety properties:
 
 - A row lock on the match plus the unique reveal constraint makes retries/concurrency idempotent.
@@ -219,10 +236,10 @@ All routes are under `/api/v1` unless stated otherwise.
 | Area | Current routes used or supported |
 | --- | --- |
 | Authentication | `POST /auth/register`, `/auth/login`, email/mobile OTP send and verify, resend, logout |
-| Listings | `GET /listings/mine`, `POST /listings`, `GET /listings/{id}`, `GET /listings`, `PATCH /listings/{id}`, anonymous `/listings/whatsapp-intake` |
+| Listings | `GET /listings/mine`, `POST /listings`, `POST /listings/{id}/media`, `GET /listings/{id}`, `GET /listings`, `PATCH /listings/{id}`, anonymous `/listings/whatsapp-intake` |
 | Requirements | `GET /requirements/mine`, `POST /requirements` |
 | Search | `POST /search/properties` |
-| Matches | `GET /user-matches`, confirm, reject, reveal compatibility action, unlock compatibility action, unlocked history |
+| Matches | `GET /user-matches`, `GET /user-matches/matches/{id}/details`, authenticated match media, confirm, reject, reveal compatibility action, unlock compatibility action, unlocked history |
 | Broker data | broker register/get/update, matches, wallet, ledger, notifications, notification preferences |
 | Wallet/payment | credit packs, Razorpay order/verify/webhook, alternate `/payments` flow, internal monthly grant/deduct |
 | File processor | process, embed, ingest, matches, listing, presigned upload, full pipeline callback |
@@ -232,10 +249,17 @@ Important contract gap: the mobile Axios interceptor calls `POST /auth/refresh`,
 
 ## Mobile-facing response rules
 
+- `/search/properties` is a canonical, authenticated marketplace query for every role. It requires `RENTAL` or `BUY_SELL`, `SUPPLY` or `DEMAND`, nested coordinates/radius, filters, and pagination.
+- Search joins listings through `master_id` and requirements through `preferred_locality_ids`, applies an inline Haversine radius calculation, and returns distance-then-freshness ordering. Rows without canonical coordinates are excluded from nearby results.
+- Rental supply maps to `RENT`/`RENTAL`, rental demand maps to the same values, buy/sell supply maps to sale values, and buy/sell demand maps to buy values.
+- Search counts use the same transaction, radius, category, property type, configuration, budget, and text filters as result rows. The selected tab alone is paginated and returned.
+- Search card fields are nullable and database-backed. The API must not invent area, availability, amenities, preferences, distance, dates, or unlock cost. Discovery responses deliberately exclude broker names, initials, brokerage details, phone numbers, other contact identity, and raw message text because ingestion messages may contain contact data. Home titles use structured property fields with neutral fallbacks. Home routes users to the source-filtered Matches screen; only the mutual confirmation/reveal flow may return contact details.
 - Inventory endpoints are paginated. `totalCount`/metadata is the aggregate; `data.length` is only the loaded page.
 - For admin users, `mine` intentionally means all brokers' records, still constrained by transaction/status filters and pagination.
 - Preserve listing-versus-requirement source IDs. A requirement ID must never be sent as `listingId`.
 - `UserMatchesService` only projects counterparty contact fields after a reveal.
+- `GET /user-matches/matches/{matchId}/details` is the canonical match-detail projection. A normal caller must be the listing or requirement broker; an admin may inspect any match but does not receive counterparty contact through the admin projection. It returns both sides, all persisted canonical listing/requirement facts, structured listing details, and media metadata. Notes are scrubbed for Indian phone-number and email variants until a reveal exists.
+- `GET /user-matches/matches/{matchId}/media/{mediaId}` streams one matched listing's media only to a match party or admin and supports range requests for video. Media URLs are authenticated API paths, not public static-file URLs.
 - The canonical match response includes state, current-broker confirmation, expiry, reveal state, connection request status/direction, broker role, both property/requirement summaries, and aggregate quality counts.
 
 ## External integrations and operational boundaries
@@ -252,13 +276,12 @@ Important contract gap: the mobile Axios interceptor calls `POST /auth/refresh`,
 These are current facts, not instructions to silently repair unrelated work:
 
 1. Canonical and legacy inventory/search/notification/credit paths coexist.
-2. Non-admin search uses legacy `PropertyRequests`, while admin search reads canonical listings and requirements.
-3. Manual locality/GPS values are not fully persisted into the canonical matching locality model.
-4. Match quality thresholds differ between SQL tiers, API aggregates, and UI labels.
-5. The UI expects a refresh-token endpoint that does not exist.
-6. Multiple confirm/reveal and payment controllers expose overlapping compatibility surfaces.
-7. File-processor public endpoints and internal cron endpoints need infrastructure-level protection.
-8. App configuration and `.env.example` use both `DB_USERNAME` and the older `DB_USER` spelling; runtime code expects `DB_USERNAME`.
+2. Historical canonical inventory without `master_id`/`preferred_locality_ids`, or whose master rows have no coordinates, cannot participate in nearby search until it is backfilled.
+3. Match quality thresholds differ between SQL tiers, API aggregates, and UI labels.
+4. The UI expects a refresh-token endpoint that does not exist.
+5. Multiple confirm/reveal and payment controllers expose overlapping compatibility surfaces.
+6. File-processor public endpoints and internal cron endpoints need infrastructure-level protection.
+7. App configuration and `.env.example` use both `DB_USERNAME` and the older `DB_USER` spelling; runtime code expects `DB_USERNAME`.
 
 When fixing a seam, migrate callers and tests deliberately. Do not make a second parallel source of truth.
 
@@ -285,6 +308,8 @@ dotnet run --no-build --launch-profile http
 
 Relevant test coverage includes admin scoping, broker identity, listing/requirement inventory, source-specific match filters, dual confirmation, concurrent reveal idempotency, insufficient credit, payment wallet idempotency, and matching normalization helpers. PostgreSQL integration tests require their configured test database and may be skipped when unavailable.
 
+`PROPSEEKR_RUN_LIVE_SEARCH_SMOKE=1` enables a read-only test of both canonical 5 km search projections against the database configured in `appsettings.json`. It does not create, update, or delete database rows.
+
 ## Code map
 
 - `Program.cs`: runtime composition and configuration.
@@ -297,4 +322,3 @@ Relevant test coverage includes admin scoping, broker identity, listing/requirem
 - `scripts/matching-engine-schema.sql`: required vector/trigram/helper schema.
 - `Migrations/`: EF schema history; do not assume it alone installs the latest stored procedure.
 - `Tests/PropsSeekr-MobileAPI.Tests/`: unit and PostgreSQL integration protection.
-

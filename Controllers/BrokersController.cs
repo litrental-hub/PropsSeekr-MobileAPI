@@ -9,6 +9,7 @@ using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.DTOs.Notifications;
 using PropSeekr.Models;
+using PropSeekr.Services;
 
 namespace PropSeekr.Controllers;
 
@@ -474,18 +475,17 @@ public class BrokersController : ControllerBase
         var notifications = dbNotifications.Select(notification =>
         {
             var matchId = ReadMatchId(notification.PayloadJson);
-            var apiType = ApiNotificationType(notification.Type);
-            var content = NotificationContent(notification.Type);
             var requestId = notification.ConnectionRequestId;
             var actionStatus = requestId.HasValue && requestStatuses.TryGetValue(requestId.Value, out var status)
                 ? status
                 : null;
+            var presentation = BrokerNotificationPresentationResolver.Resolve(notification.Type, actionStatus);
             return new
             {
                 notificationId = notification.Id.ToString(),
-                type = apiType,
-                title = content.Title,
-                message = content.Message,
+                type = presentation.ApiType,
+                title = presentation.Title,
+                message = presentation.Message,
                 isRead = notification.ReadAt.HasValue,
                 createdAt = notification.CreatedAt,
                 channelStatus = notification.ChannelStatus,
@@ -684,24 +684,4 @@ public class BrokersController : ControllerBase
         }
     }
 
-    private static string ApiNotificationType(string type) => type switch
-    {
-        "match_found" => "MATCH",
-        "confirm_pending" => "BROKER_UNLOCK",
-        "confirm_accepted" => "BROKER_ACCEPTED",
-        "confirm_rejected" => "BROKER_REJECTED",
-        "confirm_expired_resend" => "BROKER_REQUEST",
-        _ => "SYSTEM"
-    };
-
-    private static (string Title, string Message) NotificationContent(string type) => type switch
-    {
-        "match_found" => ("New Property Match", "A new property match is available. Open Matches to review it."),
-        "confirm_pending" => ("Match Unlock Request", "Another broker wants to connect. Open the match to review and accept."),
-        "confirm_accepted" => ("Connection Request Accepted", "Your request has been accepted. You can now connect with the other broker."),
-        "confirm_rejected" => ("Connection Request Declined", "The other broker declined this connection request. No tokens were deducted."),
-        "confirm_expired_resend" => ("Confirmation Window Expired", "The previous confirmation expired. Open the match to confirm again."),
-        "confirm_expired_counterparty" => ("Unlock Request Expired", "The other broker did not confirm within the four-hour window."),
-        _ => ("PropSeekr Update", "Open PropSeekr to view this update.")
-    };
 }

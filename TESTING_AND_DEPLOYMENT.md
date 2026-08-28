@@ -1,5 +1,18 @@
 # Unlock Functionality Refactor - Testing & Deployment Guide
 
+## Requirement accuracy rollout (2026-08-28)
+
+The richer Add Property/Add Requirement contract requires an ordered database rollout. Do not restart the updated API against the old view schema.
+
+1. Back up the target database and confirm the intended connection from the deployment secret store.
+2. Apply EF migration `20260828000200_AddRequirementMatchingPreferences`. It adds `budget_min`, `size_max`, `radius_km`, and `preferred_project_names` to `requirements_table` and appends them to the active `requirements` view.
+3. Apply `scripts/harden-matching-engine.sql` explicitly. This installs historical alias normalization, per-requirement radius, range-aware size/budget scoring, facing, and preferred-project scoring.
+4. Verify the four columns on both `requirements_table` and the `requirements` view, then inspect `pg_get_functiondef('public.sp_run_matching_engine(integer,integer)'::regprocedure)` for `radius_km`, `facing_score`, and `project_score`.
+5. Restart the API only after steps 2-4 succeed. Create one controlled listing/requirement pair from different test brokers and inspect `matches.score_breakdown`.
+6. Sample targeted matching before any full rebuild. The procedure preserves progressed matches, but a full run can legitimately replace automatic `MATCHED` rows under the improved scoring rules.
+
+New writes are normalized in the API and historical aliases are normalized inside the procedure. No destructive historical property-type backfill is required for this release.
+
 ## Quick Summary
 
 The unlock functionality has been completely refactored from using `PropertyRequestId` to using `MatchId` with a dual handshake confirmation flow and credit wallet system.
@@ -25,10 +38,10 @@ The unlock functionality has been completely refactored from using `PropertyRequ
 cd "c:\Users\Aman Jain\source\repos\PropsSeekr-MobileAPI"
 
 # Method 1: Direct database update
-dotnet ef database update --connection "Server=propseekr-db.cveo6kcqsisw.ap-south-1.rds.amazonaws.com;Port=5432;Database=PropSeekr;User Id=postgres;Password=08848bbeba4892b40fd6f720dcee07de3936e6e3;"
+dotnet ef database update --connection "<connection string from your deployment secret store>"
 
 # Method 2: Using PowerShell (Windows)
-$conn = "Server=propseekr-db.cveo6kcqsisw.ap-south-1.rds.amazonaws.com;Port=5432;Database=PropSeekr;User Id=postgres;Password=08848bbeba4892b40fd6f720dcee07de3936e6e3;"
+$conn = "<connection string from your deployment secret store>"
 dotnet ef database update --connection $conn
 ```
 
@@ -41,14 +54,14 @@ psql -h propseekr-db.cveo6kcqsisw.ap-south-1.rds.amazonaws.com \
      -d PropSeekr \
      -f Migrations/20260822_Migration.sql
 
-# Password: 08848bbeba4892b40fd6f720dcee07de3936e6e3
+# Enter the password from your deployment secret store when prompted.
 ```
 
 ### Option C: Using DBeaver or pgAdmin
 1. Connect to: `propseekr-db.cveo6kcqsisw.ap-south-1.rds.amazonaws.com:5432`
 2. Database: `PropSeekr`
 3. User: `postgres`
-4. Password: `08848bbeba4892b40fd6f720dcee07de3936e6e3`
+4. Password: use the value from your deployment secret store
 5. Open `Migrations/20260822_Migration.sql`
 6. Execute all statements
 

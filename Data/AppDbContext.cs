@@ -26,6 +26,8 @@ public class AppDbContext : DbContext
     public DbSet<BrokerNotification> BrokerNotifications => Set<BrokerNotification>();
     public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
     public DbSet<Listing> Listings => Set<Listing>();
+    public DbSet<ListingDetail> ListingDetails => Set<ListingDetail>();
+    public DbSet<ListingMedia> ListingMedia => Set<ListingMedia>();
     public DbSet<Requirement> Requirements => Set<Requirement>();
     public DbSet<ListingSize> ListingSizes => Set<ListingSize>();
     public DbSet<ListingRequirement> ListingRequirements => Set<ListingRequirement>();
@@ -77,6 +79,17 @@ public class AppDbContext : DbContext
         b.Entity<CreditWallet>(e => { e.ToTable("credit_wallets"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.FreeCreditsBalance).HasColumnName("free_credits_balance"); e.Property(x => x.PaidCreditsBalance).HasColumnName("paid_credits_balance"); e.Property(x => x.FreeCreditsResetAt).HasColumnName("free_credits_reset_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); e.HasIndex(x => x.BrokerId).IsUnique(); });
         b.Entity<CreditTransaction>(e => { e.ToTable("credit_transactions"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.Type).HasColumnName("Type"); e.Property(x => x.Amount).HasColumnName("Amount"); e.Property(x => x.BalanceAfter).HasColumnName("balance_after"); e.Property(x => x.ReferenceType).HasColumnName("reference_type"); e.Property(x => x.ReferenceId).HasColumnName("reference_id"); e.Property(x => x.ReferenceKey).HasColumnName("reference_key").HasMaxLength(100); e.Property(x => x.Notes).HasColumnName("Notes"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); e.HasIndex(x => new { x.BrokerId, x.ReferenceType, x.ReferenceKey }).IsUnique().HasFilter("reference_key IS NOT NULL"); });
         b.Entity<CreditPack>(e => { e.ToTable("credit_packs"); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.Name).HasColumnName("Name"); e.Property(x => x.Credits).HasColumnName("Credits"); e.Property(x => x.Price).HasColumnName("Price"); e.Property(x => x.Active).HasColumnName("Active"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); });
+        b.Entity<ListingDetail>(e =>
+        {
+            e.HasKey(x => x.ListingId);
+            e.Property(x => x.ListingId).ValueGeneratedNever();
+            e.Property(x => x.DetailsJson).HasColumnType("jsonb");
+        });
+        b.Entity<ListingMedia>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.ListingId, x.SortOrder });
+        });
         b.Entity<Payment>(e => { e.ToTable("payments"); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.CreditPackId).HasColumnName("credit_pack_id"); e.Property(x => x.Amount).HasColumnName("amount"); e.Property(x => x.Currency).HasColumnName("currency"); e.Property(x => x.Gateway).HasColumnName("gateway"); e.Property(x => x.GatewayTxnId).HasColumnName("gateway_txn_id"); e.Property(x => x.Status).HasColumnName("status"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); });
     }
 }

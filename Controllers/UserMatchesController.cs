@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Services.Interfaces;
 
@@ -73,6 +75,70 @@ public class UserMatchesController : ControllerBase
             _logger.LogError(ex, "Error retrieving user matches for user {UserId}", userId);
             return BadRequest(new { success = false, message = ex.Message });
         }
+    }
+
+    [HttpGet("matches/{matchId}/details")]
+    [ProducesResponseType(typeof(MatchDetailResponseDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetMatchDetails([FromRoute] int matchId)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized(new { message = "Invalid authenticated user." });
+
+        try
+        {
+            return Ok(await _userMatchesService.GetMatchDetailsAsync(userId, matchId, User.IsInRole("Admin")));
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { success = false, message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = ex.Message });
+        }
+    }
+
+    [HttpGet("matches/{matchId}/media/{mediaId:long}")]
+    public async Task<IActionResult> GetMatchMedia(
+        [FromRoute] int matchId,
+        [FromRoute] long mediaId,
+        [FromServices] AppDbContext dbContext,
+        [FromServices] IWebHostEnvironment environment)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized(new { message = "Invalid authenticated user." });
+
+        var brokerId = User.IsInRole("Admin")
+            ? null
+            : await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!User.IsInRole("Admin") && !brokerId.HasValue)
+            return Unauthorized(new { message = "No broker profile is linked to this account." });
+
+        var match = await dbContext.Matches.AsNoTracking()
+            .Where(item => item.Id == matchId)
+            .Select(item => new { item.ListingId, item.ListingBrokerId, item.RequirementBrokerId })
+            .SingleOrDefaultAsync();
+        if (match is null) return NotFound(new { success = false, message = "Match not found." });
+        if (brokerId.HasValue && match.ListingBrokerId != brokerId && match.RequirementBrokerId != brokerId)
+            return Forbid();
+
+        var media = await dbContext.ListingMedia.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == mediaId && item.ListingId == match.ListingId);
+        if (media is null) return NotFound(new { success = false, message = "Media not found." });
+
+        var webRoot = environment.WebRootPath;
+        if (string.IsNullOrWhiteSpace(webRoot)) webRoot = Path.Combine(environment.ContentRootPath, "wwwroot");
+        var root = Path.GetFullPath(webRoot);
+        var filePath = Path.GetFullPath(Path.Combine(root, media.StoragePath));
+        if (!filePath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) || !System.IO.File.Exists(filePath))
+            return NotFound(new { success = false, message = "Media file is unavailable." });
+
+        Response.Headers.XContentTypeOptions = "nosniff";
+        return PhysicalFile(filePath, media.MimeType, enableRangeProcessing: media.MediaType == "video");
     }
 
     /// <summary>

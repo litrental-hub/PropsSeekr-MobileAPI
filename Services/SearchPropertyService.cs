@@ -1,14 +1,37 @@
-using System.Text.Json;
+using System.Data;
+using System.Data.Common;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
-using NetTopologySuite.Geometries;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Search;
 using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Services;
 
+/// <summary>
+/// Location-aware marketplace search over the canonical listing and requirement data.
+/// The service deliberately does not use the legacy PropertyRequests aggregate.
+/// </summary>
 public class SearchPropertyService : ISearchPropertyService
 {
+    private const string ListingCategorySql = """
+        CASE
+            WHEN UPPER(COALESCE(l.property_type, '')) IN
+                ('OFFICE', 'OFFICE SPACE', 'SHOP', 'SHOWROOM', 'WAREHOUSE', 'COMMERCIAL') THEN 'COMMERCIAL'
+            WHEN UPPER(COALESCE(l.property_type, '')) IN ('PLOT', 'LAND', 'PLOT/LAND') THEN 'PLOT'
+            ELSE 'RESIDENTIAL'
+        END
+        """;
+
+    private const string RequirementCategorySql = """
+        CASE
+            WHEN UPPER(COALESCE(r.property_type, '')) IN
+                ('OFFICE', 'OFFICE SPACE', 'SHOP', 'SHOWROOM', 'WAREHOUSE', 'COMMERCIAL') THEN 'COMMERCIAL'
+            WHEN UPPER(COALESCE(r.property_type, '')) IN ('PLOT', 'LAND', 'PLOT/LAND') THEN 'PLOT'
+            ELSE 'RESIDENTIAL'
+        END
+        """;
+
     private readonly AppDbContext _dbContext;
 
     public SearchPropertyService(AppDbContext dbContext)
@@ -16,618 +39,521 @@ public class SearchPropertyService : ISearchPropertyService
         _dbContext = dbContext;
     }
 
-    public async Task<SearchPropertyResponseDto> SearchPropertiesAsync(SearchPropertyRequestDto request, Guid userId)
+    public async Task<SearchPropertyResponseDto> SearchPropertiesAsync(
+        SearchPropertyRequestDto request,
+        Guid userId)
     {
+        request.Validate();
+        _ = userId; // Auth is enforced by the controller; marketplace search is not ownership-scoped.
+
+        var connection = _dbContext.Database.GetDbConnection();
+        var wasOpen = connection.State == ConnectionState.Open;
+        if (!wasOpen)
+            await connection.OpenAsync();
+
         try
         {
-            var user = await _dbContext.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId);
-            var isAdmin = user != null && string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase);
+            var availableCount = await CountListingsAsync(connection, request);
+            var lookingCount = await CountRequirementsAsync(connection, request);
+            var demandSelected = string.Equals(request.ListingType, "DEMAND", StringComparison.OrdinalIgnoreCase);
 
-            if (isAdmin)
-            {
-                var adminPage = request.Pagination.Page > 0 ? request.Pagination.Page : 1;
-                var adminLimit = request.Pagination.Limit > 0 ? request.Pagination.Limit : 20;
-                var adminSkip = (adminPage - 1) * adminLimit;
-
-                var supplyResults = new List<PropertySearchResultItemDto>();
-                var demandRequirements = new List<RequirementSearchResultItemDto>();
-
-                var conn = _dbContext.Database.GetDbConnection();
-                var wasOpen = conn.State == System.Data.ConnectionState.Open;
-                if (!wasOpen) await conn.OpenAsync();
-
-                // 1. Fetch Listings
-                int totalListings = 0;
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT COUNT(*) FROM public.listings;";
-                    totalListings = Convert.ToInt32(await cmd.ExecuteScalarAsync());
-                }
-
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = @"
-                        SELECT 
-                            l.listingid,
-                            l.raw_message_text,
-                            l.listing_type,
-                            l.property_type,
-                            l.configuration,
-                            l.price,
-                            l.furnishing,
-                            l.facing,
-                            l.floor_number,
-                            ml.area,
-                            b.name AS broker_name,
-                            b.phone_number AS broker_phone
-                        FROM public.listings l
-                        LEFT JOIN public.master ml ON ml.masterid = l.master_id
-                        LEFT JOIN public.brokers b ON b.brokerid = l.broker_id
-                        ORDER BY l.last_refreshed_at DESC
-                        LIMIT @limit OFFSET @offset;";
-
-                    var pLimit = cmd.CreateParameter();
-                    pLimit.ParameterName = "@limit";
-                    pLimit.Value = adminLimit;
-                    cmd.Parameters.Add(pLimit);
-
-                    var pOffset = cmd.CreateParameter();
-                    pOffset.ParameterName = "@offset";
-                    pOffset.Value = adminSkip;
-                    cmd.Parameters.Add(pOffset);
-
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var id = Convert.ToInt32(reader["listingid"]);
-                        var text = reader["raw_message_text"] as string ?? string.Empty;
-                        var type = reader["listing_type"] as string ?? "SELL";
-                        var propType = reader["property_type"] as string ?? "Flat";
-                        var config = reader["configuration"] as string ?? "2BHK";
-                        var priceVal = reader["price"];
-                        decimal? price = (priceVal != DBNull.Value && priceVal != null) ? Convert.ToDecimal(priceVal) : null;
-                        var furnishing = reader["furnishing"] as string ?? "Semi-Furnished";
-                        var facing = reader["facing"] as string ?? "West Facing";
-                        var floorVal = reader["floor_number"];
-                        int? floor = (floorVal != DBNull.Value && floorVal != null) ? Convert.ToInt32(floorVal) : null;
-                        var locality = reader["area"] as string ?? "Indore";
-                        var bName = reader["broker_name"] as string ?? "PropSeekr";
-                        var bPhone = reader["broker_phone"] as string ?? "N/A";
-
-                        supplyResults.Add(MapListingToPropertySearchResultItemDto(id, text, type, propType, config, price, furnishing, facing, floor, locality, bName, bPhone));
-                    }
-                }
-
-                // 2. Fetch Requirements
-                int totalRequirements = 0;
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT COUNT(*) FROM public.requirements;";
-                    totalRequirements = Convert.ToInt32(await cmd.ExecuteScalarAsync());
-                }
-
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = @"
-                        SELECT 
-                            r.requirementid,
-                            r.raw_message_text,
-                            r.requirement_type,
-                            r.property_type,
-                            r.configurations,
-                            r.budget,
-                            mr.area,
-                            b.name AS broker_name
-                        FROM public.requirements r
-                        LEFT JOIN public.master mr ON mr.masterid = r.preferred_locality_ids[1]
-                        LEFT JOIN public.brokers b ON b.brokerid = r.broker_id
-                        ORDER BY r.requirementid DESC
-                        LIMIT @limit OFFSET @offset;";
-
-                    var pLimit = cmd.CreateParameter();
-                    pLimit.ParameterName = "@limit";
-                    pLimit.Value = adminLimit;
-                    cmd.Parameters.Add(pLimit);
-
-                    var pOffset = cmd.CreateParameter();
-                    pOffset.ParameterName = "@offset";
-                    pOffset.Value = adminSkip;
-                    cmd.Parameters.Add(pOffset);
-
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var id = Convert.ToInt32(reader["requirementid"]);
-                        var text = reader["raw_message_text"] as string ?? string.Empty;
-                        var type = reader["requirement_type"] as string ?? "BUY";
-                        var propType = reader["property_type"] as string ?? "Flat";
-                        
-                        string[] configs = null;
-                        if (reader["configurations"] is string[] confArr)
-                        {
-                            configs = confArr;
-                        }
-                        
-                        var budgetVal = reader["budget"];
-                        decimal? budget = (budgetVal != DBNull.Value && budgetVal != null) ? Convert.ToDecimal(budgetVal) : null;
-                        var locality = reader["area"] as string ?? "Indore";
-                        var bName = reader["broker_name"] as string ?? "PropSeekr";
-
-                        demandRequirements.Add(MapRequirementToRequirementSearchResultItemDto(id, text, type, propType, configs, budget, locality, bName));
-                    }
-                }
-
-                if (!wasOpen) await conn.CloseAsync();
-
-                var adminIsDemandTab = string.Equals(request.ListingType, "DEMAND", StringComparison.OrdinalIgnoreCase);
-
-                return new SearchPropertyResponseDto
-                {
-                    Status = "success",
-                    AvailableCount = totalListings,
-                    LookingCount = totalRequirements,
-                    TotalCount = adminIsDemandTab ? totalRequirements : totalListings,
-                    Page = adminPage,
-                    Limit = adminLimit,
-                    Results = supplyResults,
-                    Requirements = demandRequirements
-                };
-            }
-
-            var baseQuery = _dbContext.PropertyRequests.AsQueryable();
-            var centre = BuildSearchCentre(request.Location);
-
-            // Filter by transaction type
-            if (!string.IsNullOrWhiteSpace(request.TransactionType))
-            {
-                var searchTxType = request.TransactionType.Trim().ToUpperInvariant();
-                if (searchTxType == "BUY")
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == "BUY");
-                }
-                else if (searchTxType == "SELL" || searchTxType == "SALE")
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == "SELL");
-                }
-                else if (searchTxType == "BUY_SELL")
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == "BUY" || p.TransactionType == "SELL");
-                }
-                else
-                {
-                    baseQuery = baseQuery.Where(p => p.TransactionType == request.TransactionType);
-                }
-            }
-
-            // Filter by location (city and locality)
-            if (!string.IsNullOrWhiteSpace(request.Location.City))
-            {
-                baseQuery = baseQuery.Where(p => p.City.ToLower() == request.Location.City.ToLower());
-            }
-
-            if (!string.IsNullOrWhiteSpace(request.Location.Locality))
-            {
-                baseQuery = baseQuery.Where(p => p.Locality.ToLower() == request.Location.Locality.ToLower());
-            }
-
-            if (centre != null && request.Location.RadiusKm > 0)
-            {
-                var radiusMetres = request.Location.RadiusKm * 1000.0;
-                baseQuery = baseQuery.Where(p =>
-                    p.Location != null &&
-                    p.Location.Distance(centre) <= radiusMetres);
-            }
-
-            // Filter by Category
-            if (!string.IsNullOrWhiteSpace(request.Category))
-            {
-                baseQuery = baseQuery.Where(p => p.Category.ToLower() == request.Category.ToLower());
-            }
-
-            // Filter by budget
-            if (request.Budget != null)
-            {
-                baseQuery = FilterByBudget(baseQuery, request.Budget);
-            }
-
-            // Filter by search query (title and user info)
-            if (!string.IsNullOrWhiteSpace(request.SearchQuery))
-            {
-                var searchQuery = request.SearchQuery.ToLower();
-                baseQuery = baseQuery.Where(p =>
-                    p.Title.ToLower().Contains(searchQuery) ||
-                    (p.User != null && p.User.Name.ToLower().Contains(searchQuery)));
-            }
-
-            // Apply custom filters if present
-            if (request.Filters != null)
-            {
-                baseQuery = ApplyCustomFilters(baseQuery, request.Filters);
-            }
-
-            // Separate supply (results) and demand (requirements) queries
-            var supplyQuery = baseQuery.Where(p =>
-                p.ListingType.ToLower() == "supply" ||
-                (string.IsNullOrWhiteSpace(p.ListingType) && p.Status.ToLower() == "active"));
-
-            var demandQuery = baseQuery.Where(p =>
-                p.ListingType.ToLower() == "demand" ||
-                (string.IsNullOrWhiteSpace(p.ListingType) && p.Status.ToLower() == "looking"));
-
-            var availableCount = await supplyQuery.CountAsync();
-            var lookingCount = await demandQuery.CountAsync();
-
-            // Calculate pagination parameters
-            var pageNumber = request.Pagination.Page > 0 ? request.Pagination.Page : 1;
-            var limit = request.Pagination.Limit > 0 ? request.Pagination.Limit : 20;
-            var skip = (pageNumber - 1) * limit;
-
-            List<Models.PropertyRequest> supplyRequests = new();
-            List<Models.PropertyRequest> demandRequests = new();
-
-            var isDemandTab = string.Equals(request.ListingType, "DEMAND", StringComparison.OrdinalIgnoreCase);
-
-            if (isDemandTab)
-            {
-                // Paginate demand requirements
-                demandRequests = await demandQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Skip(skip)
-                    .Take(limit)
-                    .ToListAsync();
-
-                // Get first page of supply results as default companion list
-                supplyRequests = await supplyQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Take(5)
-                    .ToListAsync();
-            }
-            else
-            {
-                // Paginate supply results
-                supplyRequests = await supplyQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Skip(skip)
-                    .Take(limit)
-                    .ToListAsync();
-
-                // Get first page of demand requirements as default companion list
-                demandRequests = await demandQuery
-                    .Include(p => p.User)
-                    .OrderByDescending(p => p.PostedAt)
-                    .Take(5)
-                    .ToListAsync();
-            }
-
-            var resultsMapped = supplyRequests.Select(pr => MapToPropertySearchResultItemDto(pr, centre)).ToList();
-            var requirementsMapped = demandRequests.Select(pr => MapToRequirementSearchResultItemDto(pr)).ToList();
+            var listings = demandSelected
+                ? []
+                : await ReadListingsAsync(connection, request);
+            var requirements = demandSelected
+                ? await ReadRequirementsAsync(connection, request)
+                : [];
 
             return new SearchPropertyResponseDto
             {
                 Status = "success",
                 AvailableCount = availableCount,
                 LookingCount = lookingCount,
-                TotalCount = isDemandTab ? lookingCount : availableCount,
-                Page = pageNumber,
-                Limit = limit,
-                Results = resultsMapped,
-                Requirements = requirementsMapped
+                TotalCount = demandSelected ? lookingCount : availableCount,
+                Page = request.Pagination.Page,
+                Limit = request.Pagination.Limit,
+                Results = listings,
+                Requirements = requirements
             };
         }
-        catch (Exception ex)
+        finally
         {
-            throw new Exception($"Error searching property requests: {ex.Message}", ex);
+            if (!wasOpen)
+                await connection.CloseAsync();
         }
     }
 
-    private static Point? BuildSearchCentre(LocationDto location)
+    private static async Task<int> CountListingsAsync(DbConnection connection, SearchPropertyRequestDto request)
     {
-        if (location == null)
-            return null;
-
-        if (location.Lat == 0 && location.Lng == 0 && location.RadiusKm <= 0)
-            return null;
-
-        return new Point(location.Lng, location.Lat) { SRID = 4326 };
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM ({BuildListingQuery(request, countOnly: true)}) filtered;";
+        AddSearchParameters(command, request, isSupply: true, includePagination: false);
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
     }
 
-    private IQueryable<Models.PropertyRequest> FilterByBudget(
-        IQueryable<Models.PropertyRequest> query,
-        BudgetFilterDto budget)
+    private static async Task<int> CountRequirementsAsync(DbConnection connection, SearchPropertyRequestDto request)
     {
-        if (budget.Min.HasValue)
-        {
-            query = query.Where(p => p.BudgetMax >= budget.Min.Value);
-        }
-
-        if (budget.Max.HasValue)
-        {
-            query = query.Where(p => p.BudgetMin <= budget.Max.Value);
-        }
-
-        return query;
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM ({BuildRequirementQuery(request, countOnly: true)}) filtered;";
+        AddSearchParameters(command, request, isSupply: false, includePagination: false);
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
     }
 
-    private IQueryable<Models.PropertyRequest> ApplyCustomFilters(
-        IQueryable<Models.PropertyRequest> query,
-        FiltersDto filters)
+    private static async Task<List<PropertySearchResultItemDto>> ReadListingsAsync(
+        DbConnection connection,
+        SearchPropertyRequestDto request)
     {
-        if (filters.PropertyTypes != null && filters.PropertyTypes.Any())
+        await using var command = connection.CreateCommand();
+        command.CommandText = BuildListingQuery(request, countOnly: false);
+        AddSearchParameters(command, request, isSupply: true, includePagination: true);
+
+        var items = new List<PropertySearchResultItemDto>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
         {
-            var propertyTypesLower = filters.PropertyTypes.Select(pt => pt.ToLower()).ToList();
-            query = query.Where(p => propertyTypesLower.Any(pt => p.PropertyTypesJson.ToLower().Contains(pt)));
-        }
+            var configuration = ReadString(reader, "configuration");
+            var propertyType = ReadString(reader, "property_type");
+            var projectName = ReadString(reader, "project_name");
+            var locality = ReadString(reader, "locality");
+            var city = ReadString(reader, "city");
+            var distanceKm = ReadNullable<double>(reader, "distance_km");
+            var floor = ReadNullable<int>(reader, "floor_number");
+            var furnishing = ReadString(reader, "furnishing");
+            var facing = ReadString(reader, "facing");
 
-        return query;
-    }
+            var features = new List<FeatureItemDto>();
+            AddFeature(features, "🪑", furnishing);
+            AddFeature(features, "🏢", floor.HasValue ? FormatFloor(floor.Value) : null);
+            AddFeature(features, "🧭", facing);
 
-    private PropertySearchResultItemDto MapToPropertySearchResultItemDto(
-        Models.PropertyRequest pr,
-        Point? centre = null)
-    {
-        var title = pr.Title ?? string.Empty;
-        
-        // 1. Parse BHK
-        var bhk = "2BHK";
-        if (title.Contains("1BHK", StringComparison.OrdinalIgnoreCase) || title.Contains("1 bhk", StringComparison.OrdinalIgnoreCase)) bhk = "1BHK";
-        else if (title.Contains("3BHK", StringComparison.OrdinalIgnoreCase) || title.Contains("3 bhk", StringComparison.OrdinalIgnoreCase)) bhk = "3BHK";
-        else if (title.Contains("4BHK", StringComparison.OrdinalIgnoreCase) || title.Contains("4 bhk", StringComparison.OrdinalIgnoreCase)) bhk = "4BHK";
-
-        // 2. Parse PropertyType
-        var propertyType = "Flat";
-        if (title.Contains("Penthouse", StringComparison.OrdinalIgnoreCase)) propertyType = "Penthouse";
-        else if (title.Contains("Villa", StringComparison.OrdinalIgnoreCase)) propertyType = "Villa";
-        else if (title.Contains("Office", StringComparison.OrdinalIgnoreCase)) propertyType = "Office Space";
-        else if (title.Contains("Shop", StringComparison.OrdinalIgnoreCase)) propertyType = "Shop";
-
-        // 3. Parse Furnishing
-        var furnishing = "Semi-Furnished";
-        if (title.Contains("fully furnished", StringComparison.OrdinalIgnoreCase) || title.Contains("fully-furnished", StringComparison.OrdinalIgnoreCase)) furnishing = "Fully Furnished";
-        else if (title.Contains("unfurnished", StringComparison.OrdinalIgnoreCase)) furnishing = "Unfurnished";
-
-        // 4. Parse Floor
-        var floor = "2nd Floor";
-        if (title.Contains("1st floor", StringComparison.OrdinalIgnoreCase) || title.Contains("first floor", StringComparison.OrdinalIgnoreCase)) floor = "1st Floor";
-        else if (title.Contains("3rd floor", StringComparison.OrdinalIgnoreCase) || title.Contains("third floor", StringComparison.OrdinalIgnoreCase)) floor = "3rd Floor";
-        else if (title.Contains("4th floor", StringComparison.OrdinalIgnoreCase) || title.Contains("fourth floor", StringComparison.OrdinalIgnoreCase)) floor = "4th Floor";
-        else if (title.Contains("ground floor", StringComparison.OrdinalIgnoreCase)) floor = "Ground Floor";
-
-        // 5. Parse Facing
-        var facing = "West Facing";
-        if (title.Contains("east facing", StringComparison.OrdinalIgnoreCase) || title.Contains("east-facing", StringComparison.OrdinalIgnoreCase)) facing = "East Facing";
-        else if (title.Contains("north facing", StringComparison.OrdinalIgnoreCase) || title.Contains("north-facing", StringComparison.OrdinalIgnoreCase)) facing = "North Facing";
-        else if (title.Contains("south facing", StringComparison.OrdinalIgnoreCase) || title.Contains("south-facing", StringComparison.OrdinalIgnoreCase)) facing = "South Facing";
-
-        // 6. Subtitle
-        var subtitle = $"{pr.Locality}, {pr.City} · {floor} · {facing}";
-
-        // 7. Area Size
-        long areaSize = 950;
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(pr.RequiredAreaJson))
+            items.Add(new PropertySearchResultItemDto
             {
-                using var areaDoc = JsonDocument.Parse(pr.RequiredAreaJson);
-                var areaRoot = areaDoc.RootElement;
-                if (areaRoot.TryGetProperty("min", out var minProp))
-                {
-                    areaSize = Convert.ToInt64(minProp.GetDouble());
-                }
-            }
-        }
-        catch {}
-
-        // 8. Distance
-        var distance = centre != null && pr.Location != null
-            ? GetDistanceKm(pr.Location, centre)
-            : 0.0;
-        var formattedDistance = distance > 0 ? $"{distance:0.0} km" : "1.2 km";
-        var isNearby = distance > 0 ? distance <= 2.0 : true;
-        var locationLabel = $"{formattedDistance} · {pr.Locality} main road";
-
-        // 9. Features
-        var features = new List<FeatureItemDto>
-        {
-            new() { Icon = furnishing == "Fully Furnished" ? "🛋️" : "🪑", Label = furnishing },
-            new() { Icon = "🚗", Label = "Reserved Parking" },
-            new() { Icon = "🏢", Label = floor },
-            new() { Icon = "🧭", Label = facing },
-            new() { Icon = "🛁", Label = bhk == "3BHK" ? "3 Bathrooms" : "2 Bathrooms" },
-            new() { Icon = "⚡", Label = "24/7 Power Backup" }
-        };
-
-        // 10. Preferences
-        var preferences = new List<PreferenceItemDto>();
-        if (string.Equals(pr.Category, "Residential", StringComparison.OrdinalIgnoreCase))
-        {
-            preferences.Add(new() { Label = "Family preferred", Allowed = true });
-            preferences.Add(new() { Label = "Working professionals", Allowed = true });
-            preferences.Add(new() { Label = "No pets allowed", Allowed = false });
-            preferences.Add(new() { Label = "No bachelors", Allowed = false });
-        }
-        else
-        {
-            preferences.Add(new() { Label = "Any tenant welcome", Allowed = true });
+                Id = Convert.ToString(reader["listingid"])!,
+                ListingType = "SUPPLY",
+                TransactionType = NormalizeResponseTransaction(ReadString(reader, "transaction_type")),
+                Title = BuildListingTitle(configuration, propertyType, projectName),
+                Subtitle = JoinNonBlank(" · ", locality, city),
+                Category = ReadString(reader, "category"),
+                PropertyType = propertyType,
+                Bhk = configuration,
+                Status = ReadString(reader, "status"),
+                Price = ReadNullable<decimal>(reader, "price"),
+                PriceUnit = ReadString(reader, "price_unit"),
+                BuiltUpSize = ReadNullable<decimal>(reader, "built_up_size"),
+                AvailableFrom = null,
+                CreatedAt = ReadNullable<DateTime>(reader, "created_at"),
+                LastRefreshedAt = ReadNullable<DateTime>(reader, "last_refreshed_at"),
+                FreshnessCategory = ReadString(reader, "freshness_category"),
+                UnlockCost = null,
+                IsNearby = distanceKm.HasValue && distanceKm.Value <= request.Location.RadiusKm,
+                DistanceKm = distanceKm,
+                LocationLabel = BuildLocationLabel(distanceKm, locality, city),
+                Locality = locality,
+                City = city,
+                Furnishing = furnishing,
+                Facing = facing,
+                FloorNumber = floor,
+                ProjectName = projectName,
+                RoadInfo = ReadString(reader, "road_info"),
+                Features = features,
+                Preferences = []
+            });
         }
 
-        // 11. Broker info
-        var brokerName = pr.User != null ? pr.User.Name : "Rahul Kumar";
-        var initials = pr.User != null ? GetInitials(pr.User.Name) : "RK";
-        var brokerSub = $"{pr.Locality} · {(pr.User != null && (pr.User.Email == "admin@gmail.com" || pr.User.Email == "propseekr@gmail.com") ? "PropSeekr" : "Network")}";
-
-        return new PropertySearchResultItemDto
-        {
-            Id = pr.Id.ToString(),
-            Title = pr.Title ?? string.Empty,
-            Subtitle = subtitle,
-            Category = pr.Category,
-            PropertyType = propertyType,
-            Bhk = bhk,
-            Status = pr.Status,
-            Price = pr.BudgetMin ?? 0,
-            BuiltUpSize = areaSize,
-            AvailableFrom = "Immediate",
-            CreatedAt = pr.PostedAt,
-            UnlockCost = pr.TransactionType == "SELL" ? 2 : 1,
-            IsNearby = isNearby,
-            LocationLabel = locationLabel,
-            BrokerName = brokerName,
-            BrokerInitials = initials,
-            BrokerSub = brokerSub,
-            Features = features,
-            Preferences = preferences
-        };
+        return items;
     }
 
-    private RequirementSearchResultItemDto MapToRequirementSearchResultItemDto(Models.PropertyRequest pr)
+    private static async Task<List<RequirementSearchResultItemDto>> ReadRequirementsAsync(
+        DbConnection connection,
+        SearchPropertyRequestDto request)
     {
-        var min = pr.BudgetMin ?? 0;
-        var max = pr.BudgetMax ?? 0;
-        string budgetStr;
-        if (max >= 10000000)
+        await using var command = connection.CreateCommand();
+        command.CommandText = BuildRequirementQuery(request, countOnly: false);
+        AddSearchParameters(command, request, isSupply: false, includePagination: true);
+
+        var items = new List<RequirementSearchResultItemDto>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
         {
-            budgetStr = $"Budget ₹{min/10000000.0:0.##}Cr–{max/10000000.0:0.##}Cr";
-        }
-        else if (max >= 100000)
-        {
-            budgetStr = $"Budget ₹{min/100000.0:0.##}L–{max/100000.0:0.##}L";
-        }
-        else if (max >= 1000)
-        {
-            budgetStr = $"Budget ₹{min/1000.0:0.##}K–{max/1000.0:0.##}K";
-        }
-        else
-        {
-            budgetStr = $"Budget ₹{min}–{max}";
-        }
+            var configurations = reader["configurations"] is string[] values ? values : [];
+            var propertyType = ReadString(reader, "property_type");
+            var locality = ReadString(reader, "locality");
+            var city = ReadString(reader, "city");
+            var distanceKm = ReadNullable<double>(reader, "distance_km");
+            var budget = ReadNullable<decimal>(reader, "budget");
 
-        var brokerName = pr.User != null ? pr.User.Name : "Rahul Kumar";
-        var initials = pr.User != null ? GetInitials(pr.User.Name) : "RK";
-
-        return new RequirementSearchResultItemDto
-        {
-            Id = pr.Id.ToString(),
-            Title = pr.Title ?? string.Empty,
-            Sub = $"{budgetStr} · {pr.Locality}",
-            Initials = initials,
-            Color = GetDeterministicColor(brokerName)
-        };
-    }
-
-    private static readonly string[] PremiumColors = new[] { "#0A6E5E", "#0A5E6E", "#6E0A5E", "#6E5E0A", "#0A3C6E", "#5E6E0A", "#E53E3E", "#3182CE", "#319795", "#805AD5" };
-    private static string GetDeterministicColor(string name)
-    {
-        int hash = 0;
-        foreach (char c in name) hash += c;
-        return PremiumColors[Math.Abs(hash) % PremiumColors.Length];
-    }
-
-    private static string GetInitials(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return "PS";
-
-        var parts = name.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 1)
-            return parts[0][..1].ToUpper();
-
-        return (parts[0][..1] + parts[^1][..1]).ToUpper();
-    }
-
-    private static double GetDistanceKm(Point location, Point centre)
-    {
-        var lat1 = ToRadians(location.Y);
-        var lat2 = ToRadians(centre.Y);
-        var dLat = ToRadians(centre.Y - location.Y);
-        var dLng = ToRadians(centre.X - location.X);
-
-        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
-                Math.Cos(lat1) * Math.Cos(lat2) *
-                Math.Sin(dLng / 2) * Math.Sin(dLng / 2);
-
-        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
-        return 6371.0 * c;
-    }
-
-    private static double ToRadians(double value) => value * Math.PI / 180.0;
-
-    private PropertySearchResultItemDto MapListingToPropertySearchResultItemDto(
-        int id, string text, string type, string propType, string config, decimal? price, string furnishing, string facing, int? floor, string locality, string brokerName, string brokerPhone)
-    {
-        var bhk = config ?? "2BHK";
-        var propertyType = propType ?? "Flat";
-        var furnishingStatus = furnishing ?? "Semi-Furnished";
-        var floorStatus = floor.HasValue ? $"{floor.Value}th Floor" : "Ground Floor";
-        var facingStatus = facing ?? "West Facing";
-
-        var subtitle = $"{locality ?? "Indore"} · {floorStatus} · {facingStatus}";
-
-        var features = new List<FeatureItemDto>
-        {
-            new() { Icon = furnishingStatus == "Fully Furnished" ? "🛋️" : "🪑", Label = furnishingStatus },
-            new() { Icon = "🚗", Label = "Reserved Parking" },
-            new() { Icon = "🏢", Label = floorStatus },
-            new() { Icon = "🧭", Label = facingStatus },
-            new() { Icon = "🛁", Label = "2 Bathrooms" },
-            new() { Icon = "⚡", Label = "24/7 Power Backup" }
-        };
-
-        var preferences = new List<PreferenceItemDto>
-        {
-            new() { Label = "Family preferred", Allowed = true },
-            new() { Label = "Working professionals", Allowed = true }
-        };
-
-        var initials = string.IsNullOrWhiteSpace(brokerName) ? "PS" : (brokerName.Split(' ').Length > 1 ? (brokerName.Split(' ')[0][..1] + brokerName.Split(' ')[^1][..1]).ToUpper() : brokerName[..1].ToUpper());
-
-        return new PropertySearchResultItemDto
-        {
-            Id = id.ToString(),
-            Title = string.IsNullOrWhiteSpace(text) ? $"{bhk} {propertyType} in {locality}" : text,
-            Subtitle = subtitle,
-            Category = (string.Equals(propertyType, "plot", StringComparison.OrdinalIgnoreCase) || string.Equals(propertyType, "land", StringComparison.OrdinalIgnoreCase)) ? "Plot/Land" : "Residential",
-            PropertyType = propertyType,
-            Bhk = bhk,
-            Status = "ACTIVE",
-            Price = price.HasValue ? (long)price.Value : 0,
-            BuiltUpSize = 1000,
-            AvailableFrom = "Immediate",
-            CreatedAt = DateTime.UtcNow,
-            UnlockCost = 1,
-            IsNearby = true,
-            LocationLabel = $"1.2 km · {locality} main road",
-            BrokerName = brokerName ?? "PropSeekr",
-            BrokerInitials = initials,
-            BrokerSub = $"{locality} · PropSeekr",
-            Features = features,
-            Preferences = preferences
-        };
-    }
-
-    private RequirementSearchResultItemDto MapRequirementToRequirementSearchResultItemDto(
-        int id, string text, string type, string propType, string[]? configs, decimal? budget, string locality, string brokerName)
-    {
-        var budgetStr = budget.HasValue ? $"Budget ₹{budget.Value:N0}" : "Budget Contact Owner";
-        if (budget.HasValue)
-        {
-            var bVal = budget.Value;
-            if (bVal >= 10000000M) budgetStr = $"Budget ₹{bVal/10000000M:0.##}Cr";
-            else if (bVal >= 100000M) budgetStr = $"Budget ₹{bVal/100000M:0.##}L";
-            else if (bVal >= 1000M) budgetStr = $"Budget ₹{bVal/1000M:0.##}K";
+            items.Add(new RequirementSearchResultItemDto
+            {
+                Id = Convert.ToString(reader["requirementid"])!,
+                ListingType = "DEMAND",
+                TransactionType = NormalizeResponseTransaction(ReadString(reader, "transaction_type")),
+                Title = BuildRequirementTitle(configurations, propertyType),
+                Sub = JoinNonBlank(" · ", FormatMoney(budget, ReadString(reader, "budget_unit")), locality, city),
+                PropertyType = propertyType,
+                Configurations = configurations,
+                Budget = budget,
+                BudgetUnit = ReadString(reader, "budget_unit"),
+                RequiredSize = ReadNullable<decimal>(reader, "required_size"),
+                FurnishingPreference = ReadString(reader, "furnishing_pref"),
+                FacingPreference = ReadString(reader, "facing_pref"),
+                Status = ReadString(reader, "status"),
+                Locality = locality,
+                City = city,
+                DistanceKm = distanceKm,
+                CreatedAt = ReadNullable<DateTime>(reader, "created_at"),
+                LastRefreshedAt = ReadNullable<DateTime>(reader, "last_refreshed_at"),
+                FreshnessCategory = ReadString(reader, "freshness_category")
+            });
         }
 
-        var initials = string.IsNullOrWhiteSpace(brokerName) ? "PS" : (brokerName.Split(' ').Length > 1 ? (brokerName.Split(' ')[0][..1] + brokerName.Split(' ')[^1][..1]).ToUpper() : brokerName[..1].ToUpper());
-
-        return new RequirementSearchResultItemDto
-        {
-            Id = id.ToString(),
-            Title = string.IsNullOrWhiteSpace(text) ? $"Requirement in {locality}" : text,
-            Sub = $"{budgetStr} · {locality}",
-            Initials = initials,
-            Color = "#0A6E5E"
-        };
+        return items;
     }
+
+    private static string BuildListingQuery(SearchPropertyRequestDto request, bool countOnly)
+    {
+        var distanceSql = DistanceSql("ml");
+        var select = countOnly
+            ? "SELECT l.listingid"
+            : $"""
+                SELECT
+                    l.listingid,
+                    l.listing_type AS transaction_type,
+                    l.property_type,
+                    l.configuration,
+                    l.price,
+                    l.price_unit,
+                    COALESCE(l.size, (
+                        SELECT MAX(ls.size_sqft) FROM public.listing_sizes ls WHERE ls.listing_id = l.listingid
+                    )) AS built_up_size,
+                    l.furnishing,
+                    l.facing,
+                    l.floor_number,
+                    l.status,
+                    l.project_name,
+                    l.road_info,
+                    l.created_at,
+                    l.last_refreshed_at,
+                    l.freshness_category,
+                    ml.area AS locality,
+                    COALESCE(ml.city, l.city) AS city,
+                    {distanceSql} AS distance_km,
+                    {ListingCategorySql} AS category
+                """;
+
+        var sql = new StringBuilder($"""
+            {select}
+            FROM public.listings l
+            INNER JOIN public.master ml ON ml.masterid = l.master_id
+            WHERE ml.lat IS NOT NULL
+              AND ml.lng IS NOT NULL
+              AND {distanceSql} <= @radius_km
+              AND UPPER(COALESCE(l.listing_type, '')) = ANY(@transaction_types)
+              AND UPPER(COALESCE(l.status, 'ACTIVE')) NOT IN
+                  ('DELETED', 'CLOSED', 'SOLD', 'RENTED', 'INACTIVE', 'EXPIRED')
+              AND (l.expires_at IS NULL OR l.expires_at > NOW())
+            """);
+
+        AddListingFilters(sql, request);
+
+        if (!countOnly)
+        {
+            sql.AppendLine("ORDER BY distance_km ASC, COALESCE(l.last_refreshed_at, l.updated_at, l.created_at) DESC NULLS LAST");
+            sql.AppendLine("LIMIT @limit OFFSET @offset");
+        }
+
+        return sql.ToString();
+    }
+
+    private static string BuildRequirementQuery(SearchPropertyRequestDto request, bool countOnly)
+    {
+        var distanceSql = DistanceSql("locality");
+        var select = countOnly
+            ? "SELECT r.requirementid"
+            : $"""
+                SELECT
+                    r.requirementid,
+                    r.requirement_type AS transaction_type,
+                    r.property_type,
+                    r.configurations,
+                    r.budget,
+                    r.budget_unit,
+                    r.size AS required_size,
+                    r.furnishing_pref,
+                    r.facing_pref,
+                    r.status,
+                    r.created_at,
+                    r.last_confirmed_at AS last_refreshed_at,
+                    r.freshness_category,
+                    nearest.area AS locality,
+                    COALESCE(nearest.city, r.city) AS city,
+                    nearest.distance_km,
+                    {RequirementCategorySql} AS category
+                """;
+
+        var sql = new StringBuilder($"""
+            {select}
+            FROM public.requirements r
+            INNER JOIN LATERAL (
+                SELECT
+                    locality.area,
+                    locality.city,
+                    {distanceSql} AS distance_km
+                FROM unnest(r.preferred_locality_ids) AS locality_id
+                INNER JOIN public.master locality ON locality.masterid = locality_id
+                WHERE locality.lat IS NOT NULL AND locality.lng IS NOT NULL
+                ORDER BY {distanceSql}
+                LIMIT 1
+            ) nearest ON TRUE
+            WHERE nearest.distance_km <= @radius_km
+              AND UPPER(COALESCE(r.requirement_type, '')) = ANY(@transaction_types)
+              AND UPPER(COALESCE(r.status, 'ACTIVE')) NOT IN
+                  ('DELETED', 'CLOSED', 'FULFILLED', 'INACTIVE', 'EXPIRED')
+              AND (r.expires_at IS NULL OR r.expires_at > NOW())
+            """);
+
+        AddRequirementFilters(sql, request);
+
+        if (!countOnly)
+        {
+            sql.AppendLine("ORDER BY nearest.distance_km ASC, COALESCE(r.last_confirmed_at, r.updated_at, r.created_at) DESC NULLS LAST");
+            sql.AppendLine("LIMIT @limit OFFSET @offset");
+        }
+
+        return sql.ToString();
+    }
+
+    private static void AddListingFilters(StringBuilder sql, SearchPropertyRequestDto request)
+    {
+        if (GetCategories(request).Length > 0)
+            sql.AppendLine($"AND {ListingCategorySql} = ANY(@categories)");
+        if (NormalizeValues(request.Filters?.PropertyTypes).Length > 0)
+            sql.AppendLine("AND UPPER(TRIM(COALESCE(l.property_type, ''))) = ANY(@property_types)");
+        if (NormalizeConfigurations(request.Filters?.Configurations).Length > 0)
+            sql.AppendLine("AND UPPER(REPLACE(TRIM(COALESCE(l.configuration, '')), ' ', '')) = ANY(@configurations)");
+
+        var budget = GetBudget(request);
+        if (budget.Min.HasValue)
+            sql.AppendLine("AND l.price IS NOT NULL AND l.price >= @budget_min");
+        if (budget.Max.HasValue)
+            sql.AppendLine("AND l.price IS NOT NULL AND l.price <= @budget_max");
+        if (!string.IsNullOrWhiteSpace(request.SearchQuery))
+        {
+            sql.AppendLine("""
+                AND CONCAT_WS(' ', l.raw_message_text, l.property_type, l.configuration, l.project_name,
+                    l.road_info, ml.area, ml.city, l.city) ILIKE @search_query
+                """);
+        }
+    }
+
+    private static void AddRequirementFilters(StringBuilder sql, SearchPropertyRequestDto request)
+    {
+        if (GetCategories(request).Length > 0)
+            sql.AppendLine($"AND {RequirementCategorySql} = ANY(@categories)");
+        if (NormalizeValues(request.Filters?.PropertyTypes).Length > 0)
+            sql.AppendLine("AND UPPER(TRIM(COALESCE(r.property_type, ''))) = ANY(@property_types)");
+        if (NormalizeConfigurations(request.Filters?.Configurations).Length > 0)
+            sql.AppendLine("""
+                AND EXISTS (
+                    SELECT 1 FROM unnest(r.configurations) configuration
+                    WHERE UPPER(REPLACE(TRIM(configuration), ' ', '')) = ANY(@configurations)
+                )
+                """);
+
+        var budget = GetBudget(request);
+        if (budget.Min.HasValue)
+            sql.AppendLine("AND r.budget IS NOT NULL AND r.budget >= @budget_min");
+        if (budget.Max.HasValue)
+            sql.AppendLine("AND r.budget IS NOT NULL AND r.budget <= @budget_max");
+        if (!string.IsNullOrWhiteSpace(request.SearchQuery))
+        {
+            sql.AppendLine("""
+                AND CONCAT_WS(' ', r.raw_message_text, r.property_type, array_to_string(r.configurations, ' '),
+                    nearest.area, nearest.city, r.city) ILIKE @search_query
+                """);
+        }
+    }
+
+    private static void AddSearchParameters(
+        DbCommand command,
+        SearchPropertyRequestDto request,
+        bool isSupply,
+        bool includePagination)
+    {
+        AddParameter(command, "@lat", request.Location.Lat);
+        AddParameter(command, "@lng", request.Location.Lng);
+        AddParameter(command, "@radius_km", request.Location.RadiusKm);
+        AddParameter(command, "@transaction_types", GetTransactionTypes(request.TransactionType, isSupply));
+
+        var categories = GetCategories(request);
+        if (categories.Length > 0)
+            AddParameter(command, "@categories", categories);
+
+        var propertyTypes = NormalizeValues(request.Filters?.PropertyTypes);
+        if (propertyTypes.Length > 0)
+            AddParameter(command, "@property_types", propertyTypes);
+
+        var configurations = NormalizeConfigurations(request.Filters?.Configurations);
+        if (configurations.Length > 0)
+            AddParameter(command, "@configurations", configurations);
+
+        var budget = GetBudget(request);
+        if (budget.Min.HasValue)
+            AddParameter(command, "@budget_min", budget.Min.Value);
+        if (budget.Max.HasValue)
+            AddParameter(command, "@budget_max", budget.Max.Value);
+
+        if (!string.IsNullOrWhiteSpace(request.SearchQuery))
+            AddParameter(command, "@search_query", $"%{request.SearchQuery.Trim()}%");
+
+        if (includePagination)
+        {
+            AddParameter(command, "@limit", request.Pagination.Limit);
+            AddParameter(command, "@offset", (request.Pagination.Page - 1) * request.Pagination.Limit);
+        }
+    }
+
+    internal static string[] GetTransactionTypes(string transactionType, bool isSupply)
+    {
+        var normalized = transactionType.Trim().ToUpperInvariant();
+        if (normalized is "RENT" or "RENTAL")
+            return ["RENT", "RENTAL"];
+
+        return isSupply
+            ? ["SELL", "SALE", "BUY_SELL"]
+            : ["BUY", "PURCHASE", "BUY_SELL"];
+    }
+
+    internal static string NormalizeResponseTransaction(string? transactionType)
+    {
+        var normalized = transactionType?.Trim().ToUpperInvariant();
+        return normalized is "RENT" or "RENTAL" ? "RENTAL" : "BUY_SELL";
+    }
+
+    internal static string BuildListingTitle(
+        string? configuration,
+        string? propertyType,
+        string? projectName)
+    {
+        var structured = JoinNonBlank(" ", configuration, propertyType);
+        if (!string.IsNullOrWhiteSpace(structured))
+            return structured!;
+        if (!string.IsNullOrWhiteSpace(projectName))
+            return projectName.Trim();
+        return "Property listing";
+    }
+
+    internal static string BuildRequirementTitle(
+        IEnumerable<string>? configurations,
+        string? propertyType)
+    {
+        var configuration = configurations?.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        var structured = JoinNonBlank(" ", configuration, propertyType);
+        if (!string.IsNullOrWhiteSpace(structured))
+            return structured!;
+        return "Property requirement";
+    }
+
+    private static (long? Min, long? Max) GetBudget(SearchPropertyRequestDto request)
+    {
+        var filterBudget = request.Filters?.Budget;
+        return (
+            request.Budget?.Min ?? filterBudget?.Min,
+            request.Budget?.Max ?? filterBudget?.Max);
+    }
+
+    private static string[] GetCategories(SearchPropertyRequestDto request)
+    {
+        var values = new List<string>();
+        if (!string.IsNullOrWhiteSpace(request.Category) &&
+            !string.Equals(request.Category, "ALL", StringComparison.OrdinalIgnoreCase))
+        {
+            values.Add(request.Category);
+        }
+
+        if (request.Filters?.Categories is not null)
+            values.AddRange(request.Filters.Categories);
+
+        return NormalizeValues(values);
+    }
+
+    private static string[] NormalizeValues(IEnumerable<string>? values) =>
+        values?
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim().ToUpperInvariant())
+            .Distinct()
+            .ToArray() ?? [];
+
+    private static string[] NormalizeConfigurations(IEnumerable<string>? values) =>
+        NormalizeValues(values)
+            .Select(value => value.Replace(" ", string.Empty))
+            .ToArray();
+
+    private static string DistanceSql(string alias) => $"""
+        6371.0088 * 2 * ASIN(SQRT(LEAST(1.0,
+            POWER(SIN(RADIANS(({alias}.lat::double precision) - @lat) / 2), 2)
+            + COS(RADIANS(@lat)) * COS(RADIANS({alias}.lat::double precision))
+            * POWER(SIN(RADIANS(({alias}.lng::double precision) - @lng) / 2), 2)
+        )))
+        """;
+
+    private static void AddParameter(DbCommand command, string name, object value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value;
+        command.Parameters.Add(parameter);
+    }
+
+    private static T? ReadNullable<T>(DbDataReader reader, string name) where T : struct
+    {
+        var value = reader[name];
+        if (value is null or DBNull)
+            return null;
+        return (T)Convert.ChangeType(value, typeof(T));
+    }
+
+    private static string? ReadString(DbDataReader reader, string name)
+    {
+        var value = reader[name];
+        return value is null or DBNull ? null : Convert.ToString(value)?.Trim();
+    }
+
+    private static void AddFeature(List<FeatureItemDto> features, string icon, string? label)
+    {
+        if (!string.IsNullOrWhiteSpace(label))
+            features.Add(new FeatureItemDto { Icon = icon, Label = label });
+    }
+
+    private static string FormatFloor(int floor) => floor switch
+    {
+        0 => "Ground floor",
+        1 => "1st floor",
+        2 => "2nd floor",
+        3 => "3rd floor",
+        _ => $"{floor}th floor"
+    };
+
+    private static string? BuildLocationLabel(double? distanceKm, string? locality, string? city)
+    {
+        var distance = distanceKm.HasValue ? $"{distanceKm.Value:0.0} km" : null;
+        return JoinNonBlank(" · ", distance, locality, city);
+    }
+
+    private static string? FormatMoney(decimal? value, string? unit)
+    {
+        if (!value.HasValue)
+            return null;
+        return JoinNonBlank(" ", $"₹{value.Value:N0}", unit);
+    }
+
+    private static string? JoinNonBlank(string separator, params string?[] values)
+    {
+        var present = values.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!.Trim());
+        var result = string.Join(separator, present);
+        return string.IsNullOrWhiteSpace(result) ? null : result;
+    }
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+
 }
