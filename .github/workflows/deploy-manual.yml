@@ -20,6 +20,10 @@ concurrency:
   group: mobile-api-production
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   deploy:
     if: inputs.confirm == 'deploy'

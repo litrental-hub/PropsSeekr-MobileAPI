@@ -231,7 +231,7 @@ dotnet ef database update
 # Database credentials:
 # Host: propseekr-db.cveo6kcqsisw.ap-south-1.rds.amazonaws.com:5432
 # User: postgres
-# Password: 08848bbeba4892b40fd6f720dcee07de3936e6e3
+# Password: load from your deployment secret store
 ```
 
 ### Phase 3: End-to-End Testing

@@ -18,6 +18,8 @@ public class RequirementListItemDto
     public BudgetResponseDto Budget { get; set; } = new();
     public LocationDto PreferredLocation { get; set; } = new();
     public RequiredAreaDto RequiredArea { get; set; } = new();
+    public IReadOnlyList<string> PreferredProjects { get; set; } = [];
+    public string BudgetType { get; set; } = "FIXED";
     public DateTime PostedAt { get; set; }
     public string Status { get; set; } = string.Empty;
     public List<InventoryMatchDto> Matches { get; set; } = new();

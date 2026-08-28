@@ -9,53 +9,83 @@ public class PropertySearchResultItemDto
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;
 
+    [JsonPropertyName("listingType")]
+    public string ListingType { get; set; } = "SUPPLY";
+
+    [JsonPropertyName("transactionType")]
+    public string TransactionType { get; set; } = string.Empty;
+
     [JsonPropertyName("title")]
     public string Title { get; set; } = string.Empty;
 
     [JsonPropertyName("subtitle")]
-    public string Subtitle { get; set; } = string.Empty;
+    public string? Subtitle { get; set; }
 
     [JsonPropertyName("category")]
-    public string Category { get; set; } = string.Empty;
+    public string? Category { get; set; }
 
     [JsonPropertyName("propertyType")]
-    public string PropertyType { get; set; } = string.Empty;
+    public string? PropertyType { get; set; }
 
     [JsonPropertyName("bhk")]
-    public string Bhk { get; set; } = string.Empty;
+    public string? Bhk { get; set; }
 
     [JsonPropertyName("status")]
-    public string Status { get; set; } = string.Empty;
+    public string? Status { get; set; }
 
     [JsonPropertyName("price")]
-    public long Price { get; set; }
+    public decimal? Price { get; set; }
+
+    [JsonPropertyName("priceUnit")]
+    public string? PriceUnit { get; set; }
 
     [JsonPropertyName("builtUpSize")]
-    public long BuiltUpSize { get; set; }
+    public decimal? BuiltUpSize { get; set; }
 
     [JsonPropertyName("availableFrom")]
-    public string AvailableFrom { get; set; } = string.Empty;
+    public string? AvailableFrom { get; set; }
 
     [JsonPropertyName("createdAt")]
-    public DateTime CreatedAt { get; set; }
+    public DateTime? CreatedAt { get; set; }
+
+    [JsonPropertyName("lastRefreshedAt")]
+    public DateTime? LastRefreshedAt { get; set; }
+
+    [JsonPropertyName("freshnessCategory")]
+    public string? FreshnessCategory { get; set; }
 
     [JsonPropertyName("unlockCost")]
-    public int UnlockCost { get; set; } = 1;
+    public int? UnlockCost { get; set; }
 
     [JsonPropertyName("isNearby")]
     public bool IsNearby { get; set; }
 
+    [JsonPropertyName("distanceKm")]
+    public double? DistanceKm { get; set; }
+
     [JsonPropertyName("locationLabel")]
-    public string LocationLabel { get; set; } = string.Empty;
+    public string? LocationLabel { get; set; }
 
-    [JsonPropertyName("brokerName")]
-    public string BrokerName { get; set; } = string.Empty;
+    [JsonPropertyName("locality")]
+    public string? Locality { get; set; }
 
-    [JsonPropertyName("brokerInitials")]
-    public string BrokerInitials { get; set; } = string.Empty;
+    [JsonPropertyName("city")]
+    public string? City { get; set; }
 
-    [JsonPropertyName("brokerSub")]
-    public string BrokerSub { get; set; } = string.Empty;
+    [JsonPropertyName("furnishing")]
+    public string? Furnishing { get; set; }
+
+    [JsonPropertyName("facing")]
+    public string? Facing { get; set; }
+
+    [JsonPropertyName("floorNumber")]
+    public int? FloorNumber { get; set; }
+
+    [JsonPropertyName("projectName")]
+    public string? ProjectName { get; set; }
+
+    [JsonPropertyName("roadInfo")]
+    public string? RoadInfo { get; set; }
 
     [JsonPropertyName("features")]
     public List<FeatureItemDto> Features { get; set; } = new();

@@ -42,12 +42,24 @@ public class Requirement
     [Column("budget")]
     public decimal? Budget { get; set; }
 
+    [Column("budget_min")]
+    public decimal? BudgetMin { get; set; }
+
     [Column("budget_unit")]
     [MaxLength(50)]
     public string? BudgetUnit { get; set; }
 
     [Column("size")]
     public decimal? Size { get; set; }
+
+    [Column("size_max")]
+    public decimal? SizeMax { get; set; }
+
+    [Column("radius_km")]
+    public double? RadiusKm { get; set; }
+
+    [Column("preferred_project_names")]
+    public string[]? PreferredProjectNames { get; set; }
 
     [Column("furnishing_pref")]
     [MaxLength(50)]

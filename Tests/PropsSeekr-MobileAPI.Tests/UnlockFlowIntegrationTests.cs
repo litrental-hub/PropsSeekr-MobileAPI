@@ -77,6 +77,10 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
         await _db.Entry(pendingNotification).ReloadAsync();
         Assert.NotNull(pendingNotification.ReadAt);
         Assert.Equal("read", pendingNotification.ChannelStatus);
+        var acceptedNotification = Assert.Single(await _db.BrokerNotifications
+            .Where(notification => notification.BrokerId == 1 && notification.Type == "confirm_accepted")
+            .ToListAsync());
+        Assert.Equal(pendingNotification.ConnectionRequestId, acceptedNotification.ConnectionRequestId);
 
         var retry = await _service.UnlockMatchAsync(1, new UnlockPropertyRequestDto { MatchId = 100 });
         Assert.True(retry.Success);

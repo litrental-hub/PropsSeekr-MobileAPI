@@ -560,6 +560,90 @@ namespace PropSeekr.Migrations
                     b.ToTable("listings");
                 });
 
+            modelBuilder.Entity("PropSeekr.Models.ListingDetail", b =>
+                {
+                    b.Property<int>("ListingId")
+                        .HasColumnType("integer")
+                        .HasColumnName("listing_id");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("details_json");
+
+                    b.Property<string>("PhotoSharingPreference")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("photo_sharing_preference");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("ListingId");
+
+                    b.ToTable("listing_details");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.ListingMedia", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("media_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<long>("FileSizeBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("file_size_bytes");
+
+                    b.Property<int>("ListingId")
+                        .HasColumnType("integer")
+                        .HasColumnName("listing_id");
+
+                    b.Property<string>("MediaType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("media_type");
+
+                    b.Property<string>("MimeType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("mime_type");
+
+                    b.Property<string>("OriginalFileName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("original_file_name");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("sort_order");
+
+                    b.Property<string>("StoragePath")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("storage_path");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ListingId", "SortOrder");
+
+                    b.ToTable("listing_media");
+                });
+
             modelBuilder.Entity("PropSeekr.Models.ListingRequirement", b =>
                 {
                     b.Property<int>("Id")
@@ -1236,6 +1320,10 @@ namespace PropSeekr.Migrations
                         .HasColumnType("numeric")
                         .HasColumnName("budget");
 
+                    b.Property<decimal?>("BudgetMin")
+                        .HasColumnType("numeric")
+                        .HasColumnName("budget_min");
+
                     b.Property<string>("BudgetType")
                         .HasColumnType("text")
                         .HasColumnName("budget_type");
@@ -1312,6 +1400,10 @@ namespace PropSeekr.Migrations
                         .HasColumnType("integer[]")
                         .HasColumnName("preferred_locality_ids");
 
+                    b.PrimitiveCollection<string[]>("PreferredProjectNames")
+                        .HasColumnType("text[]")
+                        .HasColumnName("preferred_project_names");
+
                     b.Property<string>("PropertyType")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
@@ -1320,6 +1412,10 @@ namespace PropSeekr.Migrations
                     b.Property<string>("RawMessageText")
                         .HasColumnType("text")
                         .HasColumnName("raw_message_text");
+
+                    b.Property<double?>("RadiusKm")
+                        .HasColumnType("double precision")
+                        .HasColumnName("radius_km");
 
                     b.Property<string>("RequirementType")
                         .IsRequired()
@@ -1330,6 +1426,10 @@ namespace PropSeekr.Migrations
                     b.Property<decimal?>("Size")
                         .HasColumnType("numeric")
                         .HasColumnName("size");
+
+                    b.Property<decimal?>("SizeMax")
+                        .HasColumnType("numeric")
+                        .HasColumnName("size_max");
 
                     b.Property<string>("Source")
                         .HasMaxLength(50)

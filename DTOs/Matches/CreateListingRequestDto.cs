@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using System.Text.Json;
 
 namespace PropSeekr.DTOs.Matches;
 
@@ -57,6 +58,9 @@ public class CreateListingRequestDto
     [JsonPropertyName("facing")]
     public string? Facing { get; set; }
 
+    [JsonPropertyName("floor_number")]
+    public int? FloorNumber { get; set; }
+
     [JsonPropertyName("project_name")]
     public string? ProjectName { get; set; }
 
@@ -86,6 +90,12 @@ public class CreateListingRequestDto
 
     [JsonPropertyName("posted_by")]
     public string? PostedBy { get; set; }
+
+    [JsonPropertyName("photo_sharing_preference")]
+    public string? PhotoSharingPreference { get; set; }
+
+    [JsonPropertyName("details")]
+    public JsonElement? Details { get; set; }
 }
 
 public class ListingSizeDto

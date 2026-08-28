@@ -20,4 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="../../PropSeekr.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../scripts/harden-matching-engine.sql" Link="scripts/harden-matching-engine.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
