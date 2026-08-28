@@ -17,6 +17,41 @@ using PropSeekr.FileProcessing;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Load all secrets from AWS Secrets Manager config if configured
+var secretsManagerConfigName = builder.Configuration["AWS:SecretsManagerConfigName"];
+if (!string.IsNullOrWhiteSpace(secretsManagerConfigName))
+{
+    var secretString = GetSecretFromAgentOrSdk(secretsManagerConfigName, builder.Configuration);
+    if (secretString != null)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(secretString);
+            var root = doc.RootElement;
+            var secretsDict = new Dictionary<string, string?>();
+            foreach (var prop in root.EnumerateObject())
+            {
+                var val = prop.Value.ValueKind == JsonValueKind.String 
+                    ? prop.Value.GetString() 
+                    : prop.Value.GetRawText();
+                
+                secretsDict[prop.Name] = val;
+                
+                // Also set environment variables directly so that unchanged Lambda code finds them
+                if (!string.IsNullOrEmpty(val))
+                {
+                    Environment.SetEnvironmentVariable(prop.Name, val);
+                }
+            }
+            builder.Configuration.AddInMemoryCollection(secretsDict);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Secrets Manager Parse Error] Failed to parse secrets JSON: {ex.Message}");
+        }
+    }
+}
+
 // The migrated processor retains the Lambda's proven configuration names.
 // This lets FileProcessor:* app settings work locally while deployment
 // environment variables remain the preferred production configuration.
@@ -29,30 +64,24 @@ builder.Logging.AddDebug();
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
-var secretName = builder.Configuration["AWS:DatabaseSecretName"];
-if (!string.IsNullOrWhiteSpace(secretName))
+var dbHost = Environment.GetEnvironmentVariable("DB_HOST");
+var dbPort = Environment.GetEnvironmentVariable("DB_PORT");
+var dbName = Environment.GetEnvironmentVariable("DB_NAME");
+var dbUser = Environment.GetEnvironmentVariable("DB_USERNAME");
+var dbPass = Environment.GetEnvironmentVariable("DB_PASSWORD");
+
+if (!string.IsNullOrWhiteSpace(dbHost))
 {
-    try
+    connectionString = $"Host={dbHost};Port={dbPort ?? "5432"};Database={dbName ?? "postgres"};Username={dbUser ?? "postgres"};Password={dbPass}";
+}
+else
+{
+    var secretName = builder.Configuration["AWS:DatabaseSecretName"];
+    if (!string.IsNullOrWhiteSpace(secretName))
     {
-        var region = builder.Configuration["AWS:Region"] ?? "ap-south-1";
-        var accessKey = builder.Configuration["AWS:AccessKeyId"];
-        var secretKey = builder.Configuration["AWS:SecretAccessKey"];
-
-        IAmazonSecretsManager secretsClient;
-        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
+        var secretString = GetSecretFromAgentOrSdk(secretName, builder.Configuration);
+        if (secretString != null)
         {
-            secretsClient = new AmazonSecretsManagerClient(accessKey, secretKey, RegionEndpoint.GetBySystemName(region));
-        }
-        else
-        {
-            secretsClient = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
-        }
-
-        var request = new GetSecretValueRequest { SecretId = secretName };
-        var response = secretsClient.GetSecretValueAsync(request).GetAwaiter().GetResult();
-        if (response?.SecretString != null)
-        {
-            var secretString = response.SecretString;
             string? dbPassword = null;
             try
             {
@@ -81,10 +110,6 @@ if (!string.IsNullOrWhiteSpace(secretName))
                 connectionString = connBuilder.ToString();
             }
         }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[Secrets Manager Error] Failed to fetch database credentials: {ex.Message}");
     }
 }
 
@@ -237,3 +262,56 @@ app.MapControllers();
 app.MapGet("/hello", () => "Hello World");
 
 app.Run();
+
+static string? GetSecretFromAgentOrSdk(string secretName, IConfiguration configuration)
+{
+    // Try AWS Secrets Manager Agent (Local HTTP Service) first
+    const string tokenPath = "/var/run/awssmatoken";
+    if (File.Exists(tokenPath))
+    {
+        try
+        {
+            var token = File.ReadAllText(tokenPath).Trim();
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("X-Aws-Parameters-Secrets-Token", token);
+            
+            var url = $"http://localhost:2773/secretsmanager/get?secretId={Uri.EscapeDataString(secretName)}";
+            var httpResponse = client.GetAsync(url).GetAwaiter().GetResult();
+            if (httpResponse.IsSuccessStatusCode)
+            {
+                var content = httpResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                using var doc = JsonDocument.Parse(content);
+                if (doc.RootElement.TryGetProperty("SecretString", out var secretStrProp))
+                {
+                    return secretStrProp.GetString();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Secrets Manager Agent Warning] Failed to fetch via agent on localhost:2773. Error: {ex.Message}");
+        }
+    }
+
+    // Fallback to standard AWS SDK
+    try
+    {
+        var region = configuration["AWS:Region"] ?? "ap-south-1";
+        var accessKey = configuration["AWS:AccessKeyId"];
+        var secretKey = configuration["AWS:SecretAccessKey"];
+
+        IAmazonSecretsManager secretsClient = string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey)
+            ? new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region))
+            : new AmazonSecretsManagerClient(accessKey, secretKey, RegionEndpoint.GetBySystemName(region));
+
+        var request = new GetSecretValueRequest { SecretId = secretName };
+        var sdkResponse = secretsClient.GetSecretValueAsync(request).GetAwaiter().GetResult();
+        return sdkResponse?.SecretString;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Secrets Manager SDK Error] Failed to fetch via SDK: {ex.Message}");
+    }
+
+    return null;
+}
