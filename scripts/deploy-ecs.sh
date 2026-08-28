@@ -13,6 +13,8 @@ echo "========================================"
 
 readonly HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-/hello}"
 readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-10}"
+readonly ECS_TASK_ROLE_ARN="${ECS_TASK_ROLE_ARN:-arn:aws:iam::307869868474:role/MobileApiEcsTaskRole}"
+readonly AWS_SECRETS_MANAGER_CONFIG_NAME="${AWS_SECRETS_MANAGER_CONFIG_NAME:-dev_test}"
 
 service_updated=false
 previous_task_definition=""
@@ -187,14 +189,22 @@ fi
 
 jq \
     --arg container_name "${ECS_CONTAINER_NAME}" \
-    --arg image "${IMAGE_URI}" '
+    --arg image "${IMAGE_URI}" \
+    --arg task_role "${ECS_TASK_ROLE_ARN}" \
+    --arg secrets_config "${AWS_SECRETS_MANAGER_CONFIG_NAME}" '
     .containerDefinitions |= map(
         if .name == $container_name then
             .image = $image
+            | .environment |= (
+                map(select(.name != "AWS__SecretsManagerConfigName")) +
+                [{ "name": "AWS__SecretsManagerConfigName", "value": $secrets_config }]
+            )
         else
             .
         end
     )
+    |
+    .taskRoleArn = $task_role
     |
     del(
         .taskDefinitionArn,
@@ -401,7 +411,12 @@ echo ""
 echo "7/7 Verifying application health..."
 
 if [[ -n "${HEALTH_CHECK_URL:-}" ]]; then
-    health_url="${HEALTH_CHECK_URL%/}${HEALTH_CHECK_PATH}"
+    # Strip trailing slash from base URL
+    health_url="${HEALTH_CHECK_URL%/}"
+    # If the URL doesn't already end with the health path, append it
+    if [[ "${health_url}" != *"${HEALTH_CHECK_PATH}" ]]; then
+        health_url="${health_url}${HEALTH_CHECK_PATH}"
+    fi
     echo "Health check URL: ${health_url}"
 
     # Wait for the HTTP endpoint to return 200 OK

@@ -33,13 +33,44 @@ public class RequirementService : IRequirementService
         PaginationDto pagination,
         string? transactionType = null)
     {
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!brokerId.HasValue)
+        {
+            return new MyRequirementsResponseDto
+            {
+                Success = true,
+                Metadata = new MetadataDto
+                {
+                    Page = pagination.Page > 0 ? pagination.Page : 1,
+                    Limit = pagination.Limit > 0 ? pagination.Limit : 20
+                }
+            };
+        }
+
+        return await GetRequirementsAsync(brokerId.Value, pagination, transactionType);
+    }
+
+    public Task<MyRequirementsResponseDto> GetAllRequirementsAsync(
+        PaginationDto pagination,
+        string? transactionType = null) =>
+        GetRequirementsAsync(null, pagination, transactionType);
+
+    private async Task<MyRequirementsResponseDto> GetRequirementsAsync(
+        int? brokerId,
+        PaginationDto pagination,
+        string? transactionType)
+    {
         var pageNumber = pagination.Page > 0 ? pagination.Page : 1;
         var limit = pagination.Limit > 0 ? pagination.Limit : 20;
         var skip = (pageNumber - 1) * limit;
 
         var query = _dbContext.PropertyRequests
             .AsNoTracking()
-            .Where(p => p.UserId == userId && p.ListingType == "DEMAND");
+            .Where(p => p.ListingType == "DEMAND");
+
+        // Legacy PropertyRequests are retained for historical data only; they
+        // are not the matching source of truth and must not appear in /mine.
+        query = query.Where(_ => false);
 
         if (!string.IsNullOrWhiteSpace(transactionType))
         {
@@ -62,9 +93,11 @@ public class RequirementService : IRequirementService
             }
         }
 
-        var requirements = await query.OrderByDescending(p => p.PostedAt).ToListAsync();
+        // Do not materialize the legacy PropertyRequests projection. Canonical
+        // Requirements is the sole source for this endpoint and for matching.
+        var requirements = new List<PropertyRequest>();
 
-        var responseItems = requirements.Select(p => {
+        var legacyResponseItems = requirements.Select(p => {
             var requiredArea = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson) : null;
             return new RequirementListItemDto
             {
@@ -103,14 +136,12 @@ public class RequirementService : IRequirementService
             };
         }).ToList();
 
-        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        var canonicalQuery = _dbContext.Requirements.AsNoTracking();
         if (brokerId.HasValue)
-        {
-            var canonicalQuery = _dbContext.Requirements
-                .AsNoTracking()
-                .Where(requirement => requirement.BrokerId == brokerId.Value);
+            canonicalQuery = canonicalQuery.Where(requirement => requirement.BrokerId == brokerId.Value);
 
-            if (!string.IsNullOrWhiteSpace(transactionType))
+        if (!string.IsNullOrWhiteSpace(transactionType))
+        {
             {
                 var normalizedTransactionType = transactionType.Trim().ToUpperInvariant().Replace('-', '_').Replace('/', '_');
                 if (normalizedTransactionType is "RENT" or "RENTAL" or "LEASE")
@@ -120,7 +151,7 @@ public class RequirementService : IRequirementService
                         requirement.RequirementType == "RENTAL" ||
                         requirement.RequirementType == "LEASE");
                 }
-                else
+                else if (normalizedTransactionType is "BUY_SELL" or "BUY" or "SELL" or "SALE" or "PURCHASE")
                 {
                     canonicalQuery = canonicalQuery.Where(requirement =>
                         requirement.RequirementType == "BUY" ||
@@ -129,19 +160,25 @@ public class RequirementService : IRequirementService
                         requirement.RequirementType == "SALE" ||
                         requirement.RequirementType == "PURCHASE");
                 }
+                else
+                {
+                    throw new ArgumentException("transactionType must be RENTAL or BUY_SELL.", nameof(transactionType));
+                }
             }
 
-            var canonical = await canonicalQuery.OrderByDescending(requirement => requirement.CreatedAt).ToListAsync();
-            var canonicalIds = canonical.Select(requirement => requirement.Id).ToArray();
-            var matchCounts = canonicalIds.Length == 0
-                ? new Dictionary<int, int>()
-                : await _dbContext.Matches.AsNoTracking()
-                    .Where(match => canonicalIds.Contains(match.RequirementId))
-                    .GroupBy(match => match.RequirementId)
-                    .Select(group => new { RequirementId = group.Key, Count = group.Count() })
-                    .ToDictionaryAsync(row => row.RequirementId, row => row.Count);
+        }
 
-            responseItems.AddRange(canonical.Select(requirement =>
+        var canonical = await canonicalQuery.OrderByDescending(requirement => requirement.CreatedAt).ToListAsync();
+        var canonicalIds = canonical.Select(requirement => requirement.Id).ToArray();
+        var matchCounts = canonicalIds.Length == 0
+            ? new Dictionary<int, int>()
+            : await _dbContext.Matches.AsNoTracking()
+                .Where(match => canonicalIds.Contains(match.RequirementId))
+                .GroupBy(match => match.RequirementId)
+                .Select(group => new { RequirementId = group.Key, Count = group.Count() })
+                .ToDictionaryAsync(row => row.RequirementId, row => row.Count);
+
+        var responseItems = canonical.Select(requirement =>
             {
                 var id = requirement.Id.ToString();
                 var configuration = requirement.Configurations?.FirstOrDefault() ?? string.Empty;
@@ -178,8 +215,7 @@ public class RequirementService : IRequirementService
                     PostedAt = requirement.CreatedAt ?? DateTime.MinValue,
                     Status = NormalizeStatus(requirement.Status)
                 };
-            }));
-        }
+            }).ToList();
 
         responseItems = responseItems
             .OrderByDescending(item => item.PostedAt)
@@ -192,9 +228,7 @@ public class RequirementService : IRequirementService
             Success = true,
             Metadata = new MetadataDto
             {
-                TotalCount = requirements.Count + (brokerId.HasValue
-                    ? await CountCanonicalRequirementsAsync(brokerId.Value, transactionType)
-                    : 0),
+                TotalCount = await CountCanonicalRequirementsAsync(brokerId, transactionType),
                 Page = pageNumber,
                 Limit = limit
             },
@@ -263,13 +297,20 @@ public class RequirementService : IRequirementService
         await _dbContext.SaveChangesAsync();
 
         IReadOnlyList<int> matches = [];
+        var embeddingCompleted = true;
         try
         {
             await _matchingPipeline.TriggerForRequirementAsync(requirement.Id);
+            matches = await _dbContext.Matches
+                .AsNoTracking()
+                .Where(match => match.RequirementId == requirement.Id && match.Status == "MATCHED")
+                .Select(match => match.Id)
+                .ToListAsync();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Embedding and matching pipeline failed to start for requirement {RequirementId}", requirement.Id);
+            embeddingCompleted = false;
+            _logger.LogError(ex, "Embedding and matching pipeline failed for requirement {RequirementId}", requirement.Id);
         }
 
         return new CreateRequirementResponseDto
@@ -277,13 +318,18 @@ public class RequirementService : IRequirementService
             Success = true,
             RequirementId = requirement.Id.ToString(),
             MatchCount = matches.Count,
-            Message = "Requirement successfully posted. Embedding and matching have started."
+            EmbeddingCompleted = embeddingCompleted,
+            Message = embeddingCompleted
+                ? "Requirement posted successfully. Gemini embedding and matching completed."
+                : "Requirement posted, but Gemini embedding or matching failed. Check API logs and retry the embedding."
         };
     }
 
-    private async Task<int> CountCanonicalRequirementsAsync(int brokerId, string? transactionType)
+    private async Task<int> CountCanonicalRequirementsAsync(int? brokerId, string? transactionType)
     {
-        var query = _dbContext.Requirements.AsNoTracking().Where(requirement => requirement.BrokerId == brokerId);
+        var query = _dbContext.Requirements.AsNoTracking();
+        if (brokerId.HasValue)
+            query = query.Where(requirement => requirement.BrokerId == brokerId.Value);
         if (string.IsNullOrWhiteSpace(transactionType)) return await query.CountAsync();
         var rental = IsRentalRequirement(transactionType);
         return await query.CountAsync(requirement => rental

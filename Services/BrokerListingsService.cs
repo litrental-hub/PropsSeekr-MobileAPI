@@ -23,12 +23,31 @@ public sealed class BrokerListingsService : IBrokerListingsService
         CancellationToken cancellationToken = default)
     {
         if (brokerId <= 0) throw new ArgumentOutOfRangeException(nameof(brokerId));
+        return await GetListingsAsync(brokerId, page, limit, transactionType, status, cancellationToken);
+    }
+
+    public Task<GetBrokerListingsResponseDto> GetAllListingsAsync(
+        int page,
+        int limit,
+        string? transactionType = null,
+        string? status = null,
+        CancellationToken cancellationToken = default) =>
+        GetListingsAsync(null, page, limit, transactionType, status, cancellationToken);
+
+    private async Task<GetBrokerListingsResponseDto> GetListingsAsync(
+        int? brokerId,
+        int page,
+        int limit,
+        string? transactionType,
+        string? status,
+        CancellationToken cancellationToken)
+    {
         if (page < 1) throw new ArgumentOutOfRangeException(nameof(page));
         if (limit is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(limit));
 
-        var query = _db.Listings
-            .AsNoTracking()
-            .Where(listing => listing.BrokerId == brokerId);
+        var query = _db.Listings.AsNoTracking();
+        if (brokerId.HasValue)
+            query = query.Where(listing => listing.BrokerId == brokerId.Value);
 
         var normalizedTransactionType = NormalizeTransactionFilter(transactionType);
         if (normalizedTransactionType == "RENTAL")

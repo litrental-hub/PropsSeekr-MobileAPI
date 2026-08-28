@@ -21,8 +21,7 @@ public class SearchPropertyService : ISearchPropertyService
         try
         {
             var user = await _dbContext.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId);
-            var isAdmin = user != null && (string.Equals(user.Email, "admin@gmail.com", StringComparison.OrdinalIgnoreCase) ||
-                                           string.Equals(user.Email, "propseekr@gmail.com", StringComparison.OrdinalIgnoreCase));
+            var isAdmin = user != null && string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase);
 
             if (isAdmin)
             {

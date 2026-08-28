@@ -57,25 +57,31 @@ public class ListingsController : ControllerBase
             });
         }
 
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!Guid.TryParse(userIdClaim, out var userId))
-        {
-            return Unauthorized(new { success = false, message = "Invalid authenticated user." });
-        }
-
-        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId, cancellationToken);
-        if (!brokerId.HasValue)
-        {
-            return NotFound(new
-            {
-                success = false,
-                code = "broker_profile_not_linked",
-                message = "No broker profile is linked to this account."
-            });
-        }
-
         try
         {
+            if (User.IsInRole("Admin"))
+            {
+                return Ok(await _brokerListingsService.GetAllListingsAsync(
+                    page, limit, transactionType, status, cancellationToken));
+            }
+
+            var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (!Guid.TryParse(userIdClaim, out var userId))
+            {
+                return Unauthorized(new { success = false, message = "Invalid authenticated user." });
+            }
+
+            var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId, cancellationToken);
+            if (!brokerId.HasValue)
+            {
+                return NotFound(new
+                {
+                    success = false,
+                    code = "broker_profile_not_linked",
+                    message = "No broker profile is linked to this account."
+                });
+            }
+
             var response = await _brokerListingsService.GetMyListingsAsync(
                 brokerId.Value,
                 page,
@@ -384,13 +390,20 @@ public class ListingsController : ControllerBase
             await transaction.CommitAsync();
 
             IReadOnlyList<int> matches = [];
+            var embeddingCompleted = true;
             try
             {
                 await _matchingPipeline.TriggerForListingAsync(listing.Id);
+                matches = await _dbContext.Matches
+                    .AsNoTracking()
+                    .Where(match => match.ListingId == listing.Id && match.Status == "MATCHED")
+                    .Select(match => match.Id)
+                    .ToListAsync();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Embedding and matching pipeline failed to start for listing {ListingId}", listing.Id);
+                embeddingCompleted = false;
+                _logger.LogError(ex, "Embedding and matching pipeline failed for listing {ListingId}", listing.Id);
             }
 
             return Ok(new
@@ -398,7 +411,10 @@ public class ListingsController : ControllerBase
                 success = true,
                 listing_id = listing.Id,
                 match_count = matches.Count,
-                message = "Listing created successfully. Embedding and matching have started."
+                embedding_completed = embeddingCompleted,
+                message = embeddingCompleted
+                    ? "Listing created successfully. Gemini embedding and matching completed."
+                    : "Listing created, but Gemini embedding or matching failed. Check API logs and retry the embedding."
             });
         }
         catch (Exception ex)

@@ -39,6 +39,15 @@ public sealed class UserMatchesService : IUserMatchesService
         return await QueryMatchesAsync(brokerId, transactionType, listingId, requirementId, matchId, page, limit, onlyRevealed: false);
     }
 
+    public Task<UserMatchesResponseDto> GetAllMatchesAsync(
+        string? transactionType = null,
+        int? listingId = null,
+        int? requirementId = null,
+        int? matchId = null,
+        int page = 1,
+        int limit = 20) =>
+        QueryMatchesAsync(null, transactionType, listingId, requirementId, matchId, page, limit, onlyRevealed: false);
+
     public async Task<UnlockPropertyResponseDto> UnlockPropertyAsync(Guid userId, UnlockPropertyRequestDto request)
     {
         var brokerId = await RequireBrokerIdAsync(userId);
@@ -52,7 +61,7 @@ public sealed class UserMatchesService : IUserMatchesService
     }
 
     private async Task<UserMatchesResponseDto> QueryMatchesAsync(
-        int brokerId,
+        int? brokerId,
         string? transactionType,
         int? listingId,
         int? requirementId,
@@ -69,8 +78,10 @@ public sealed class UserMatchesService : IUserMatchesService
             .Include(m => m.Listing)
             .Include(m => m.Requirement)
             .Include(m => m.ListingBroker)
-            .Include(m => m.RequirementBroker)
-            .Where(m => m.ListingBrokerId == brokerId || m.RequirementBrokerId == brokerId);
+            .Include(m => m.RequirementBroker);
+
+        if (brokerId.HasValue)
+            query = query.Where(m => m.ListingBrokerId == brokerId.Value || m.RequirementBrokerId == brokerId.Value);
 
         if (onlyRevealed)
         {
@@ -145,13 +156,14 @@ public sealed class UserMatchesService : IUserMatchesService
             .OrderByDescending(request => request.Id)
             .ToListAsync();
 
-        var counterpartyIds = matches
-            .Select(m => m.ListingBrokerId == brokerId ? m.RequirementBrokerId : m.ListingBrokerId)
+        var brokerIds = brokerId.HasValue
+            ? matches.Select(m => m.ListingBrokerId == brokerId.Value ? m.RequirementBrokerId : m.ListingBrokerId)
+            : matches.SelectMany(m => new[] { m.ListingBrokerId, m.RequirementBrokerId })
             .Distinct()
             .ToArray();
         var counterpartyEmails = await _db.Users
             .AsNoTracking()
-            .Where(u => u.BrokerId.HasValue && counterpartyIds.Contains(u.BrokerId.Value))
+            .Where(u => u.BrokerId.HasValue && brokerIds.Contains(u.BrokerId.Value))
             .GroupBy(u => u.BrokerId!.Value)
             .Select(g => new { BrokerId = g.Key, Email = g.Select(u => u.Email).FirstOrDefault() })
             .ToDictionaryAsync(x => x.BrokerId, x => x.Email);
@@ -160,7 +172,9 @@ public sealed class UserMatchesService : IUserMatchesService
         var items = matches.Select(match =>
         {
             var matchConfirmations = confirmations.Where(c => c.MatchId == match.Id).ToList();
-            var callerConfirmation = matchConfirmations.FirstOrDefault(c => c.BrokerId == brokerId);
+            var callerConfirmation = brokerId.HasValue
+                ? matchConfirmations.FirstOrDefault(c => c.BrokerId == brokerId.Value)
+                : null;
             var activeExpiry = matchConfirmations
                 .Where(c => c.ConfirmedAt.HasValue && c.WindowExpiresAt.HasValue)
                 .Select(c => c.WindowExpiresAt)
@@ -173,14 +187,14 @@ public sealed class UserMatchesService : IUserMatchesService
             }
 
             var isRevealed = revealedSet.Contains(match.Id);
-            var counterpartyId = match.ListingBrokerId == brokerId
+            var counterpartyId = brokerId.HasValue && match.ListingBrokerId == brokerId.Value
                 ? match.RequirementBrokerId
                 : match.ListingBrokerId;
-            var counterparty = match.ListingBrokerId == brokerId
-                ? match.RequirementBroker
-                : match.ListingBroker;
+            var counterparty = brokerId.HasValue
+                ? (match.ListingBrokerId == brokerId.Value ? match.RequirementBroker : match.ListingBroker)
+                : null;
             ContactDetailsDto? contact = null;
-            if (isRevealed && counterparty is not null)
+            if (brokerId.HasValue && isRevealed && counterparty is not null)
             {
                 counterpartyEmails.TryGetValue(counterpartyId, out var email);
                 contact = new ContactDetailsDto
@@ -209,7 +223,7 @@ public sealed class UserMatchesService : IUserMatchesService
 
     private static UserMatchItemDto MapMatch(
         Match match,
-        int brokerId,
+        int? brokerId,
         string state,
         MatchConfirmation? callerConfirmation,
         DateTime? activeExpiry,
@@ -232,7 +246,7 @@ public sealed class UserMatchesService : IUserMatchesService
             RequirementId = match.RequirementId,
             Id = match.Id.ToString(),
             State = state,
-            CurrentBrokerConfirmed = callerConfirmation?.ConfirmedAt.HasValue == true &&
+            CurrentBrokerConfirmed = brokerId.HasValue && callerConfirmation?.ConfirmedAt.HasValue == true &&
                                      callerConfirmation.WindowExpiresAt > DateTime.UtcNow,
             WindowExpiresAt = activeExpiry,
             IsRevealed = isRevealed,
@@ -240,11 +254,11 @@ public sealed class UserMatchesService : IUserMatchesService
             ConnectionRequestId = connectionRequest?.Id,
             ConnectionRequestStatus = connectionRequest?.Status,
             DeliveryChannel = connectionRequest?.DeliveryChannel,
-            IncomingConnectionRequest = connectionRequest is
+            IncomingConnectionRequest = brokerId.HasValue && connectionRequest is
             {
                 Status: ConnectionRequestStatuses.Pending
             } && connectionRequest.ReceivingBrokerId == brokerId,
-            CurrentBrokerRole = match.ListingBrokerId == brokerId ? "listing" : "requirement",
+            CurrentBrokerRole = !brokerId.HasValue ? "admin" : match.ListingBrokerId == brokerId.Value ? "listing" : "requirement",
             IsUnlocked = isRevealed,
             OwnerContact = contact,
             UnlockStatus = isRevealed ? "UNLOCKED" : state.ToUpperInvariant(),
