@@ -390,13 +390,20 @@ public class ListingsController : ControllerBase
             await transaction.CommitAsync();
 
             IReadOnlyList<int> matches = [];
+            var embeddingCompleted = true;
             try
             {
                 await _matchingPipeline.TriggerForListingAsync(listing.Id);
+                matches = await _dbContext.Matches
+                    .AsNoTracking()
+                    .Where(match => match.ListingId == listing.Id && match.Status == "MATCHED")
+                    .Select(match => match.Id)
+                    .ToListAsync();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Embedding and matching pipeline failed to start for listing {ListingId}", listing.Id);
+                embeddingCompleted = false;
+                _logger.LogError(ex, "Embedding and matching pipeline failed for listing {ListingId}", listing.Id);
             }
 
             return Ok(new
@@ -404,7 +411,10 @@ public class ListingsController : ControllerBase
                 success = true,
                 listing_id = listing.Id,
                 match_count = matches.Count,
-                message = "Listing created successfully. Embedding and matching have started."
+                embedding_completed = embeddingCompleted,
+                message = embeddingCompleted
+                    ? "Listing created successfully. Gemini embedding and matching completed."
+                    : "Listing created, but Gemini embedding or matching failed. Check API logs and retry the embedding."
             });
         }
         catch (Exception ex)

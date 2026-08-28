@@ -22,17 +22,20 @@ public static class FileProcessorConfigurationBridge
         ("GoogleMapsApiKey", "GOOGLE_MAPS_API_KEY"),
         ("GoogleApiKey", "GOOGLE_API_KEY"),
         ("PrimaryLlm", "PRIMARY_LLM"),
-        ("GoogleServiceAccount:Type", "GEMINI_API_KEY"),
-        ("GoogleServiceAccount:ProjectId", "project_id"),
-        ("GoogleServiceAccount:PrivateKeyId", "private_key_id"),
-        ("GoogleServiceAccount:PrivateKey", "private_key"),
-        ("GoogleServiceAccount:ClientEmail", "client_email"),
-        ("GoogleServiceAccount:ClientId", "client_id"),
-        ("GoogleServiceAccount:AuthUri", "auth_uri"),
-        ("GoogleServiceAccount:TokenUri", "token_uri"),
-        ("GoogleServiceAccount:AuthProviderX509CertUrl", "auth_provider_x509_cert_url"),
-        ("GoogleServiceAccount:ClientX509CertUrl", "client_x509_cert_url"),
-        ("GoogleServiceAccount:UniverseDomain", "universe_domain")
+        ("VertexLocation", "GOOGLE_CLOUD_LOCATION"),
+        ("EmbeddingModel", "VERTEX_EMBEDDING_MODEL"),
+        ("EmbeddingDimensions", "EMBEDDING_DIMENSIONS"),
+        ("GoogleServiceAccount:Type", "GOOGLE_SERVICE_ACCOUNT_TYPE"),
+        ("GoogleServiceAccount:ProjectId", "GOOGLE_CLOUD_PROJECT"),
+        ("GoogleServiceAccount:PrivateKeyId", "GOOGLE_PRIVATE_KEY_ID"),
+        ("GoogleServiceAccount:PrivateKey", "GOOGLE_PRIVATE_KEY"),
+        ("GoogleServiceAccount:ClientEmail", "GOOGLE_CLIENT_EMAIL"),
+        ("GoogleServiceAccount:ClientId", "GOOGLE_CLIENT_ID"),
+        ("GoogleServiceAccount:AuthUri", "GOOGLE_AUTH_URI"),
+        ("GoogleServiceAccount:TokenUri", "GOOGLE_TOKEN_URI"),
+        ("GoogleServiceAccount:AuthProviderX509CertUrl", "GOOGLE_AUTH_PROVIDER_CERT_URL"),
+        ("GoogleServiceAccount:ClientX509CertUrl", "GOOGLE_CLIENT_CERT_URL"),
+        ("GoogleServiceAccount:UniverseDomain", "GOOGLE_UNIVERSE_DOMAIN")
     };
 
     public static void Apply(IConfiguration configuration)
@@ -45,6 +48,18 @@ public static class FileProcessorConfigurationBridge
             var value = configuration[$"FileProcessor:{setting}"];
             if (!string.IsNullOrWhiteSpace(value))
                 Environment.SetEnvironmentVariable(environmentVariable, value);
+        }
+
+        // The vendored processor constructs an AWS S3 client even for routes
+        // that do not use S3. Give the AWS SDK the API's configured region so
+        // embedding-only requests can initialize consistently outside AWS.
+        var awsRegion = configuration["AWS:Region"];
+        if (!string.IsNullOrWhiteSpace(awsRegion))
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_REGION")))
+                Environment.SetEnvironmentVariable("AWS_REGION", awsRegion);
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION")))
+                Environment.SetEnvironmentVariable("AWS_DEFAULT_REGION", awsRegion);
         }
     }
 }

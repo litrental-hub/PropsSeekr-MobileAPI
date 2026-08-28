@@ -4,7 +4,6 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using Npgsql;
 using OpenAI.Chat;
-using OpenAI.Embeddings;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -17,8 +16,8 @@ namespace propseekr_file_processor
 {
     public class Function
     {
-        private readonly ChatClient _chatClient;
-        private readonly EmbeddingClient _embeddingClient;
+        private readonly Lazy<ChatClient> _chatClient;
+        private readonly VertexAiEmbeddingClient _embeddingClient;
         private readonly AmazonS3Client _s3Client;
         private readonly string? _dbConnectionString;
         private readonly NpgsqlDataSource? _dataSource;
@@ -28,10 +27,8 @@ namespace propseekr_file_processor
         private readonly ListingFormService? _listingForm;
         public Function()
         {
-            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
-                ?? throw new InvalidOperationException("OPENAI_API_KEY env var not set.");
-            _chatClient = new ChatClient(model: "gpt-4o-mini", apiKey: apiKey);
-            _embeddingClient = new EmbeddingClient(model: "text-embedding-3-small", apiKey: apiKey);
+            _chatClient = new Lazy<ChatClient>(CreateOpenAiChatClient, LazyThreadSafetyMode.ExecutionAndPublication);
+            _embeddingClient = VertexAiEmbeddingClient.FromEnvironment();
             _s3Client = new AmazonS3Client();
 
             /* ERRONEOUS CODE:
@@ -86,6 +83,14 @@ namespace propseekr_file_processor
             _matchesApi = matchesApi;
             _listingForm = listingForm;
             _fileUpload = new FileUploadService(_s3Client);
+        }
+
+        private static ChatClient CreateOpenAiChatClient()
+        {
+            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+                ?? throw new InvalidOperationException(
+                    "OPENAI_API_KEY is required only for the legacy file-extraction chat fallback.");
+            return new ChatClient(model: "gpt-4o-mini", apiKey: apiKey);
         }
 
         private static string BuildDbConnectionString()
@@ -461,7 +466,7 @@ namespace propseekr_file_processor
         //  Body: { "target": "listings" | "requirements" | "all", "batch_size": 50 }
         //
         //  Reads rows where embedding IS NULL from listings / requirements tables,
-        //  generates OpenAI embeddings (text-embedding-3-small),
+        //  generates Vertex AI Gemini embeddings,
         //  and writes them back using Pgvector.Npgsql.
         // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         private async Task<APIGatewayProxyResponse> HandleEmbedAsync(
@@ -522,6 +527,18 @@ namespace propseekr_file_processor
                     $"Embed complete. Listings: {result.ListingsEmbedded} ok / {result.ListingsFailed} failed. " +
                     $"Requirements: {result.RequirementsEmbedded} ok / {result.RequirementsFailed} failed.");
 
+                if (result.ListingsFailed > 0 || result.RequirementsFailed > 0)
+                {
+                    return Respond(502, new
+                    {
+                        error = "One or more Gemini embeddings failed.",
+                        result.ListingsEmbedded,
+                        result.ListingsFailed,
+                        result.RequirementsEmbedded,
+                        result.RequirementsFailed
+                    });
+                }
+
 
                 // Auto-run matching after embeddings complete
                 try
@@ -545,6 +562,12 @@ namespace propseekr_file_processor
                 catch (Exception ex2)
                 {
                     context.Logger.LogError($"Matching engine error: {ex2.Message}");
+                    return Respond(502, new
+                    {
+                        error = "Matching engine failed after Gemini embeddings were stored.",
+                        result.ListingsEmbedded,
+                        result.RequirementsEmbedded
+                    });
                 }
 
 
@@ -558,7 +581,8 @@ namespace propseekr_file_processor
         }
 
         // â”€â”€ Embed all listings with NULL embedding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // New version: batches up to 50 texts per OpenAI API call
+        // Gemini embedding requests are made one input at a time while this
+        // method retains batch-level database update and fallback behavior.
 
         private async Task<(int ok, int fail)> EmbedAllListingsAsync(
             int batchSize, ILambdaLogger log, int? listingId = null)
@@ -625,12 +649,14 @@ namespace propseekr_file_processor
                         try
                         {
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE listings
+                        UPDATE listings_table
                         SET    embedding  = @vec,
+                               embedding_model = @embedding_model,
                                updated_at = NOW()
                         WHERE  listingid = @id
                     ", conn);
                             update.Parameters.AddWithValue("vec", new Pgvector.Vector(vectors[j]));
+                            update.Parameters.AddWithValue("embedding_model", _embeddingClient.Model);
                             update.Parameters.AddWithValue("id", batch[j].id);
                             await update.ExecuteNonQueryAsync();
                             ok++;
@@ -662,12 +688,14 @@ namespace propseekr_file_processor
                             float[] vector = await GenerateEmbeddingAsync(text);
 
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE listings
+                        UPDATE listings_table
                         SET    embedding  = @vec,
+                               embedding_model = @embedding_model,
                                updated_at = NOW()
                         WHERE  listingid = @id
                     ", conn);
                             update.Parameters.AddWithValue("vec", new Pgvector.Vector(vector));
+                            update.Parameters.AddWithValue("embedding_model", _embeddingClient.Model);
                             update.Parameters.AddWithValue("id", id);
                             await update.ExecuteNonQueryAsync();
 
@@ -750,12 +778,14 @@ namespace propseekr_file_processor
                         try
                         {
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE requirements
+                        UPDATE requirements_table
                         SET    embedding  = @vec,
+                               embedding_model = @embedding_model,
                                updated_at = NOW()
                         WHERE  requirementid = @id
                     ", conn);
                             update.Parameters.AddWithValue("vec", new Pgvector.Vector(vectors[j]));
+                            update.Parameters.AddWithValue("embedding_model", _embeddingClient.Model);
                             update.Parameters.AddWithValue("id", batch[j].id);
                             await update.ExecuteNonQueryAsync();
                             ok++;
@@ -785,12 +815,14 @@ namespace propseekr_file_processor
                             float[] vector = await GenerateEmbeddingAsync(text);
 
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE requirements
+                        UPDATE requirements_table
                         SET    embedding  = @vec,
+                               embedding_model = @embedding_model,
                                updated_at = NOW()
                         WHERE  requirementid = @id
                     ", conn);
                             update.Parameters.AddWithValue("vec", new Pgvector.Vector(vector));
+                            update.Parameters.AddWithValue("embedding_model", _embeddingClient.Model);
                             update.Parameters.AddWithValue("id", id);
                             await update.ExecuteNonQueryAsync();
 
@@ -810,9 +842,6 @@ namespace propseekr_file_processor
             return (ok, fail);
         }
         // â”€â”€ ADD: New batch embedding method â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Add this method RIGHT AFTER the existing GenerateEmbeddingAsync method
-        // (around line 352). Keep the old method â€” it's used as fallback.
-
         private async Task<List<float[]>> GenerateEmbeddingsBatchAsync(List<string> texts)
         {
             if (texts == null || texts.Count == 0)
@@ -823,16 +852,7 @@ namespace propseekr_file_processor
             if (validTexts.Count == 0)
                 return new List<float[]>();
 
-            // OpenAI batch embedding â€” single API call for multiple texts
-            var result = await _embeddingClient.GenerateEmbeddingsAsync(validTexts);
-
-            var vectors = new List<float[]>();
-            foreach (var embedding in result.Value)
-            {
-                vectors.Add(embedding.ToFloats().ToArray());
-            }
-
-            return vectors;
+            return await _embeddingClient.GenerateEmbeddingsAsync(validTexts);
         }
 
         // â”€â”€ Builds the text string to embed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -850,14 +870,13 @@ namespace propseekr_file_processor
             ).ToLower().Trim();
         }
 
-        // â”€â”€ Calls OpenAI text-embedding-3-small â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ Calls Vertex AI gemini-embedding-001 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         private async Task<float[]> GenerateEmbeddingAsync(string text)
         {
             if (string.IsNullOrWhiteSpace(text))
                 throw new ArgumentException("Empty text â€” cannot embed.");
 
-            var result = await _embeddingClient.GenerateEmbeddingAsync(text);
-            return result.Value.ToFloats().ToArray();
+            return await _embeddingClient.GenerateEmbeddingAsync(text);
         }
 
         // â”€â”€ Opens a pgvector-enabled Npgsql connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1112,7 +1131,7 @@ OUTPUT:
                         new UserChatMessage(chunk)
                     };
 
-                    var response = await _chatClient.CompleteChatAsync(messages, options);
+                    var response = await _chatClient.Value.CompleteChatAsync(messages, options);
                     var json = string.Concat(response.Value.Content.Select(part => part.Text));
 
                     if (!TryParseLlmListings(json, out var list))
@@ -2218,6 +2237,14 @@ OUTPUT:
             var crore = Regex.Match(lower, @"(\d+(?:\.\d+)?)\s*(?:cr|crore)\b");
             if (crore.Success && decimal.TryParse(crore.Groups[1].Value, out var cv)) return cv * 10_000_000m;
 
+            // Broker shorthand: "Budget upto 30L" / "demand - 75 L".
+            // Require an explicit price/budget label so dimensions such as
+            // "30 L x 20 W" are never interpreted as a monetary value.
+            var shortLakh = Regex.Match(lower,
+                @"\b(?:budget|price|demand|amount)\b[^\d\r\n]{0,16}(\d+(?:\.\d+)?)\s*l\b");
+            if (shortLakh.Success && decimal.TryParse(shortLakh.Groups[1].Value, out var slv) && slv < 1000m)
+                return slv * 100_000m;
+
             var lakh = Regex.Match(lower, @"(\d+(?:\.\d+)?)\s*(?:lakh|lac)\b");
             if (lakh.Success && decimal.TryParse(lakh.Groups[1].Value, out var lv))
             {
@@ -2389,8 +2416,8 @@ OUTPUT:
 
             // 1. Explicit "Location: ..." label
             var explicitMatch = Regex.Match(text,
-                @"(?:location|address)\s*[:\-]\s*(.+?)(?=\s*(?:plot size|size|area|rate|price|contact|bhk|sqft|budget|furnished|rera|facing|corner|garden|@|$))",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                @"(?im)^\s*(?:location|address)\s*[:\-]\s*([^\r\n]+)",
+                RegexOptions.IgnoreCase);
             if (explicitMatch.Success)
             {
                 var loc = SanitizeLocation(explicitMatch.Groups[1].Value);
@@ -2468,7 +2495,10 @@ OUTPUT:
                 "", RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
             // 3. Stop at "N ft road" pattern (road-width detail)
-            raw = Regex.Replace(raw, @"\b\d+\s*ft\b.*", "", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            raw = Regex.Replace(raw,
+                @"\b(?:near\s+)?\d+\s*(?:ft|feet|foot)\s+road\b.*",
+                "", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            raw = Regex.Replace(raw, @"\b\d+\s*(?:ft|feet|foot)\b.*", "", RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
             // 4. Stop at opening parenthesis \u2014 details like "(corner + garden)" are not location
             raw = Regex.Replace(raw, @"\s*\(.*", "");
