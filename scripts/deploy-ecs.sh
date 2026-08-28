@@ -13,6 +13,8 @@ echo "========================================"
 
 readonly HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-/hello}"
 readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-10}"
+readonly ECS_TASK_ROLE_ARN="${ECS_TASK_ROLE_ARN:-arn:aws:iam::307869868474:role/MobileApiEcsTaskRole}"
+readonly AWS_SECRETS_MANAGER_CONFIG_NAME="${AWS_SECRETS_MANAGER_CONFIG_NAME:-dev_test}"
 
 service_updated=false
 previous_task_definition=""
@@ -187,14 +189,22 @@ fi
 
 jq \
     --arg container_name "${ECS_CONTAINER_NAME}" \
-    --arg image "${IMAGE_URI}" '
+    --arg image "${IMAGE_URI}" \
+    --arg task_role "${ECS_TASK_ROLE_ARN}" \
+    --arg secrets_config "${AWS_SECRETS_MANAGER_CONFIG_NAME}" '
     .containerDefinitions |= map(
         if .name == $container_name then
             .image = $image
+            | .environment |= (
+                map(select(.name != "AWS__SecretsManagerConfigName")) +
+                [{ "name": "AWS__SecretsManagerConfigName", "value": $secrets_config }]
+            )
         else
             .
         end
     )
+    |
+    .taskRoleArn = $task_role
     |
     del(
         .taskDefinitionArn,
