@@ -32,8 +32,8 @@ if (!string.IsNullOrWhiteSpace(secretsManagerConfigName))
             foreach (var prop in root.EnumerateObject())
             {
                 var val = prop.Value.ValueKind == JsonValueKind.String 
-                    ? prop.Value.GetString() 
-                    : prop.Value.GetRawText();
+                    ? prop.Value.GetString()?.Trim() 
+                    : prop.Value.GetRawText()?.Trim();
                 
                 secretsDict[prop.Name] = val;
                 
@@ -64,11 +64,11 @@ builder.Logging.AddDebug();
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
-var dbHost = Environment.GetEnvironmentVariable("DB_HOST");
-var dbPort = Environment.GetEnvironmentVariable("DB_PORT");
-var dbName = Environment.GetEnvironmentVariable("DB_NAME");
-var dbUser = Environment.GetEnvironmentVariable("DB_USERNAME");
-var dbPass = Environment.GetEnvironmentVariable("DB_PASSWORD");
+var dbHost = Environment.GetEnvironmentVariable("DB_HOST")?.Trim();
+var dbPort = Environment.GetEnvironmentVariable("DB_PORT")?.Trim();
+var dbName = Environment.GetEnvironmentVariable("DB_NAME")?.Trim();
+var dbUser = Environment.GetEnvironmentVariable("DB_USERNAME")?.Trim();
+var dbPass = Environment.GetEnvironmentVariable("DB_PASSWORD")?.Trim();
 
 if (!string.IsNullOrWhiteSpace(dbHost))
 {
@@ -89,7 +89,7 @@ else
                 var root = doc.RootElement;
                 if (root.TryGetProperty("password", out var pwdProp))
                 {
-                    dbPassword = pwdProp.GetString();
+                    dbPassword = pwdProp.GetString()?.Trim();
                 }
                 else if (root.TryGetProperty("ConnectionString", out var connProp))
                 {
