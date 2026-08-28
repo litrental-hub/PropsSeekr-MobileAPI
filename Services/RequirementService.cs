@@ -297,13 +297,20 @@ public class RequirementService : IRequirementService
         await _dbContext.SaveChangesAsync();
 
         IReadOnlyList<int> matches = [];
+        var embeddingCompleted = true;
         try
         {
             await _matchingPipeline.TriggerForRequirementAsync(requirement.Id);
+            matches = await _dbContext.Matches
+                .AsNoTracking()
+                .Where(match => match.RequirementId == requirement.Id && match.Status == "MATCHED")
+                .Select(match => match.Id)
+                .ToListAsync();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Embedding and matching pipeline failed to start for requirement {RequirementId}", requirement.Id);
+            embeddingCompleted = false;
+            _logger.LogError(ex, "Embedding and matching pipeline failed for requirement {RequirementId}", requirement.Id);
         }
 
         return new CreateRequirementResponseDto
@@ -311,7 +318,10 @@ public class RequirementService : IRequirementService
             Success = true,
             RequirementId = requirement.Id.ToString(),
             MatchCount = matches.Count,
-            Message = "Requirement successfully posted. Embedding and matching have started."
+            EmbeddingCompleted = embeddingCompleted,
+            Message = embeddingCompleted
+                ? "Requirement posted successfully. Gemini embedding and matching completed."
+                : "Requirement posted, but Gemini embedding or matching failed. Check API logs and retry the embedding."
         };
     }
 

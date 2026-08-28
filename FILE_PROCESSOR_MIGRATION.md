@@ -28,6 +28,6 @@ The pipeline call has a ten-minute client timeout because extraction and embeddi
 
 `appsettings.json` contains an intentionally empty `FileProcessor` schema. Do not commit credentials. Set production secrets using environment variables with the original Lambda names (`OPENAI_API_KEY`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, `S3_BUCKET_NAME`, and optional Google/Gemini keys), or use the corresponding `FileProcessor:*` user-secret settings locally. Environment variables take precedence.
 
-The supplied Gemini service-account fields are included in the configuration schema for deployment parity. The current Lambda source does not read them; its LLM extraction and embedding calls use `OPENAI_API_KEY`, `gpt-4o-mini`, and `text-embedding-3-small`.
+Embeddings use the configured Google service account with Vertex AI's `gemini-embedding-001` model. `FileProcessor:EmbeddingDimensions` defaults to 1536 to match the current pgvector columns, and `FileProcessor:VertexLocation` defaults to `us-central1`. The legacy file-extraction chat fallback still uses `OPENAI_API_KEY` and `gpt-4o-mini`; ordinary listing and requirement embedding no longer depends on OpenAI.
 
 The endpoints retain the Lambda's anonymous routing for compatibility. Put them behind the same internal gateway or service-to-service authentication before public exposure.
