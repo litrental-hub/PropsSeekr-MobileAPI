@@ -139,6 +139,7 @@ builder.Services.AddScoped<IMatchingPipelineService, MatchingPipelineService>();
 builder.Services.AddScoped<IEmbeddingJobService, EmbeddingJobService>();
 builder.Services.AddScoped<MatchInvalidationService>();
 builder.Services.AddHostedService<EmbeddingJobWorker>();
+builder.Services.AddHostedService<BulkImportJobWorker>();
 
 builder.Services.AddAuthorization();
 

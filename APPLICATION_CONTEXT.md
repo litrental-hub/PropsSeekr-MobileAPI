@@ -124,6 +124,12 @@ The mobile listing and requirement forms geocode the property/preferred locality
 
 ## Embedding pipeline
 
+## Bulk TXT import pipeline
+
+Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The API records a broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` parses the text file, ingests canonical listings/requirements, embeds both targets, and runs matching asynchronously. Job status and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
+
+The legacy `/file-processor/*` facade remains internal-service-only. Mobile clients must never send the internal service key and must use `/bulk-imports` instead.
+
 The asynchronous job path is:
 
 ```text

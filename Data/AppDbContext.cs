@@ -30,6 +30,7 @@ public class AppDbContext : DbContext
     public DbSet<ListingMedia> ListingMedia => Set<ListingMedia>();
     public DbSet<Requirement> Requirements => Set<Requirement>();
     public DbSet<EmbeddingJob> EmbeddingJobs => Set<EmbeddingJob>();
+    public DbSet<BulkImportJob> BulkImportJobs => Set<BulkImportJob>();
     public DbSet<ListingSize> ListingSizes => Set<ListingSize>();
     public DbSet<ListingRequirement> ListingRequirements => Set<ListingRequirement>();
     public DbSet<MatchStatus> MatchStatuses => Set<MatchStatus>();
@@ -87,6 +88,7 @@ public class AppDbContext : DbContext
                 .IsUnique()
                 .HasFilter("status = 'queued'");
         });
+        b.Entity<BulkImportJob>(e => { e.ToTable("bulk_import_jobs"); e.HasKey(x => x.Id); e.HasIndex(x => new { x.Status, x.AvailableAt }); e.HasIndex(x => x.BrokerId); e.HasIndex(x => x.StorageKey).IsUnique(); });
         b.Entity<Reveal>(e => { e.ToTable("reveals"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.RevealedAt).HasColumnName("revealed_at"); e.HasIndex(x => x.MatchId).IsUnique(); });
         b.Entity<CreditWallet>(e => { e.ToTable("credit_wallets"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.FreeCreditsBalance).HasColumnName("free_credits_balance"); e.Property(x => x.PaidCreditsBalance).HasColumnName("paid_credits_balance"); e.Property(x => x.FreeCreditsResetAt).HasColumnName("free_credits_reset_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); e.HasIndex(x => x.BrokerId).IsUnique(); });
         b.Entity<CreditTransaction>(e => { e.ToTable("credit_transactions"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.Type).HasColumnName("Type"); e.Property(x => x.Amount).HasColumnName("Amount"); e.Property(x => x.BalanceAfter).HasColumnName("balance_after"); e.Property(x => x.ReferenceType).HasColumnName("reference_type"); e.Property(x => x.ReferenceId).HasColumnName("reference_id"); e.Property(x => x.ReferenceKey).HasColumnName("reference_key").HasMaxLength(100); e.Property(x => x.Notes).HasColumnName("Notes"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); e.HasIndex(x => new { x.BrokerId, x.ReferenceType, x.ReferenceKey }).IsUnique().HasFilter("reference_key IS NOT NULL"); });
