@@ -42,4 +42,33 @@ public sealed class EmbeddingJobService(AppDbContext dbContext) : IEmbeddingJobS
         if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
         return job;
     }
+
+    public async Task<EmbeddingJob> RetryFailedAsync(Guid jobId, CancellationToken cancellationToken = default)
+    {
+        var job = await dbContext.EmbeddingJobs.SingleOrDefaultAsync(item => item.Id == jobId, cancellationToken)
+                  ?? throw new KeyNotFoundException("Embedding job not found.");
+        if (job.Status != "failed")
+            throw new InvalidOperationException("Only failed embedding jobs can be retried.");
+
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var lockKey = $"propseekr-embedding-job:{job.EntityType}:{job.EntityId}";
+        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock(hashtext({lockKey}))", cancellationToken);
+
+        var existingQueuedJob = await dbContext.EmbeddingJobs.AnyAsync(item =>
+            item.Id != job.Id && item.EntityType == job.EntityType && item.EntityId == job.EntityId && item.Status == "queued", cancellationToken);
+        if (existingQueuedJob)
+            throw new InvalidOperationException("A newer embedding job is already queued for this record.");
+
+        job.Status = "queued";
+        job.AttemptCount = 0;
+        job.AvailableAt = DateTime.UtcNow;
+        job.LockedAt = null;
+        job.CompletedAt = null;
+        job.LastError = null;
+        job.UpdatedAt = DateTime.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return job;
+    }
 }

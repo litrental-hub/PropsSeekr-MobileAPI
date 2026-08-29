@@ -150,6 +150,13 @@ public class ListingsController : ControllerBase
             return NotFound(new { success = false, message = "Listing not found." });
         }
 
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized(new { success = false, message = "Invalid authenticated user." });
+
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
+        if (!User.IsInRole("Admin") && brokerId != listing.BrokerId)
+            return Forbid();
+
         var sizes = await _dbContext.ListingSizes.AsNoTracking()
             .Where(ls => ls.ListingId == id)
             .Select(ls => new { size_sqft = ls.SizeSqft, size_label = ls.SizeLabel })
@@ -182,8 +189,6 @@ public class ListingsController : ControllerBase
                 locality = listing.ProjectName ?? "N/A", // Map project_name back to locality
                 price = listing.Price,
                 status = listing.Status,
-                source = listing.Source,
-                raw_message_text = listing.RawMessageText,
                 posted_by = listing.PostedBy ?? "BROKER",
                 created_at = listing.CreatedAt,
                 updated_at = listing.UpdatedAt,

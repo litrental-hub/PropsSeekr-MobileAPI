@@ -64,35 +64,6 @@ public class RequirementService : IRequirementService
         var limit = pagination.Limit > 0 ? pagination.Limit : 20;
         var skip = (pageNumber - 1) * limit;
 
-        var query = _dbContext.PropertyRequests
-            .AsNoTracking()
-            .Where(p => p.ListingType == "DEMAND");
-
-        // Legacy PropertyRequests are retained for historical data only; they
-        // are not the matching source of truth and must not appear in /mine.
-        query = query.Where(_ => false);
-
-        if (!string.IsNullOrWhiteSpace(transactionType))
-        {
-            var normalizedTransactionType = transactionType.Trim().ToUpperInvariant().Replace('-', '_').Replace('/', '_');
-            if (normalizedTransactionType is "RENT" or "RENTAL" or "LEASE")
-            {
-                query = query.Where(p => p.TransactionType == "RENTAL" || p.TransactionType == "RENT");
-            }
-            else if (normalizedTransactionType is "BUY_SELL" or "BUY" or "SELL" or "SALE")
-            {
-                query = query.Where(p =>
-                    p.TransactionType == "BUY" ||
-                    p.TransactionType == "SELL" ||
-                    p.TransactionType == "BUY_SELL" ||
-                    p.TransactionType == "SALE");
-            }
-            else
-            {
-                throw new ArgumentException("transactionType must be RENTAL or BUY_SELL.", nameof(transactionType));
-            }
-        }
-
         // Do not materialize the legacy PropertyRequests projection. Canonical
         // Requirements is the sole source for this endpoint and for matching.
         var requirements = new List<PropertyRequest>();

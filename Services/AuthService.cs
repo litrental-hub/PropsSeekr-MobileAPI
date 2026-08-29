@@ -78,7 +78,6 @@ public class AuthService : IAuthService
             ReraRegistrationNumber = reraRegistrationNumber,
             IsMobileVerified = false,
             IsEmailVerified = false,
-            Credits = 0,
             CreatedDate = DateTime.UtcNow,
             ModifiedDate = DateTime.UtcNow
         };
