@@ -14,4 +14,5 @@ public interface IRequirementService
         PaginationDto pagination,
         string? transactionType = null);
     Task<CreateRequirementResponseDto> AddRequirementAsync(Guid userId, CreateRequirementRequestDto request);
+    Task<CreateRequirementResponseDto> UpdateRequirementAsync(Guid userId, int requirementId, CreateRequirementRequestDto request);
 }

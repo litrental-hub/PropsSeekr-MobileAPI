@@ -19,20 +19,18 @@ namespace PropSeekr.Controllers;
 public class MatchesController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
-    private readonly IUnlockService _unlockService;
     private readonly IBrokerIdentityService _brokerIdentityService;
 
     public MatchesController(
         AppDbContext dbContext,
-        IUnlockService unlockService,
         IBrokerIdentityService brokerIdentityService)
     {
         _dbContext = dbContext;
-        _unlockService = unlockService;
         _brokerIdentityService = brokerIdentityService;
     }
 
     [HttpGet("{matchId}")]
+    [Obsolete("Use GET /api/v1/user-matches/matches/{matchId}/details instead.")]
     public async Task<IActionResult> GetMatchDetails([FromRoute] int matchId)
     {
         if (!TryGetCurrentUserId(out var userId))
@@ -208,29 +206,9 @@ public class MatchesController : ControllerBase
 
     [HttpPost("{matchId}/reveal")]
     [Obsolete("Use POST /api/v1/user-matches/matches/{matchId}/reveal instead.")]
-    public async Task<IActionResult> RevealMatchContact([FromRoute] int matchId)
+    public IActionResult RevealMatchContact([FromRoute] int matchId)
     {
-        if (!TryGetCurrentUserId(out var userId))
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId);
-        if (!brokerId.HasValue)
-            return Unauthorized(new { message = "No broker profile is linked to this account." });
-
-        try
-        {
-            var response = await _unlockService.UnlockMatchAsync(
-                brokerId.Value,
-                new UnlockPropertyRequestDto { MatchId = matchId });
-            return response.Success ? Ok(response) : BadRequest(response);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(new { message = ex.Message });
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return Forbid();
-        }
+        return StatusCode(StatusCodes.Status410Gone, new { message = "Direct reveal is retired. Confirm through POST /api/v1/user-matches/matches/{matchId}/confirm." });
     }
 
     [HttpGet("{matchId}/reveal")]

@@ -14,7 +14,6 @@ public class ProfileResponseDto
 
     public string? ProfilePhotoUrl { get; set; }
 
-    public int RemainingCreditBalance { get; set; }
 
     public bool IsEmailVerified { get; set; }
 

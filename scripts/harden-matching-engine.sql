@@ -11,13 +11,13 @@
 --   * full rebuilds retain up to 50 matches per requirement rather than 50
 --     matches globally.
 
-ALTER TABLE public.listings_table
+ALTER TABLE public.listings
     ADD COLUMN IF NOT EXISTS embedding_model text;
 
-ALTER TABLE public.requirements_table
+ALTER TABLE public.requirements
     ADD COLUMN IF NOT EXISTS embedding_model text;
 
-ALTER TABLE public.requirements_table
+ALTER TABLE public.requirements
     ADD COLUMN IF NOT EXISTS budget_min numeric,
     ADD COLUMN IF NOT EXISTS size_max numeric,
     ADD COLUMN IF NOT EXISTS radius_km double precision,
@@ -108,7 +108,7 @@ BEGIN
             r.raw_message_text,
             COALESCE(NULLIF(BTRIM(r.city), ''), NULLIF(BTRIM(first_locality.city), '')) AS resolved_city,
             UPPER(COALESCE(r.budget_type, '')) IN ('FLEXIBLE', 'NOBUDGET') AS budget_is_flexible
-        FROM public.requirements_table r
+        FROM public.requirements r
         LEFT JOIN public.master first_locality
             ON first_locality.masterid = r.preferred_locality_ids[1]
         WHERE UPPER(COALESCE(r.status, '')) = 'ACTIVE'
@@ -227,7 +227,7 @@ BEGIN
             locality.lat AS listing_lat,
             locality.lng AS listing_lng,
             COALESCE(NULLIF(BTRIM(l.city), ''), NULLIF(BTRIM(locality.city), '')) AS resolved_city
-        FROM public.listings_table l
+        FROM public.listings l
         LEFT JOIN public.master locality ON locality.masterid = l.master_id
         WHERE UPPER(COALESCE(l.status, '')) = 'ACTIVE'
           AND COALESCE(l.isavailable, TRUE)

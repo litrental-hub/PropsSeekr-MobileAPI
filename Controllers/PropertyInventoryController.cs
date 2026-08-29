@@ -1,80 +1,25 @@
-using System.ComponentModel.DataAnnotations;
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using PropSeekr.DTOs.Inventory;
-using PropSeekr.Services.Interfaces;
 
 namespace PropSeekr.Controllers;
 
+/// <summary>
+/// Tombstone for PropertyRequests-backed inventory. Use /api/v1/listings and
+/// /api/v1/requirements instead.
+/// </summary>
 [Authorize]
 [ApiController]
 [Route("api/v1/property-inventory")]
 public class PropertyInventoryController : ControllerBase
 {
-    private readonly IPropertyInventoryService _propertyInventoryService;
-    private readonly ILogger<PropertyInventoryController> _logger;
-
-    public PropertyInventoryController(
-        IPropertyInventoryService propertyInventoryService,
-        ILogger<PropertyInventoryController> logger)
-    {
-        _propertyInventoryService = propertyInventoryService;
-        _logger = logger;
-    }
-
     [HttpGet("my-listings")]
-    public async Task<IActionResult> GetMyPropertyListings([FromQuery] int page = 1, [FromQuery] int limit = 20)
-    {
-        if (!TryGetCurrentUserId(out var userId))
-        {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        try
-        {
-            var response = await _propertyInventoryService.GetMyPropertyListingsAsync(userId, page, limit);
-            return Ok(response);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to fetch property listings for user {UserId}", userId);
-            return BadRequest(new { success = false, message = ex.Message });
-        }
-    }
+    public IActionResult GetMyPropertyListings() => Retired();
 
     [HttpPost("listings")]
-    public async Task<IActionResult> CreatePropertyListing([FromBody] CreatePropertyListingRequestDto request)
+    public IActionResult CreatePropertyListing() => Retired();
+
+    private ObjectResult Retired() => StatusCode(StatusCodes.Status410Gone, new
     {
-        if (!TryGetCurrentUserId(out var userId))
-        {
-            return Unauthorized(new { message = "Invalid authenticated user." });
-        }
-
-        if (!ModelState.IsValid)
-        {
-            return ValidationProblem(ModelState);
-        }
-
-        try
-        {
-            var response = await _propertyInventoryService.CreatePropertyListingAsync(userId, request);
-            return CreatedAtAction(nameof(GetMyPropertyListings), new { page = 1, limit = 20 }, response);
-        }
-        catch (ValidationException ex)
-        {
-            return BadRequest(new { success = false, message = ex.Message });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to create property listing for user {UserId}", userId);
-            return BadRequest(new { success = false, message = ex.Message });
-        }
-    }
-
-    private bool TryGetCurrentUserId(out Guid userId)
-    {
-        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return Guid.TryParse(userIdClaim, out userId);
-    }
+        message = "PropertyRequests-backed inventory is retired. Use canonical /api/v1/listings and /api/v1/requirements routes."
+    });
 }

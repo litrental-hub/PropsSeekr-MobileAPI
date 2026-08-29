@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using PropSeekr.Attributes;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
@@ -26,7 +27,7 @@ public class MatchingController : ControllerBase
     }
 
     [HttpPost("run")]
-    [AllowAnonymous] // Internal endpoint (called by ingestion/lambda workers)
+    [RequireInternalServiceKey]
     public async Task<IActionResult> RunMatching([FromBody] RunMatchRequestDto request)
     {
         if (!request.ListingId.HasValue && !request.RequirementId.HasValue)
@@ -54,7 +55,7 @@ public class MatchingController : ControllerBase
     }
 
     [HttpPost("expire-check")]
-    [AllowAnonymous] // Internal EventBridge cron integration
+    [RequireInternalServiceKey]
     public async Task<IActionResult> ExpireCheck()
     {
         var expiredMatchesCount = 0;

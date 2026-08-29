@@ -69,6 +69,7 @@ public sealed class HandshakeController : ControllerBase
     }
 
     [HttpGet("{matchId}/confirmations")]
+    [Obsolete("Use GET /api/v1/user-matches/matches/{matchId}/details instead.")]
     public async Task<IActionResult> GetMatchConfirmations(int matchId)
     {
         if (!TryGetCurrentUserId(out var userId))

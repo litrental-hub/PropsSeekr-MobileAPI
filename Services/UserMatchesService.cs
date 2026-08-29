@@ -232,6 +232,10 @@ public sealed class UserMatchesService : IUserMatchesService
             .Include(m => m.ListingBroker)
             .Include(m => m.RequirementBroker);
 
+        // Invalidated matches were calculated from pre-edit content and must
+        // never be offered as current connection opportunities.
+        query = query.Where(match => match.Status == "MATCHED" || _db.Reveals.Any(reveal => reveal.MatchId == match.Id));
+
         if (brokerId.HasValue)
             query = query.Where(m => m.ListingBrokerId == brokerId.Value || m.RequirementBrokerId == brokerId.Value);
 
@@ -278,9 +282,9 @@ public sealed class UserMatchesService : IUserMatchesService
             .Select(group => new
             {
                 Total = group.Count(),
-                Excellent = group.Count(match => match.MatchScore >= 90),
-                Good = group.Count(match => match.MatchScore >= 75 && match.MatchScore < 90),
-                Fair = group.Count(match => !match.MatchScore.HasValue || match.MatchScore < 75)
+                Excellent = group.Count(match => match.MatchScore >= 80),
+                Good = group.Count(match => match.MatchScore >= 60 && match.MatchScore < 80),
+                Fair = group.Count(match => !match.MatchScore.HasValue || match.MatchScore < 60)
             })
             .SingleOrDefaultAsync();
         var unlockedCount = await query.CountAsync(match => _db.Reveals.Any(reveal => reveal.MatchId == match.Id));

@@ -154,7 +154,6 @@ public class ProfileService : IProfileService
             MobileNumber = user.MobileNumber,
             Email = user.Email,
             ProfilePhotoUrl = user.ProfilePhotoUrl,
-            RemainingCreditBalance = user.Credits,
             IsEmailVerified = user.IsEmailVerified,
             IsMobileVerified = user.IsMobileVerified
         };

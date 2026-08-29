@@ -1,6 +1,6 @@
 # PropSeekr API application context
 
-Last verified against the `Main` branch on 2026-08-28.
+Last verified against the `Main` branch on 2026-08-29.
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
@@ -40,6 +40,7 @@ Broker account -> broker identity -> listing or requirement
 - `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It first uses `User.BrokerId`, then falls back to the final ten digits of the mobile number and persists the link.
 - Broker-scoped actions must derive the broker ID from the authenticated user. Do not trust a client-supplied broker ID for authenticated create, match, wallet, or reveal operations.
 - Admin list endpoints intentionally remove broker ownership scope. Currently this applies to `/listings/mine`, `/requirements/mine`, `/user-matches`, and the admin search projection.
+- Internal service endpoints (file processor, matching run/expiration, monthly credit grant, credit deduction, and WhatsApp intake) require an `X-Internal-Service-Key` header matching `InternalService:ApiKey` or `INTERNAL_SERVICE_API_KEY`.
 
 The custom `Authentication/JwtAuthenticationHandler.cs` is not registered by `Program.cs`; the active implementation is ASP.NET's standard JWT bearer handler. Do not base new behavior on the custom handler unless registration is deliberately changed and tested.
 
@@ -68,8 +69,7 @@ Listing
 
 Important sources of truth:
 
-- `listings_table` and `requirements_table` are the underlying ingestion/matching tables in the deployed legacy schema.
-- `listings` and `requirements` are the EF-facing active views/tables used by much of the API. Existing migrations create at least the `requirements` active view over `requirements_table`; deployments must confirm the corresponding database objects before changing mappings.
+- `listings` and `requirements` are the canonical EF-facing tables and stored procedure targets used across the API, matching engine (`sp_run_matching_engine`), and marketplace search (`SearchPropertyService.cs` / `POST /api/v1/search/properties`). All marketplace search queries for normal users and admins query canonical `listings` and `requirements`. Legacy `PropertyRequests` routes (`PropertyInventoryController.cs`) are retired with 410 Gone.
 - `matches` is the canonical listing-to-requirement result table. `matchid` is the unlock identity.
 - `credit_wallets` and `credit_transactions` are canonical for current token flows.
 - `reveals` is the authority for whether contact information can be returned. Match state alone is not sufficient.
@@ -95,9 +95,9 @@ New work should extend the canonical broker/listing/requirement/match/wallet gra
 1. Resolves the authenticated user's broker ID and overwrites the request broker ID.
 2. Normalizes transaction values to `RENT`, `SELL`, or `LEASE`.
 3. Creates the listing and optional size/link rows in a database transaction.
-4. Commits the listing before invoking the matching pipeline.
-5. Synchronously waits for targeted embedding and matching.
-6. Returns `embedding_completed` and a match count. A pipeline failure does not roll back the already-created listing.
+4. Commits the listing transaction before calling the matching pipeline.
+5. Currently waits synchronously for targeted embedding and matching, then returns `embedding_completed` and `match_count`.
+6. A pipeline failure does not roll back the already-created listing; the response reports `embedding_completed: false`.
 
 Manual listing creation can also persist a JSON object in `details` (maximum 32 KB) and `photo_sharing_preference`. Authenticated listing owners upload up to 12 JPG/PNG/WEBP/MP4/MOV/WEBM files through `POST /api/v1/listings/{listingId}/media`. Images are limited to 10 MB and videos to 100 MB by default. Media bytes currently live below the API web root, while database rows store relative paths; production with ephemeral or horizontally scaled API instances must move bytes to durable shared/object storage without changing reveal rules.
 
@@ -113,8 +113,8 @@ Migration `20260828000100_AddListingDetailsAndMedia` creates the two additive ta
 2. Resolves the broker from the authenticated user.
 3. Normalizes `RENTAL` to `RENT` and buy variants to `BUY`.
 4. Creates the canonical requirement with optional `budget_min`, `size_max`, `radius_km`, and `preferred_project_names`. Historical callers remain compatible: fixed budget is the default, one legacy locality is accepted, and a missing stored radius matches at 3 km.
-5. Synchronously invokes targeted embedding and matching.
-6. Returns `embeddingCompleted` and `matchCount`; a pipeline failure leaves the requirement saved.
+5. Currently invokes targeted embedding and matching synchronously after its transaction commits.
+6. Returns `embeddingCompleted` and `matchCount`; a pipeline failure leaves the requirement saved and reports `embeddingCompleted: false`.
 
 Manual listing and requirement creation resolve the submitted/geocoded city, locality, latitude, and longitude into the canonical `master` catalogue in the same database transaction as inventory creation. Listings persist the resulting `MasterId`; requirements persist one to five resolved IDs in `PreferredLocalityIds`. Existing catalogue coordinates are retained, and missing catalogue rows are created under a transaction-level advisory lock.
 
@@ -124,7 +124,13 @@ The mobile listing and requirement forms geocode the property/preferred locality
 
 ## Embedding pipeline
 
-The live create path is:
+## Bulk TXT import pipeline
+
+Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The API records a broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` parses the text file, ingests canonical listings/requirements, embeds both targets, and runs matching asynchronously. Job status and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
+
+The legacy `/file-processor/*` facade remains internal-service-only. Mobile clients must never send the internal service key and must use `/bulk-imports` instead.
+
+The asynchronous job path is:
 
 ```text
 ListingsController or RequirementService
@@ -138,7 +144,8 @@ ListingsController or RequirementService
 
 Key behavior:
 
-- The create endpoint awaits this pipeline. The wording "started" is no longer sufficient; callers receive a completion flag.
+- `embedding_jobs`, `EmbeddingJobWorker`, `GET /api/v1/embedding-jobs/{jobId}`, and the owner-authorized retry route exist, but the current manual listing/requirement create and update handlers have not yet been wired to enqueue them. They are therefore not the source of truth for those UI submissions today.
+- The partial unique database index allows at most one queued job for a listing or requirement once the manual handlers are wired to enqueue. A PostgreSQL advisory lock protects enqueue/retry decisions across API instances.
 - Only rows with `embedding IS NULL`, non-empty `raw_message_text`, and a non-deleted/non-closed status are selected.
 - Embedding text combines property type, transaction/listing type, and at most the first 300 characters of raw text.
 - Vertex AI uses a Google service account and the `RETRIEVAL_DOCUMENT` task type.

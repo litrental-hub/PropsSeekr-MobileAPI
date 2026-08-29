@@ -78,7 +78,6 @@ public class AuthService : IAuthService
             ReraRegistrationNumber = reraRegistrationNumber,
             IsMobileVerified = false,
             IsEmailVerified = false,
-            Credits = 0,
             CreatedDate = DateTime.UtcNow,
             ModifiedDate = DateTime.UtcNow
         };
@@ -158,7 +157,6 @@ public class AuthService : IAuthService
                 MobileNumber = user.MobileNumber ?? string.Empty,
                 Email = user.Email,
                 IsMobileVerified = user.IsMobileVerified,
-                Credits = user.Credits,
                 Role = role
             }
         };

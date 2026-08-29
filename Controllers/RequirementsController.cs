@@ -78,4 +78,19 @@ public class RequirementsController : ControllerBase
             return BadRequest(new { success = false, message = ex.Message });
         }
     }
+
+    [HttpPatch("{id:int}")]
+    [Authorize]
+    public async Task<IActionResult> UpdateRequirement([FromRoute] int id, [FromBody] CreateRequirementRequestDto request)
+    {
+        try
+        {
+            if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+                return Unauthorized(new { message = "Invalid user" });
+            return Ok(await _requirementService.UpdateRequirementAsync(userId, id, request));
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
+        catch (UnauthorizedAccessException) { return Forbid(); }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+    }
 }

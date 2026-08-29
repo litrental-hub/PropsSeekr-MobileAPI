@@ -6,6 +6,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PropSeekr.Controllers;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Inventory;
+using PropSeekr.DTOs.Matches;
+using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
 using Xunit;
 
@@ -73,6 +75,21 @@ public sealed class ListingsControllerTests
         Assert.Null(listings.BrokerId);
     }
 
+    [Fact]
+    public async Task PatchListing_RejectsNonOwnerWithForbidden()
+    {
+        var listings = new CapturingBrokerListingsService();
+        await using var db = EmptyDbContext();
+        db.Listings.Add(new Listing { Id = 10, BrokerId = 99, PropertyType = "Apartment" });
+        await db.SaveChangesAsync();
+
+        var controller = Controller(db, new StubBrokerIdentityService(42), listings, Guid.NewGuid());
+        var result = await controller.PatchListing(10, new CreateListingRequestDto { PropertyType = "Villa" });
+
+        var forbidden = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(403, forbidden.StatusCode);
+    }
+
     private static ListingsController Controller(
         AppDbContext db,
         IBrokerIdentityService brokerIdentity,
@@ -101,7 +118,9 @@ public sealed class ListingsControllerTests
     }
 
     private static AppDbContext EmptyDbContext() => new(
-        new DbContextOptionsBuilder<AppDbContext>().Options);
+        new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options);
 
     private sealed class StubBrokerIdentityService(int? brokerId) : IBrokerIdentityService
     {

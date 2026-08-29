@@ -75,5 +75,8 @@ public sealed class RequirementsControllerTests
 
         public Task<CreateRequirementResponseDto> AddRequirementAsync(Guid userId, CreateRequirementRequestDto request) =>
             throw new NotSupportedException();
+
+        public Task<CreateRequirementResponseDto> UpdateRequirementAsync(Guid userId, int requirementId, CreateRequirementRequestDto request) =>
+            throw new NotSupportedException();
     }
 }

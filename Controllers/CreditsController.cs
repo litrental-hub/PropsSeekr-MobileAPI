@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using PropSeekr.Attributes;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
@@ -24,7 +25,7 @@ public class CreditsController : ControllerBase
     }
 
     [HttpPost("grant-monthly")]
-    [AllowAnonymous] // Internal EventBridge CRON
+    [RequireInternalServiceKey]
     public async Task<IActionResult> GrantMonthlyCredits()
     {
         using var transaction = await _dbContext.Database.BeginTransactionAsync();
@@ -73,7 +74,6 @@ public class CreditsController : ControllerBase
                 };
                 _dbContext.CreditTransactions.Add(grantTx);
 
-                broker.CreditBalance = 10 + wallet.PaidCreditsBalance;
                 _dbContext.Brokers.Update(broker);
 
                 count++;
@@ -122,7 +122,7 @@ public class CreditsController : ControllerBase
     }
 
     [HttpPost("deduct")]
-    [AllowAnonymous] // Internal API (reveal flow Lambda/orchestration trigger)
+    [RequireInternalServiceKey]
     public async Task<IActionResult> DeductCredits([FromBody] DeductCreditsRequestDto request)
     {
         if (request.BrokerId <= 0 || request.Amount <= 0)
@@ -186,7 +186,6 @@ public class CreditsController : ControllerBase
             var broker = await _dbContext.Brokers.FirstOrDefaultAsync(b => b.Id == request.BrokerId);
             if (broker != null)
             {
-                broker.CreditBalance = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
                 _dbContext.Brokers.Update(broker);
             }
 

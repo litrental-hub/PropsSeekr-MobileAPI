@@ -50,7 +50,6 @@ public class BrokersController : ControllerBase
                 Locality = request.Locality,
                 BrokerageName = request.BrokerageName,
                 Status = "active",
-                CreditBalance = 10,
                 CreatedAt = DateTime.UtcNow,
                 LastActiveAt = DateTime.UtcNow
             };

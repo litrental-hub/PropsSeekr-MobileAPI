@@ -127,4 +127,14 @@ public class AuthController : ControllerBase
         var response = await _authService.LogoutAsync();
         return Ok(response);
     }
+
+    [HttpPost("refresh")]
+    public IActionResult RefreshToken()
+    {
+        return StatusCode(StatusCodes.Status410Gone, new
+        {
+            success = false,
+            message = "Refresh token endpoint is retired. Access tokens are single-use session tokens; please authenticate via login or OTP."
+        });
+    }
 }

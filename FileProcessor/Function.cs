@@ -190,7 +190,7 @@ namespace propseekr_file_processor
 
                     if (key.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
                     {
-                        await RunFullPipeline(bucket, key, context);
+                        await RunBulkImportAsync(bucket, key, context);
                         return Respond(200, new { message = "Pipeline complete", bucket, key });
                     }
                     else
@@ -378,8 +378,9 @@ namespace propseekr_file_processor
         // â”€â”€ FULL PIPELINE (triggered by S3 event) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //  Runs: Process â†’ Ingest â†’ Embed Listings â†’ Embed Requirements â†’ Matching SP
         // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        private async Task RunFullPipeline(string bucket, string key, ILambdaContext context)
+        public async Task<IngestResult> RunBulkImportAsync(string bucket, string key, ILambdaContext context, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // â”€â”€ STEP 1: PROCESS â”€â”€
             context.Logger.LogInformation("Pipeline 1/5: Processing...");
             var processReq = new APIGatewayProxyRequest
@@ -392,16 +393,14 @@ namespace propseekr_file_processor
             var processResp = await CallInternal(processReq, context);
             if (processResp.StatusCode != 200)
             {
-                context.Logger.LogError($"Pipeline FAILED at Process: {processResp.Body}");
-                return;
+                throw new InvalidOperationException($"Bulk import processing failed: {processResp.Body}");
             }
             context.Logger.LogInformation("Pipeline 1/5: Process complete");
 
             // â”€â”€ STEP 2: INGEST â”€â”€
             if (_ingestService == null || _dataSource == null)
             {
-                context.Logger.LogWarning("Pipeline steps 2-5 (Ingest, Embedding, Matching) skipped because the database is not configured.");
-                return;
+                throw new InvalidOperationException("Bulk import ingestion is unavailable because the database is not configured.");
             }
 
             context.Logger.LogInformation("Pipeline 2/5: Ingesting...");
@@ -416,9 +415,10 @@ namespace propseekr_file_processor
             var ingestResp = await _ingestService.HandleIngestAsync(ingestReq, context);
             if (ingestResp.StatusCode != 200)
             {
-                context.Logger.LogError($"Pipeline FAILED at Ingest: {ingestResp.Body}");
-                return;
+                throw new InvalidOperationException($"Bulk import ingestion failed: {ingestResp.Body}");
             }
+            var ingestResult = JsonSerializer.Deserialize<IngestResult>(ingestResp.Body,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new IngestResult();
             context.Logger.LogInformation($"Pipeline 2/5: Ingest complete â€” {ingestResp.Body}");
 
             // â”€â”€ STEP 3: EMBED LISTINGS â”€â”€
@@ -431,6 +431,8 @@ namespace propseekr_file_processor
                 Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }
             };
             var embedListResp = await CallInternal(embedListReq, context);
+            if (embedListResp.StatusCode is < 200 or >= 300)
+                throw new InvalidOperationException($"Bulk import listing embedding failed: {embedListResp.Body}");
             context.Logger.LogInformation($"Pipeline 3/5: Listings embedded");
 
             // â”€â”€ STEP 4: EMBED REQUIREMENTS â”€â”€
@@ -443,12 +445,15 @@ namespace propseekr_file_processor
                 Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }
             };
             var embedReqResp = await CallInternal(embedReqReq, context);
+            if (embedReqResp.StatusCode is < 200 or >= 300)
+                throw new InvalidOperationException($"Bulk import requirement embedding failed: {embedReqResp.Body}");
             context.Logger.LogInformation($"Pipeline 4/5: Requirements embedded");
 
             // Note: Matching SP already runs automatically at the end of HandleEmbedAsync
             // So Step 5 is handled by the embed endpoint itself
 
             context.Logger.LogInformation($"Pipeline COMPLETE for s3://{bucket}/{key}");
+            return ingestResult;
         }
 
         /// <summary>
@@ -494,7 +499,7 @@ namespace propseekr_file_processor
                             target = t.ToLower();
                     }
                     if (root.TryGetProperty("batch_size", out var bsEl) && bsEl.TryGetInt32(out var bs))
-                        batchSize = bs;
+                        batchSize = Math.Clamp(bs, 1, 100);
                     if (root.TryGetProperty("listing_id", out var listingIdEl) && listingIdEl.TryGetInt32(out var parsedListingId))
                         listingId = parsedListingId;
                     if (root.TryGetProperty("requirement_id", out var requirementIdEl) && requirementIdEl.TryGetInt32(out var parsedRequirementId))

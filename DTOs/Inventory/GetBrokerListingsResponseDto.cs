@@ -6,5 +6,6 @@ public sealed class GetBrokerListingsResponseDto
     public int TotalCount { get; set; }
     public int Page { get; set; }
     public int Limit { get; set; }
+    public bool IsAdminView { get; set; }
     public List<BrokerListingDto> Data { get; set; } = new();
 }

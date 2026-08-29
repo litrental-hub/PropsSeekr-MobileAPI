@@ -66,6 +66,7 @@ public class User
 
     public bool IsEmailVerified { get; set; } = false;
 
+    [Obsolete("Historical-only column. Use CreditWallet (credit_wallets) for active token balances.")]
     public int Credits { get; set; } = 0;
 
     [MaxLength(30)]

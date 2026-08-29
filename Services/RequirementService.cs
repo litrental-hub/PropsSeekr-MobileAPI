@@ -64,35 +64,6 @@ public class RequirementService : IRequirementService
         var limit = pagination.Limit > 0 ? pagination.Limit : 20;
         var skip = (pageNumber - 1) * limit;
 
-        var query = _dbContext.PropertyRequests
-            .AsNoTracking()
-            .Where(p => p.ListingType == "DEMAND");
-
-        // Legacy PropertyRequests are retained for historical data only; they
-        // are not the matching source of truth and must not appear in /mine.
-        query = query.Where(_ => false);
-
-        if (!string.IsNullOrWhiteSpace(transactionType))
-        {
-            var normalizedTransactionType = transactionType.Trim().ToUpperInvariant().Replace('-', '_').Replace('/', '_');
-            if (normalizedTransactionType is "RENT" or "RENTAL" or "LEASE")
-            {
-                query = query.Where(p => p.TransactionType == "RENTAL" || p.TransactionType == "RENT");
-            }
-            else if (normalizedTransactionType is "BUY_SELL" or "BUY" or "SELL" or "SALE")
-            {
-                query = query.Where(p =>
-                    p.TransactionType == "BUY" ||
-                    p.TransactionType == "SELL" ||
-                    p.TransactionType == "BUY_SELL" ||
-                    p.TransactionType == "SALE");
-            }
-            else
-            {
-                throw new ArgumentException("transactionType must be RENTAL or BUY_SELL.", nameof(transactionType));
-            }
-        }
-
         // Do not materialize the legacy PropertyRequests projection. Canonical
         // Requirements is the sole source for this endpoint and for matching.
         var requirements = new List<PropertyRequest>();
@@ -399,6 +370,130 @@ public class RequirementService : IRequirementService
             Message = embeddingCompleted
                 ? "Requirement posted successfully. Gemini embedding and matching completed."
                 : "Requirement posted, but Gemini embedding or matching failed. Check API logs and retry the embedding."
+        };
+    }
+
+    public async Task<CreateRequirementResponseDto> UpdateRequirementAsync(Guid userId, int requirementId, CreateRequirementRequestDto request)
+    {
+        var budgetType = InventoryNormalization.BudgetType(request.BudgetType);
+        if (budgetType == "FIXED" && request.BudgetMax <= 0)
+            throw new ArgumentException("Budget must be greater than zero.");
+        if (request.BudgetMin is < 0)
+            throw new ArgumentException("Minimum budget cannot be negative.");
+        if (request.BudgetMin.HasValue && request.BudgetMax > 0 && request.BudgetMin > request.BudgetMax)
+            throw new ArgumentException("Minimum budget cannot exceed maximum budget.");
+        if (request.MinimumSize <= 0)
+            throw new ArgumentException("Minimum size must be greater than zero.");
+        if (request.MaximumSize.HasValue && request.MaximumSize < request.MinimumSize)
+            throw new ArgumentException("Maximum size cannot be smaller than minimum size.");
+
+        var preferredLocations = request.PreferredLocations is { Count: > 0 }
+            ? request.PreferredLocations
+            :
+            [
+                new PropSeekr.DTOs.Requirements.PreferredLocationDto
+                {
+                    City = request.City,
+                    Locality = request.Locality,
+                    Lat = request.Lat,
+                    Lng = request.Lng
+                }
+            ];
+        if (preferredLocations.Any(location =>
+                string.IsNullOrWhiteSpace(location.City) || string.IsNullOrWhiteSpace(location.Locality)))
+            throw new ArgumentException("City and locality are required for every preferred location.");
+        if (preferredLocations.Count > 5)
+            throw new ArgumentException("A requirement can contain at most five preferred localities.");
+        if (preferredLocations.Select(location => location.City.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            throw new ArgumentException("All preferred localities must be in the same city.");
+        if (preferredLocations.Any(location =>
+                location.Lat is < -90 or > 90 || location.Lng is < -180 or > 180 ||
+                (location.Lat == 0 && location.Lng == 0)))
+            throw new ArgumentException("Valid GPS coordinates are required for every preferred location.");
+        if (request.RadiusKm is <= 0 or > 100)
+            throw new ArgumentException("Search radius must be between 0 and 100 km.");
+        if (string.IsNullOrWhiteSpace(request.PropertyType))
+            throw new ArgumentException("Property type is required.");
+
+        var preferredProjectNames = (request.PreferredProjectNames ?? [])
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (preferredProjectNames.Length > 5 || preferredProjectNames.Any(value => value.Length > 255))
+            throw new ArgumentException("Provide at most five project names, each up to 255 characters.");
+
+        var brokerId = await _brokerIdentityService.GetBrokerIdAsync(userId)
+            ?? throw new KeyNotFoundException("No broker profile is linked to this account.");
+        var requirement = await _dbContext.Requirements.FirstOrDefaultAsync(item => item.Id == requirementId)
+            ?? throw new KeyNotFoundException("Requirement not found.");
+        if (requirement.BrokerId != brokerId)
+            throw new UnauthorizedAccessException("You can only edit your own requirements.");
+
+        var normalizedTransactionType = request.TransactionType.Trim().ToUpperInvariant();
+
+        using var transaction = await _dbContext.Database.BeginTransactionAsync();
+        var masterIds = new List<int>();
+        foreach (var location in preferredLocations)
+        {
+            var masterId = await MasterLocationResolver.ResolveAsync(
+                _dbContext,
+                location.City,
+                location.Locality,
+                location.Lat,
+                location.Lng);
+            if (!masterIds.Contains(masterId)) masterIds.Add(masterId);
+        }
+
+        requirement.RawMessageText = BuildRequirementMatchText(request);
+        requirement.RequirementType = normalizedTransactionType == "RENTAL" ? "RENT" : "BUY";
+        requirement.PropertyType = InventoryNormalization.PropertyType(request.PropertyType);
+        requirement.Configurations = InventoryNormalization.Configurations(request.Configurations);
+        requirement.PreferredLocalityIds = masterIds.ToArray();
+        requirement.Budget = request.BudgetMax > 0 ? request.BudgetMax : null;
+        requirement.BudgetMin = request.BudgetMin;
+        requirement.BudgetUnit = normalizedTransactionType == "RENTAL" ? "PER_MONTH" : "TOTAL";
+        requirement.BudgetType = budgetType;
+        requirement.Size = request.MinimumSize;
+        requirement.SizeMax = request.MaximumSize;
+        requirement.RadiusKm = request.RadiusKm;
+        requirement.PreferredProjectNames = preferredProjectNames;
+        requirement.FurnishingPref = InventoryNormalization.Furnishing(request.FurnishingPreference);
+        requirement.FacingPref = InventoryNormalization.Facing(request.FacingPreference);
+        requirement.City = preferredLocations[0].City.Trim();
+        requirement.UpdatedAt = DateTime.UtcNow;
+
+        _dbContext.Requirements.Update(requirement);
+        await _dbContext.SaveChangesAsync();
+
+        await transaction.CommitAsync();
+
+        IReadOnlyList<int> matches = [];
+        var embeddingCompleted = true;
+        try
+        {
+            await _matchingPipeline.TriggerForRequirementAsync(requirement.Id);
+            matches = await _dbContext.Matches
+                .AsNoTracking()
+                .Where(match => match.RequirementId == requirement.Id && match.Status == "MATCHED")
+                .Select(match => match.Id)
+                .ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            embeddingCompleted = false;
+            _logger.LogError(ex, "Embedding and matching pipeline failed for requirement update {RequirementId}", requirement.Id);
+        }
+
+        return new CreateRequirementResponseDto
+        {
+            Success = true,
+            RequirementId = requirement.Id.ToString(),
+            MatchCount = matches.Count,
+            EmbeddingCompleted = embeddingCompleted,
+            Message = embeddingCompleted
+                ? "Requirement updated successfully."
+                : "Requirement updated, but matching pipeline encountered an issue."
         };
     }
 

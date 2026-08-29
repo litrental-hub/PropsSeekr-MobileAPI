@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -12,9 +13,11 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260828155317_AddEmbeddingJobs")]
+    partial class AddEmbeddingJobs
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -143,95 +146,6 @@ namespace PropSeekr.Migrations
                     b.HasIndex("ConnectionRequestId");
 
                     b.ToTable("notifications");
-                });
-
-            modelBuilder.Entity("PropSeekr.Models.BulkImportJob", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<int>("AttemptCount")
-                        .HasColumnType("integer")
-                        .HasColumnName("attempt_count");
-
-                    b.Property<DateTime>("AvailableAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("available_at");
-
-                    b.Property<int>("BrokerId")
-                        .HasColumnType("integer")
-                        .HasColumnName("broker_id");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("completed_at");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at");
-
-                    b.Property<int>("FailedRecords")
-                        .HasColumnType("integer")
-                        .HasColumnName("failed_records");
-
-                    b.Property<string>("LastError")
-                        .HasColumnType("text")
-                        .HasColumnName("last_error");
-
-                    b.Property<int>("ListingsInserted")
-                        .HasColumnType("integer")
-                        .HasColumnName("listings_inserted");
-
-                    b.Property<DateTime?>("LockedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("locked_at");
-
-                    b.Property<int>("MaxAttempts")
-                        .HasColumnType("integer")
-                        .HasColumnName("max_attempts");
-
-                    b.Property<string>("OriginalFileName")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("original_file_name");
-
-                    b.Property<int>("RequirementsInserted")
-                        .HasColumnType("integer")
-                        .HasColumnName("requirements_inserted");
-
-                    b.Property<int>("SkippedRecords")
-                        .HasColumnType("integer")
-                        .HasColumnName("skipped_records");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("status");
-
-                    b.Property<string>("StorageKey")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("storage_key");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BrokerId");
-
-                    b.HasIndex("StorageKey")
-                        .IsUnique();
-
-                    b.HasIndex("Status", "AvailableAt");
-
-                    b.ToTable("bulk_import_jobs", (string)null);
                 });
 
             modelBuilder.Entity("PropSeekr.Models.CreditPack", b =>
@@ -556,10 +470,7 @@ namespace PropSeekr.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("EntityType", "EntityId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_embedding_jobs_one_queued_per_entity")
-                        .HasFilter("status = 'queued'");
+                    b.HasIndex("EntityType", "EntityId");
 
                     b.HasIndex("Status", "AvailableAt");
 
@@ -714,90 +625,6 @@ namespace PropSeekr.Migrations
                     b.HasIndex("BrokerId");
 
                     b.ToTable("listings");
-                });
-
-            modelBuilder.Entity("PropSeekr.Models.ListingDetail", b =>
-                {
-                    b.Property<int>("ListingId")
-                        .HasColumnType("integer")
-                        .HasColumnName("listing_id");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at");
-
-                    b.Property<string>("DetailsJson")
-                        .IsRequired()
-                        .HasColumnType("jsonb")
-                        .HasColumnName("details_json");
-
-                    b.Property<string>("PhotoSharingPreference")
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("photo_sharing_preference");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.HasKey("ListingId");
-
-                    b.ToTable("listing_details");
-                });
-
-            modelBuilder.Entity("PropSeekr.Models.ListingMedia", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasColumnName("media_id");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at");
-
-                    b.Property<long>("FileSizeBytes")
-                        .HasColumnType("bigint")
-                        .HasColumnName("file_size_bytes");
-
-                    b.Property<int>("ListingId")
-                        .HasColumnType("integer")
-                        .HasColumnName("listing_id");
-
-                    b.Property<string>("MediaType")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("media_type");
-
-                    b.Property<string>("MimeType")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("mime_type");
-
-                    b.Property<string>("OriginalFileName")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("original_file_name");
-
-                    b.Property<int>("SortOrder")
-                        .HasColumnType("integer")
-                        .HasColumnName("sort_order");
-
-                    b.Property<string>("StoragePath")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("storage_path");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ListingId", "SortOrder");
-
-                    b.ToTable("listing_media");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.ListingRequirement", b =>
@@ -1476,10 +1303,6 @@ namespace PropSeekr.Migrations
                         .HasColumnType("numeric")
                         .HasColumnName("budget");
 
-                    b.Property<decimal?>("BudgetMin")
-                        .HasColumnType("numeric")
-                        .HasColumnName("budget_min");
-
                     b.Property<string>("BudgetType")
                         .HasColumnType("text")
                         .HasColumnName("budget_type");
@@ -1556,18 +1379,10 @@ namespace PropSeekr.Migrations
                         .HasColumnType("integer[]")
                         .HasColumnName("preferred_locality_ids");
 
-                    b.PrimitiveCollection<string[]>("PreferredProjectNames")
-                        .HasColumnType("text[]")
-                        .HasColumnName("preferred_project_names");
-
                     b.Property<string>("PropertyType")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("property_type");
-
-                    b.Property<double?>("RadiusKm")
-                        .HasColumnType("double precision")
-                        .HasColumnName("radius_km");
 
                     b.Property<string>("RawMessageText")
                         .HasColumnType("text")
@@ -1582,10 +1397,6 @@ namespace PropSeekr.Migrations
                     b.Property<decimal?>("Size")
                         .HasColumnType("numeric")
                         .HasColumnName("size");
-
-                    b.Property<decimal?>("SizeMax")
-                        .HasColumnType("numeric")
-                        .HasColumnName("size_max");
 
                     b.Property<string>("Source")
                         .HasMaxLength(50)
