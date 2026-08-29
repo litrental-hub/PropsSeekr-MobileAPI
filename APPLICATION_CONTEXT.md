@@ -1,6 +1,6 @@
 # PropSeekr API application context
 
-Last verified against the `Main` branch on 2026-08-28.
+Last verified against the `Main` branch on 2026-08-29.
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
@@ -95,9 +95,9 @@ New work should extend the canonical broker/listing/requirement/match/wallet gra
 1. Resolves the authenticated user's broker ID and overwrites the request broker ID.
 2. Normalizes transaction values to `RENT`, `SELL`, or `LEASE`.
 3. Creates the listing and optional size/link rows in a database transaction.
-4. Invalidates unrevealed matches calculated from stale content and queues a durable embedding job in the same transaction.
-5. Returns with `embedding_status: queued` and `embedding_job_id`; the hosted worker performs targeted embedding and matching asynchronously.
-6. A pipeline failure never rolls back the already-created listing. The worker retries with exponential backoff, recovers expired leases, and a terminal failure can be retried through `POST /api/v1/embedding-jobs/{jobId}/retry` by the owning broker or an admin.
+4. Commits the listing transaction before calling the matching pipeline.
+5. Currently waits synchronously for targeted embedding and matching, then returns `embedding_completed` and `match_count`.
+6. A pipeline failure does not roll back the already-created listing; the response reports `embedding_completed: false`.
 
 Manual listing creation can also persist a JSON object in `details` (maximum 32 KB) and `photo_sharing_preference`. Authenticated listing owners upload up to 12 JPG/PNG/WEBP/MP4/MOV/WEBM files through `POST /api/v1/listings/{listingId}/media`. Images are limited to 10 MB and videos to 100 MB by default. Media bytes currently live below the API web root, while database rows store relative paths; production with ephemeral or horizontally scaled API instances must move bytes to durable shared/object storage without changing reveal rules.
 
@@ -113,8 +113,8 @@ Migration `20260828000100_AddListingDetailsAndMedia` creates the two additive ta
 2. Resolves the broker from the authenticated user.
 3. Normalizes `RENTAL` to `RENT` and buy variants to `BUY`.
 4. Creates the canonical requirement with optional `budget_min`, `size_max`, `radius_km`, and `preferred_project_names`. Historical callers remain compatible: fixed budget is the default, one legacy locality is accepted, and a missing stored radius matches at 3 km.
-5. Invalidates unrevealed stale matches and queues a durable embedding job in the same transaction.
-6. Returns the queued job identity; a pipeline failure leaves the requirement saved and is retried asynchronously.
+5. Currently invokes targeted embedding and matching synchronously after its transaction commits.
+6. Returns `embeddingCompleted` and `matchCount`; a pipeline failure leaves the requirement saved and reports `embeddingCompleted: false`.
 
 Manual listing and requirement creation resolve the submitted/geocoded city, locality, latitude, and longitude into the canonical `master` catalogue in the same database transaction as inventory creation. Listings persist the resulting `MasterId`; requirements persist one to five resolved IDs in `PreferredLocalityIds`. Existing catalogue coordinates are retained, and missing catalogue rows are created under a transaction-level advisory lock.
 
@@ -134,8 +134,7 @@ The asynchronous job path is:
 
 ```text
 ListingsController or RequirementService
-  -> EmbeddingJobService -> embedding_jobs
-  -> EmbeddingJobWorker -> MatchingPipelineService
+  -> MatchingPipelineService
   -> FileProcessorHost (lazy reusable processor)
   -> processor /embed route
   -> VertexAiEmbeddingClient
@@ -145,8 +144,8 @@ ListingsController or RequirementService
 
 Key behavior:
 
-- Create and update endpoints commit inventory plus one queued job, then return immediately. `GET /api/v1/embedding-jobs/{jobId}` reports the current state; callers must not claim matching is complete until it reports `completed`.
-- A partial unique database index allows at most one queued job for a listing or requirement. A PostgreSQL advisory lock protects enqueue/retry decisions across API instances.
+- `embedding_jobs`, `EmbeddingJobWorker`, `GET /api/v1/embedding-jobs/{jobId}`, and the owner-authorized retry route exist, but the current manual listing/requirement create and update handlers have not yet been wired to enqueue them. They are therefore not the source of truth for those UI submissions today.
+- The partial unique database index allows at most one queued job for a listing or requirement once the manual handlers are wired to enqueue. A PostgreSQL advisory lock protects enqueue/retry decisions across API instances.
 - Only rows with `embedding IS NULL`, non-empty `raw_message_text`, and a non-deleted/non-closed status are selected.
 - Embedding text combines property type, transaction/listing type, and at most the first 300 characters of raw text.
 - Vertex AI uses a Google service account and the `RETRIEVAL_DOCUMENT` task type.
