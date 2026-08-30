@@ -19,6 +19,7 @@ repository and add these environment variables:
 | `ECS_CONTAINER_NAME` | Exact container name in the ECS task definition |
 | `HEALTH_CHECK_URL` | Production API base URL, without a trailing slash |
 | `AWS_GITHUB_DEPLOY_ROLE_ARN` | ARN of `github-propseekr-mobile-production-deploy` |
+| `AWS_SECRETS_MANAGER_CONFIG_NAME` | Name or ARN of the aggregate API runtime JSON secret |
 
 Protect `Main`: require pull requests, review, and passing status checks; block
 force pushes and direct developer pushes.
@@ -55,9 +56,67 @@ existing ECS task role and execution role. Do not use `AdministratorAccess`.
 
 ## Runtime secrets
 
-Keep database, JWT, payment, OTP, and email credentials in AWS Secrets Manager.
-Inject them into the ECS task definition. Rotate any credentials that have been
-committed to configuration files before enabling production deployment.
+Keep database, JWT, payment, OTP, Google service-account, and internal-service
+credentials in one AWS Secrets Manager JSON secret. The deployment script puts
+only its non-secret name into the task as `AWS__SecretsManagerConfigName`. At
+startup, the API reads the secret through the ECS task role; no secret values or
+long-lived AWS access keys are injected into the task definition.
+
+The task role needs only `secretsmanager:GetSecretValue` for the configured
+secret ARN (and `kms:Decrypt` for its KMS key when a customer-managed key is
+used). This permission belongs on the task role, not the task execution role.
+
+Use nested ASP.NET configuration keys in the secret:
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=...;Port=5432;Database=...;Username=...;Password=..."
+  },
+  "Jwt": { "Key": "..." },
+  "Razorpay": {
+    "KeyId": "...",
+    "KeySecret": "...",
+    "WebhookSecret": "..."
+  },
+  "Msg91": {
+    "AuthKey": "...",
+    "OtpTemplateId": "..."
+  },
+  "InternalService": { "ApiKey": "..." },
+  "FileProcessor": {
+    "OpenAiApiKey": "...",
+    "GoogleMapsApiKey": "...",
+    "GoogleApiKey": "...",
+    "GoogleServiceAccount": {
+      "Type": "service_account",
+      "ProjectId": "...",
+      "PrivateKeyId": "...",
+      "PrivateKey": "...",
+      "ClientEmail": "...",
+      "ClientId": "...",
+      "AuthUri": "https://accounts.google.com/o/oauth2/auth",
+      "TokenUri": "https://oauth2.googleapis.com/token",
+      "AuthProviderX509CertUrl": "https://www.googleapis.com/oauth2/v1/certs",
+      "ClientX509CertUrl": "...",
+      "UniverseDomain": "googleapis.com"
+    }
+  }
+}
+```
+
+Legacy flat names such as `DB_HOST`, `JWT_KEY`, `RAZORPAY_KEY_SECRET`, and
+`GOOGLE_PRIVATE_KEY` remain supported during migration. Nested keys are the
+canonical format. Rotate any credential that has previously appeared in source,
+logs, screenshots, or chat before production deployment.
+
+For local API execution, authenticate with an AWS CLI/SSO developer profile and
+set only `AWS__SecretsManagerConfigName`. Do not use `dotnet user-secrets`.
+
+The React Native app must never call Secrets Manager or contain backend secrets.
+It receives business data from the API. The Android Google Maps browser key is a
+public client identifier and must be supplied only at build time, restricted to
+the Android package name and signing certificate in Google Cloud.
 
 ## Operations
 

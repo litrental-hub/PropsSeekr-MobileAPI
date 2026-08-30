@@ -34,19 +34,9 @@ public class AmazonSesEmailService : IEmailService
         var regionName = _configuration["AWS:Region"] ?? _configuration["AWS:DefaultRegion"] ?? "ap-south-1";
         var region = RegionEndpoint.GetBySystemName(regionName);
 
-        var accessKey = _configuration["AWS:AccessKeyId"];
-        var secretKey = _configuration["AWS:SecretAccessKey"];
-
-        IAmazonSimpleEmailService client;
-        if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
-        {
-            client = new AmazonSimpleEmailServiceClient(accessKey, secretKey, region);
-        }
-        else
-        {
-            // IAM Role or Default AWS Credentials Chain
-            client = new AmazonSimpleEmailServiceClient(region);
-        }
+        // ECS provides short-lived task-role credentials through the AWS SDK's
+        // default credential chain. Never load or distribute static AWS keys.
+        IAmazonSimpleEmailService client = new AmazonSimpleEmailServiceClient(region);
 
         using (client)
         {
