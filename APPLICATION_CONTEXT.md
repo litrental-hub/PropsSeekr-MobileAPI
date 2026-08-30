@@ -31,7 +31,7 @@ Broker account -> broker identity -> listing or requirement
 - Local HTTP profile: `http://localhost:5150`; container port: `8080`.
 - Database migrations do not run at startup unless `Database:ApplyMigrationsOnStartup` is explicitly enabled.
 
-`Program.cs` is the composition root. It loads optional Secrets Manager configuration, bridges `FileProcessor:*` settings into the environment names expected by the processor, configures the database, registers services, configures authentication/authorization, and exposes controllers plus `/hello`.
+`Program.cs` is the composition root. In every non-development server environment it requires and loads the JSON configuration secret named by `AWS:SecretsManagerConfigName`, using the ECS task role/default AWS credential chain. It bridges `FileProcessor:*` settings into the environment names expected by the processor, configures the database, registers services, configures authentication/authorization, and exposes controllers plus `/hello`. The project does not use .NET Secret Manager or static AWS access keys.
 
 ## Identity and authorization
 

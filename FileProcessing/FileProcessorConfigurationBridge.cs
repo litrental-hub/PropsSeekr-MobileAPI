@@ -5,7 +5,8 @@ namespace PropSeekr.FileProcessing;
 /// <summary>
 /// Makes ASP.NET Core's FileProcessor configuration available to the unchanged
 /// Lambda implementation, which reads these names from environment variables.
-/// Deployment environment variables still take precedence.
+/// AWS Secrets Manager is added as the final configuration provider on the
+/// server, so these bridged values are authoritative there.
 /// </summary>
 public static class FileProcessorConfigurationBridge
 {
@@ -42,12 +43,25 @@ public static class FileProcessorConfigurationBridge
 
     public static void Apply(IConfiguration configuration)
     {
+        var awsSecretsLoaded = configuration.GetValue<bool>(
+            PropSeekr.Configuration.AwsSecretsConfigurationLoader.SecretsLoadedKey);
+
         foreach (var (setting, environmentVariable) in Mappings)
         {
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(environmentVariable)))
-                continue;
-
             var value = configuration[$"FileProcessor:{setting}"];
+
+            if (!awsSecretsLoaded &&
+                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(environmentVariable)))
+            {
+                continue;
+            }
+
+            if (awsSecretsLoaded && string.IsNullOrWhiteSpace(value))
+            {
+                Environment.SetEnvironmentVariable(environmentVariable, null);
+                continue;
+            }
+
             if (!string.IsNullOrWhiteSpace(value))
                 Environment.SetEnvironmentVariable(environmentVariable, value);
         }

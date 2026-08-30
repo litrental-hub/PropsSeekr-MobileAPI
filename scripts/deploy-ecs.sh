@@ -10,11 +10,12 @@ echo "========================================"
 : "${ECS_SERVICE:?ECS_SERVICE is required}"
 : "${ECS_CONTAINER_NAME:?ECS_CONTAINER_NAME is required}"
 : "${IMAGE_URI:?IMAGE_URI is required}"
+: "${AWS_SECRETS_MANAGER_CONFIG_NAME:?AWS_SECRETS_MANAGER_CONFIG_NAME is required}"
 
 readonly HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-/hello}"
 readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-10}"
 readonly ECS_TASK_ROLE_ARN="${ECS_TASK_ROLE_ARN:-arn:aws:iam::307869868474:role/MobileApiEcsTaskRole}"
-readonly AWS_SECRETS_MANAGER_CONFIG_NAME="${AWS_SECRETS_MANAGER_CONFIG_NAME:-dev_test}"
+readonly AWS_SECRETS_MANAGER_CONFIG_NAME
 
 service_updated=false
 previous_task_definition=""

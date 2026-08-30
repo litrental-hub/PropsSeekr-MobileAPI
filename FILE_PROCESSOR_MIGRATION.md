@@ -26,7 +26,7 @@ The pipeline call has a ten-minute client timeout because extraction and embeddi
 
 ## Configuration
 
-`appsettings.json` contains an intentionally empty `FileProcessor` schema. Do not commit credentials. Set production secrets using environment variables with the original Lambda names (`OPENAI_API_KEY`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, `S3_BUCKET_NAME`, and optional Google/Gemini keys), or use the corresponding `FileProcessor:*` user-secret settings locally. Environment variables take precedence.
+`appsettings.json` contains an intentionally empty `FileProcessor` secret schema. Do not commit credentials and do not use .NET Secret Manager. Server runtime secrets are loaded from the JSON secret named by `AWS__SecretsManagerConfigName`; ECS supplies AWS credentials through its task role. The loader accepts nested `FileProcessor:*` settings as well as the original Lambda names (`OPENAI_API_KEY`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, `S3_BUCKET_NAME`, and Google/Gemini keys). Local development uses the same AWS secret through the developer's AWS profile and `AWS__SecretsManagerConfigName` environment variable.
 
 Embeddings use the configured Google service account with Vertex AI's `gemini-embedding-001` model. `FileProcessor:EmbeddingDimensions` defaults to 1536 to match the current pgvector columns, and `FileProcessor:VertexLocation` defaults to `us-central1`. The legacy file-extraction chat fallback still uses `OPENAI_API_KEY` and `gpt-4o-mini`; ordinary listing and requirement embedding no longer depends on OpenAI.
 

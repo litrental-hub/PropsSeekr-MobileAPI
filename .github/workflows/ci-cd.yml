@@ -93,6 +93,7 @@ jobs:
           ECS_SERVICE: ${{ vars.ECS_SERVICE }}
           ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
           HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
+          AWS_SECRETS_MANAGER_CONFIG_NAME: ${{ vars.AWS_SECRETS_MANAGER_CONFIG_NAME }}
         run: |
           set -euo pipefail
 
@@ -128,6 +129,11 @@ jobs:
             exit 1
           }
 
+          test -n "${AWS_SECRETS_MANAGER_CONFIG_NAME}" || {
+            echo "ERROR: AWS_SECRETS_MANAGER_CONFIG_NAME is missing"
+            exit 1
+          }
+
           echo "Deployment variables are valid."
 
       - name: Deploy and verify
@@ -139,5 +145,5 @@ jobs:
           IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
           HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
           HEALTH_CHECK_PATH: /hello
-          AWS_SECRETS_MANAGER_CONFIG_NAME: ${{ vars.AWS_SECRETS_MANAGER_CONFIG_NAME || 'dev_test' }}
+          AWS_SECRETS_MANAGER_CONFIG_NAME: ${{ vars.AWS_SECRETS_MANAGER_CONFIG_NAME }}
         run: bash scripts/deploy-ecs.sh
