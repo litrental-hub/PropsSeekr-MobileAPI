@@ -632,6 +632,15 @@ namespace propseekr_file_processor
         {
             if (string.IsNullOrWhiteSpace(fileName)) return null;
 
+            // The local API upload flow stores development imports in this
+            // directory. Checking it first avoids a recursive workspace scan.
+            var localBulkImportDirectory = Environment.GetEnvironmentVariable("LOCAL_BULK_IMPORT_DIRECTORY");
+            if (!string.IsNullOrWhiteSpace(localBulkImportDirectory))
+            {
+                var localBulkImportPath = Path.Combine(localBulkImportDirectory, fileName);
+                if (File.Exists(localBulkImportPath)) return localBulkImportPath;
+            }
+
             // 1. Check current directory & parent directories
             var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
             while (currentDir != null)
@@ -713,5 +722,4 @@ namespace propseekr_file_processor
         }
     }
 }
-
 

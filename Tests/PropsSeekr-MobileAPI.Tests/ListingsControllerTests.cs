@@ -90,6 +90,33 @@ public sealed class ListingsControllerTests
         Assert.Equal(403, forbidden.StatusCode);
     }
 
+    [Fact]
+    public async Task PatchListing_PersistsExplicitAvailability()
+    {
+        await using var db = EmptyDbContext();
+        db.Listings.Add(new Listing
+        {
+            Id = 10,
+            BrokerId = 42,
+            PropertyType = "Apartment",
+            IsAvailable = true
+        });
+        await db.SaveChangesAsync();
+
+        var controller = Controller(
+            db,
+            new StubBrokerIdentityService(42),
+            new CapturingBrokerListingsService(),
+            Guid.NewGuid());
+
+        var result = await controller.PatchListing(
+            10,
+            new CreateListingRequestDto { IsAvailable = false });
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.False((await db.Listings.SingleAsync(item => item.Id == 10)).IsAvailable);
+    }
+
     private static ListingsController Controller(
         AppDbContext db,
         IBrokerIdentityService brokerIdentity,

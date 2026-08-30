@@ -11,6 +11,8 @@ public class Match
     public int ListingBrokerId { get; set; }
     public int RequirementBrokerId { get; set; }
     public decimal? MatchScore { get; set; }
+    public string? MatchTier { get; set; }
+    public string? ScoreBreakdownJson { get; set; }
     public string? Status { get; set; }
     public string State { get; set; } = "matched";
     public DateTime? CreatedAt { get; set; }

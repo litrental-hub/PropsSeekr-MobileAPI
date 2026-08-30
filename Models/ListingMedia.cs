@@ -37,4 +37,6 @@ public sealed class ListingMedia
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; }
+
+    public Listing? Listing { get; set; }
 }

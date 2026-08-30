@@ -93,20 +93,16 @@ public class AmazonSesEmailService : IEmailService
                     ex.ErrorCode,
                     ex.Message);
 
-                // For local development or sandbox fallback, do not crash if AWS SES is unconfigured
-                if (ex.ErrorCode == "InvalidAccessKeyId" || ex.ErrorCode == "UnrecognizedClientException" || ex.ErrorCode == "MessageRejected")
-                {
-                    _logger.LogInformation("AWS SES is unconfigured or in Sandbox. Email fallback logged for {Recipient}", recipientEmail);
-                    return;
-                }
-
-                throw;
+                throw new InvalidOperationException(
+                    "Email delivery is temporarily unavailable. Please try again.",
+                    ex);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to deliver transactional email to {Recipient} via Amazon SES.", recipientEmail);
-                // Graceful fallback for local development without AWS credentials
-                _logger.LogInformation("Local Email Fallback for {Recipient}: Subject='{Subject}'", recipientEmail, subject);
+                throw new InvalidOperationException(
+                    "Email delivery is temporarily unavailable. Please try again.",
+                    ex);
             }
         }
     }

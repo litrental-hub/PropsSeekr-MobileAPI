@@ -2,6 +2,11 @@ using PropSeekr.DTOs.Search;
 using PropSeekr.Services;
 using PropSeekr.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+using Amazon.Lambda.APIGatewayEvents;
+using PropSeekr.FileProcessing;
+using propseekr_file_processor;
 using System.Text.Json;
 using Xunit;
 
@@ -127,6 +132,39 @@ public sealed class SearchPropertyLiveSmokeTests
         Assert.All(demand.Requirements, result => Assert.InRange(result.DistanceKm!.Value, 0, 5));
     }
 
+    [LiveSearchFact]
+    public async Task ConfiguredDatabase_AcceptsCanonicalFileProcessorMatchesQuery()
+    {
+        var appSettingsPath = FindAppSettings();
+        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(appSettingsPath));
+        var connectionString = document.RootElement
+            .GetProperty("ConnectionStrings")
+            .GetProperty("DefaultConnection")
+            .GetString();
+        Assert.False(string.IsNullOrWhiteSpace(connectionString));
+
+        var service = new MatchesApiService(connectionString!);
+        var response = await service.HandleGetMatchesAsync(
+            new APIGatewayProxyRequest
+            {
+                Path = "/matches",
+                HttpMethod = "GET",
+                QueryStringParameters = new Dictionary<string, string>
+                {
+                    ["page"] = "1",
+                    ["size"] = "5"
+                }
+            },
+            new RestLambdaContext(
+                NullLogger.Instance,
+                new DefaultHttpContext()));
+
+        Assert.True(response.StatusCode == 200, response.Body);
+        using var payload = JsonDocument.Parse(response.Body);
+        Assert.True(payload.RootElement.TryGetProperty("matches", out _));
+        Assert.True(payload.RootElement.TryGetProperty("pagination", out _));
+    }
+
     private static string FindAppSettings()
     {
         DirectoryInfo? directory = new(AppContext.BaseDirectory);
@@ -217,13 +255,15 @@ public sealed class SearchPropertyServiceIntegrationTests : IAsyncLifetime
             listing_type text, property_type text, configuration text, price numeric, price_unit text,
             size numeric, furnishing text, facing text, floor_number integer, status text, expires_at timestamptz,
             project_name text, road_info text, created_at timestamptz, updated_at timestamptz,
-            last_refreshed_at timestamptz, freshness_category text, city text);
+            last_refreshed_at timestamptz, freshness_category text, city text,
+            isavailable boolean NOT NULL DEFAULT true);
         CREATE TABLE requirements (
             requirementid integer PRIMARY KEY, broker_id integer, raw_message_text text, requirement_type text,
             property_type text, configurations text[], preferred_locality_ids integer[], budget numeric,
             budget_unit text, size numeric, furnishing_pref text, facing_pref text, status text,
             expires_at timestamptz, created_at timestamptz, updated_at timestamptz,
-            last_confirmed_at timestamptz, freshness_category text, city text);
+            last_confirmed_at timestamptz, freshness_category text, city text,
+            isavailable boolean NOT NULL DEFAULT true);
         """);
 
     private static Task SeedAsync(AppDbContext db) => db.Database.ExecuteSqlRawAsync("""
@@ -233,15 +273,19 @@ public sealed class SearchPropertyServiceIntegrationTests : IAsyncLifetime
         INSERT INTO brokers VALUES (1, 'Nearby Broker', 'Vijay Nagar', 'Nearby Realty');
         INSERT INTO listings VALUES
             (10, 1, 1, 'Real nearby rental', 'RENT', 'APARTMENT', '2BHK', 14000, 'MONTHLY', 950,
-             'SEMI-FURNISHED', 'WEST', 2, 'ACTIVE', NULL, 'Real Project', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore'),
+             'SEMI-FURNISHED', 'WEST', 2, 'ACTIVE', NULL, 'Real Project', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', true),
             (11, 1, 2, 'Outside radius rental', 'RENT', 'APARTMENT', '2BHK', 16000, 'MONTHLY', 1000,
-             NULL, NULL, NULL, 'ACTIVE', NULL, NULL, NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore'),
+             NULL, NULL, NULL, 'ACTIVE', NULL, NULL, NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', true),
             (12, 1, 1, 'Nearby sale', 'SELL', 'APARTMENT', '2BHK', 5000000, 'TOTAL', 1000,
-             NULL, NULL, NULL, 'ACTIVE', NULL, NULL, NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore');
+             NULL, NULL, NULL, 'ACTIVE', NULL, NULL, NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', true),
+            (13, 1, 1, 'Unavailable nearby rental', 'RENT', 'APARTMENT', '2BHK', 13000, 'MONTHLY', 900,
+             NULL, NULL, NULL, 'ACTIVE', NULL, NULL, NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', false);
         INSERT INTO requirements VALUES
             (20, 1, 'Real nearby rental requirement', 'RENT', 'APARTMENT', ARRAY['2BHK'], ARRAY[1], 15000,
-             'MONTHLY', 900, NULL, NULL, 'ACTIVE', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore'),
+             'MONTHLY', 900, NULL, NULL, 'ACTIVE', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', true),
             (21, 1, 'Nearby buy requirement', 'BUY', 'APARTMENT', ARRAY['2BHK'], ARRAY[1], 5000000,
-             'TOTAL', 900, NULL, NULL, 'ACTIVE', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore');
+             'TOTAL', 900, NULL, NULL, 'ACTIVE', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', true),
+            (22, 1, 'Unavailable nearby rental requirement', 'RENT', 'APARTMENT', ARRAY['2BHK'], ARRAY[1], 15000,
+             'MONTHLY', 900, NULL, NULL, 'ACTIVE', NULL, NOW(), NOW(), NOW(), 'FRESH', 'Indore', false);
         """);
 }

@@ -46,6 +46,10 @@ public sealed class MatchConnectionRequest
 
     [Column("expires_at")]
     public DateTime ExpiresAt { get; set; }
+
+    public Match? Match { get; set; }
+    public Broker? RequestingBroker { get; set; }
+    public Broker? ReceivingBroker { get; set; }
 }
 
 public static class ConnectionRequestStatuses

@@ -17,6 +17,7 @@ public class BrokerNotification
 
     [Column("connection_request_id")]
     public long? ConnectionRequestId { get; set; }
+    public MatchConnectionRequest? ConnectionRequest { get; set; }
 
     [Required]
     [MaxLength(50)]

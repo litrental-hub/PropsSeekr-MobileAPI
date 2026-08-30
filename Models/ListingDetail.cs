@@ -22,4 +22,6 @@ public sealed class ListingDetail
 
     [Column("updated_at")]
     public DateTime UpdatedAt { get; set; }
+
+    public Listing? Listing { get; set; }
 }

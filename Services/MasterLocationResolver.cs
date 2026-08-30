@@ -45,7 +45,14 @@ public static class MasterLocationResolver
                 SET lat = COALESCE(lat, @lat),
                     lng = COALESCE(lng, @lng),
                     city = COALESCE(NULLIF(city, ''), @city),
-                    area = COALESCE(NULLIF(area, ''), @locality)
+                    area = COALESCE(NULLIF(area, ''), @locality),
+                    geocoding_status = 'verified',
+                    geocoding_provider = 'user',
+                    location_precision = 'USER_SELECTED',
+                    geocoding_confidence = 1.0,
+                    geocoded_at = NOW(),
+                    geocoding_error = NULL,
+                    review_required = FALSE
                 WHERE masterid = (
                     SELECT masterid
                     FROM public.master
@@ -68,9 +75,12 @@ public static class MasterLocationResolver
         await using var insertCommand = connection.CreateCommand();
         insertCommand.Transaction = currentTransaction.GetDbTransaction();
         insertCommand.CommandText = """
-            INSERT INTO public.master (masterid, area, city, lat, lng)
-            SELECT COALESCE(MAX(masterid), 0) + 1, @locality, @city, @lat, @lng
-            FROM public.master
+            INSERT INTO public.master (
+                area, city, lat, lng, geocoding_status, geocoding_provider,
+                location_precision, geocoding_confidence, geocoded_at, review_required)
+            VALUES (
+                @locality, @city, @lat, @lng, 'verified', 'user',
+                'USER_SELECTED', 1.0, NOW(), FALSE)
             RETURNING masterid;
             """;
         AddParameter(insertCommand, "@city", city.Trim());

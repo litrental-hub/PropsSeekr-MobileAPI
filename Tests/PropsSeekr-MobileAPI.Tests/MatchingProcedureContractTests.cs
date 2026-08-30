@@ -15,6 +15,8 @@ public sealed class MatchingProcedureContractTests
         Assert.Contains("preferred.distance_km <= r.radius_km", ProcedureSql);
         Assert.Contains("l.normalized_price <= r.normalized_budget * 1.10", ProcedureSql);
         Assert.Contains("REGEXP_REPLACE(UPPER(BTRIM(required_configuration))", ProcedureSql);
+        Assert.Contains("locality_geocoding_status IN ('resolved', 'verified')", ProcedureSql);
+        Assert.Contains("pm.geocoding_status, ''), 'pending') IN ('resolved', 'verified')", ProcedureSql);
     }
 
     [Fact]

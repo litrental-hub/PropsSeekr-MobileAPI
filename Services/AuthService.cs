@@ -4,11 +4,13 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Npgsql;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Models;
 using PropSeekr.Services.Interfaces;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using System.Net.Sockets;
 
 namespace PropSeekr.Services;
 
@@ -21,21 +23,24 @@ public class AuthService : IAuthService
     private readonly AppDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly IOtpDeliveryService _otpDeliveryService;
-    private readonly IServiceProvider _serviceProvider;
+    private readonly IEmailOtpService _emailOtpService;
     private readonly IBrokerIdentityService _brokerIdentityService;
+    private readonly IHostEnvironment _hostEnvironment;
 
     public AuthService(
         AppDbContext dbContext,
         IConfiguration configuration,
         IOtpDeliveryService otpDeliveryService,
-        IServiceProvider serviceProvider,
-        IBrokerIdentityService brokerIdentityService)
+        IEmailOtpService emailOtpService,
+        IBrokerIdentityService brokerIdentityService,
+        IHostEnvironment hostEnvironment)
     {
         _dbContext = dbContext;
         _configuration = configuration;
         _otpDeliveryService = otpDeliveryService;
-        _serviceProvider = serviceProvider;
+        _emailOtpService = emailOtpService;
         _brokerIdentityService = brokerIdentityService;
+        _hostEnvironment = hostEnvironment;
     }
 
     public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
@@ -59,6 +64,7 @@ public class AuthService : IAuthService
         await using var transaction = await _dbContext.Database.BeginTransactionAsync();
 
         var passwordHash = HashPassword(password);
+        var bypassVerification = IsLocalRegistrationVerificationBypassed();
 
         var user = new User
         {
@@ -76,8 +82,8 @@ public class AuthService : IAuthService
             PanCard = panCard,
             GSTNumber = gstNumber,
             ReraRegistrationNumber = reraRegistrationNumber,
-            IsMobileVerified = false,
-            IsEmailVerified = false,
+            IsMobileVerified = bypassVerification,
+            IsEmailVerified = bypassVerification,
             CreatedDate = DateTime.UtcNow,
             ModifiedDate = DateTime.UtcNow
         };
@@ -86,36 +92,25 @@ public class AuthService : IAuthService
         await _dbContext.SaveChangesAsync();
         await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
 
-        await CreateOtpAsync(mobile, "Registration successful. OTP verification is pending.");
+        if (!bypassVerification)
+        {
+            await _emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
+            {
+                Email = email,
+                Purpose = "EmailVerification"
+            }, clientIp: null);
+        }
 
         await transaction.CommitAsync();
-
-        // Automatically trigger Email OTP in the background
-        var serviceProvider = _serviceProvider;
-        _ = Task.Run(async () =>
-        {
-            using (var scope = serviceProvider.CreateScope())
-            {
-                try
-                {
-                    var emailOtpService = scope.ServiceProvider.GetRequiredService<IEmailOtpService>();
-                    await emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
-                    {
-                        Email = email,
-                        Purpose = "EmailVerification"
-                    }, clientIp: null);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[Email Error] Failed to send registration email to {email}: {ex}");
-                }
-            }
-        });
 
         return new RegisterResponseDto
         {
             UserId = user.Id,
-            Message = "Registration successful. OTP verification is pending."
+            VerificationRequired = !bypassVerification,
+            VerificationChannel = bypassVerification ? null : "email",
+            Message = bypassVerification
+                ? "Registration successful. Local verification was bypassed."
+                : "Registration successful. A verification code was sent to your email."
         };
     }
 
@@ -126,11 +121,7 @@ public class AuthService : IAuthService
 
         // Every identity lives in Users. Roles determine authorization after
         // a successful login; they do not select a different login workflow.
-        var user = await _dbContext.Users.FirstOrDefaultAsync(u =>
-            u.IsActive &&
-            ((u.UserName != null && u.UserName.ToLower() == identifier) ||
-             (u.MobileNumber != null && u.MobileNumber == identifier) ||
-             (u.Email != null && u.Email.ToLower() == identifier)));
+        var user = await FindActiveUserWithRetryAsync(identifier);
 
         if (user == null || !VerifyPassword(password, user.PasswordHash))
         {
@@ -138,6 +129,11 @@ public class AuthService : IAuthService
         }
 
         var role = NormalizeRole(user.Role);
+        if (role != "Admin" && !IsLocalRegistrationVerificationBypassed() && !user.IsEmailVerified)
+        {
+            throw new Exception("Email verification is required before login.");
+        }
+
         var token = GenerateJwtToken(user, out var expiresAt, role);
         var refreshToken = GenerateRefreshToken();
 
@@ -157,9 +153,46 @@ public class AuthService : IAuthService
                 MobileNumber = user.MobileNumber ?? string.Empty,
                 Email = user.Email,
                 IsMobileVerified = user.IsMobileVerified,
+                IsEmailVerified = user.IsEmailVerified,
                 Role = role
             }
         };
+    }
+
+    private bool IsLocalRegistrationVerificationBypassed() =>
+        _hostEnvironment.IsDevelopment() &&
+        _configuration.GetValue<bool>("Auth:BypassRegistrationVerification");
+
+    private async Task<User?> FindActiveUserWithRetryAsync(string identifier)
+    {
+        const int maximumAttempts = 3;
+
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await _dbContext.Users.FirstOrDefaultAsync(u =>
+                    u.IsActive &&
+                    ((u.UserName != null && u.UserName.ToLower() == identifier) ||
+                     (u.MobileNumber != null && u.MobileNumber == identifier) ||
+                     (u.Email != null && u.Email.ToLower() == identifier)));
+            }
+            catch (Exception ex) when (attempt < maximumAttempts && IsDatabaseConnectivityFailure(ex))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt));
+            }
+        }
+    }
+
+    private static bool IsDatabaseConnectivityFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is NpgsqlException or SocketException or TimeoutException)
+                return true;
+        }
+
+        return false;
     }
 
     public async Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request)

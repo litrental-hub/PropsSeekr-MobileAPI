@@ -1,8 +1,8 @@
 // ============================================================
 // FILE: MatchesApiService.cs
 // ============================================================
-// Uses fn_get_filtered_matches PostgreSQL function for filtered queries.
-// Keeps legacy broker/listing/requirement filters for backward compatibility.
+// Queries the canonical matches/listings/requirements tables directly.
+// Keeps legacy broker/listing/requirement query parameters for compatibility.
 //
 // NEW FILTER PARAMETERS:
 //   GET /matches?listingType=SELL,RENT
@@ -51,6 +51,9 @@ namespace propseekr_file_processor
                 string[]? requirementTypes = GetStringArray(q, "requirementType");
                 string[]? matchStatuses = GetStringArray(q, "matchStatus");
                 string[]? locations = GetStringArray(q, "locations");
+                listingTypes = ToUpperInvariant(listingTypes);
+                requirementTypes = ToUpperInvariant(requirementTypes);
+                matchStatuses = ToUpperInvariant(matchStatuses);
                 decimal? minBudget = GetNullableDecimal(q, "minBudget");
                 decimal? maxBudget = GetNullableDecimal(q, "maxBudget");
                 string? searchText = GetString(q, "searchText");
@@ -92,7 +95,12 @@ namespace propseekr_file_processor
         }
 
         // ─────────────────────────────────────────────────────
-        //  FILTERED MATCHES (uses fn_get_filtered_matches)
+        //  FILTERED MATCHES
+        //
+        //  The old database exposed several incompatible overloads of
+        //  fn_get_filtered_matches and the canonical v2 database intentionally
+        //  does not install them. Keep this compatibility endpoint independent
+        //  of those legacy routines by querying canonical tables directly.
         // ─────────────────────────────────────────────────────
 
         private static async Task<MatchesResponse> QueryFilteredMatches(
@@ -101,9 +109,84 @@ namespace propseekr_file_processor
             string[]? matchStatuses, string[]? locations,
             decimal? minBudget, decimal? maxBudget, string? searchText)
         {
-            await using var cmd = new NpgsqlCommand(
-                "SELECT * FROM fn_get_filtered_matches(@p_page, @p_size, @p_listing_types, @p_requirement_types, @p_match_statuses, @p_locations, @p_min_budget, @p_max_budget, @p_search_text)",
-                conn);
+            await using var cmd = new NpgsqlCommand(@"
+                SELECT
+                    CASE
+                        WHEN COALESCE(m.match_score, 0) >= 80 THEN 'Excellent Match'
+                        WHEN COALESCE(m.match_score, 0) >= 60 THEN 'Good Match'
+                        ELSE 'Fair Match'
+                    END AS match_quality,
+                    ROUND(COALESCE(m.match_score, 0))::integer AS score_pct,
+                    CASE UPPER(COALESCE(l.listing_type, ''))
+                        WHEN 'SELL' THEN 'For Sale'
+                        WHEN 'RENT' THEN 'For Rent'
+                        WHEN 'RENTAL' THEN 'For Rent'
+                        WHEN 'LEASE' THEN 'For Lease'
+                        ELSE COALESCE(l.listing_type, '-')
+                    END AS property_for,
+                    COALESCE(l.property_type, '-') AS property_type,
+                    COALESCE(l.configuration, '-') AS config,
+                    COALESCE(l.price::text || NULLIF(' ' || COALESCE(l.price_unit, ''), ' '), '-') AS property_price,
+                    COALESCE(l.size::text || ' sqft', '-') AS property_size,
+                    COALESCE(listing_locality.area, '-') AS property_location,
+                    COALESCE(listing_locality.city, l.city, '-') AS property_city,
+                    COALESCE(listing_broker.name, '-') AS seller_broker,
+                    COALESCE(listing_broker.phone_number, '-') AS seller_phone,
+                    COALESCE(l.group_name, '-') AS listing_group_name,
+                    COALESCE(l.message_datetime::text, '-') AS listing_message_datetime,
+                    COALESCE(l.raw_message_text, '-') AS listing_raw_text,
+                    CASE UPPER(COALESCE(r.requirement_type, ''))
+                        WHEN 'BUY' THEN 'Looking to Buy'
+                        WHEN 'RENT' THEN 'Looking to Rent'
+                        WHEN 'RENTAL' THEN 'Looking to Rent'
+                        WHEN 'LEASE' THEN 'Looking to Lease'
+                        ELSE COALESCE(r.requirement_type, '-')
+                    END AS looking_for,
+                    COALESCE(r.property_type, '-') AS buyer_wants,
+                    COALESCE(r.budget::text || NULLIF(' ' || COALESCE(r.budget_unit, ''), ' '), '-') AS buyer_budget,
+                    COALESCE(r.size::text || ' sqft', '-') AS buyer_size,
+                    COALESCE(requirement_locality.area, '-') AS buyer_location,
+                    COALESCE(requirement_locality.city, r.city, '-') AS buyer_city,
+                    COALESCE(requirement_broker.name, '-') AS buyer_broker,
+                    COALESCE(requirement_broker.phone_number, '-') AS buyer_phone,
+                    COALESCE(r.group_name, '-') AS requirement_group_name,
+                    COALESCE(r.message_datetime::text, '-') AS requirement_message_datetime,
+                    COALESCE(r.raw_message_text, '-') AS requirement_raw_text,
+                    COALESCE(m.score_breakdown->>'location_score', '-') AS location_match,
+                    COALESCE(m.score_breakdown->>'price_score', '-') AS price_match,
+                    COALESCE(m.score_breakdown->>'size_score', '-') AS size_match,
+                    COUNT(*) OVER() AS total_matches,
+                    @p_page::integer AS current_page,
+                    CEIL(COUNT(*) OVER()::numeric / @p_size)::integer AS total_pages
+                FROM matches m
+                JOIN listings l ON l.listingid = m.listing_id
+                JOIN requirements r ON r.requirementid = m.requirement_id
+                JOIN brokers listing_broker ON listing_broker.brokerid = m.listing_broker_id
+                JOIN brokers requirement_broker ON requirement_broker.brokerid = m.requirement_broker_id
+                LEFT JOIN master listing_locality ON listing_locality.masterid = l.master_id
+                LEFT JOIN master requirement_locality ON requirement_locality.masterid = r.preferred_locality_ids[1]
+                WHERE UPPER(COALESCE(m.status, '')) = 'MATCHED'
+                  AND l.isavailable
+                  AND r.isavailable
+                  AND (@p_listing_types IS NULL OR UPPER(COALESCE(l.listing_type, '')) = ANY(@p_listing_types))
+                  AND (@p_requirement_types IS NULL OR UPPER(COALESCE(r.requirement_type, '')) = ANY(@p_requirement_types))
+                  AND (@p_match_statuses IS NULL OR UPPER(COALESCE(m.status, '')) = ANY(@p_match_statuses))
+                  AND (@p_locations IS NULL OR EXISTS (
+                      SELECT 1 FROM unnest(@p_locations) requested_location
+                      WHERE LOWER(COALESCE(listing_locality.area, '')) = LOWER(requested_location)
+                         OR LOWER(COALESCE(requirement_locality.area, '')) = LOWER(requested_location)
+                         OR LOWER(COALESCE(listing_locality.city, l.city, '')) = LOWER(requested_location)
+                         OR LOWER(COALESCE(requirement_locality.city, r.city, '')) = LOWER(requested_location)))
+                  AND (@p_min_budget IS NULL OR COALESCE(l.price, r.budget) >= @p_min_budget)
+                  AND (@p_max_budget IS NULL OR COALESCE(l.price, r.budget) <= @p_max_budget)
+                  AND (@p_search_text IS NULL OR CONCAT_WS(' ',
+                      l.raw_message_text, l.property_type, l.configuration, l.project_name,
+                      r.raw_message_text, r.property_type, array_to_string(r.configurations, ' '),
+                      listing_locality.area, requirement_locality.area,
+                      listing_locality.city, requirement_locality.city) ILIKE '%' || @p_search_text || '%')
+                ORDER BY m.match_score DESC NULLS LAST, m.matchid DESC
+                OFFSET ((@p_page - 1) * @p_size)
+                LIMIT @p_size", conn);
 
             cmd.Parameters.AddWithValue("p_page", page);
             cmd.Parameters.AddWithValue("p_size", size);
@@ -120,9 +203,14 @@ namespace propseekr_file_processor
             var locParam = cmd.Parameters.Add("p_locations", NpgsqlDbType.Array | NpgsqlDbType.Text);
             locParam.Value = (object?)locations ?? DBNull.Value;
 
-            cmd.Parameters.AddWithValue("p_min_budget", (object?)minBudget ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("p_max_budget", (object?)maxBudget ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("p_search_text", (object?)searchText ?? DBNull.Value);
+            var minBudgetParam = cmd.Parameters.Add("p_min_budget", NpgsqlDbType.Numeric);
+            minBudgetParam.Value = (object?)minBudget ?? DBNull.Value;
+
+            var maxBudgetParam = cmd.Parameters.Add("p_max_budget", NpgsqlDbType.Numeric);
+            maxBudgetParam.Value = (object?)maxBudget ?? DBNull.Value;
+
+            var searchTextParam = cmd.Parameters.Add("p_search_text", NpgsqlDbType.Text);
+            searchTextParam.Value = (object?)searchText ?? DBNull.Value;
 
             cmd.CommandTimeout = 120;
 
@@ -560,6 +648,9 @@ namespace propseekr_file_processor
             var arr = v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             return arr.Length > 0 ? arr : null;
         }
+
+        private static string[]? ToUpperInvariant(string[]? values) =>
+            values?.Select(value => value.ToUpperInvariant()).ToArray();
 
         private static object BuildPagination(int page, int size, long total) => new
         {

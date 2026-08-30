@@ -336,7 +336,11 @@ public class RequirementService : IRequirementService
                 UpdatedAt = DateTime.UtcNow,
                 FreshnessUpdatedAt = DateTime.UtcNow,
                 City = preferredLocations[0].City.Trim(),
-                PostedBy = "BROKER"
+                LocationResolutionStatus = "verified",
+                LocationResolutionNote = "Coordinates selected by the user.",
+                LocationResolvedAt = DateTime.UtcNow,
+                PostedBy = "BROKER",
+                IsAvailable = request.IsAvailable ?? true
             };
 
             _dbContext.Requirements.Add(requirement);
@@ -461,6 +465,11 @@ public class RequirementService : IRequirementService
         requirement.FurnishingPref = InventoryNormalization.Furnishing(request.FurnishingPreference);
         requirement.FacingPref = InventoryNormalization.Facing(request.FacingPreference);
         requirement.City = preferredLocations[0].City.Trim();
+        requirement.LocationResolutionStatus = "verified";
+        requirement.LocationResolutionNote = "Coordinates selected by the user.";
+        requirement.LocationResolvedAt = DateTime.UtcNow;
+        if (request.IsAvailable.HasValue)
+            requirement.IsAvailable = request.IsAvailable.Value;
         requirement.UpdatedAt = DateTime.UtcNow;
 
         _dbContext.Requirements.Update(requirement);

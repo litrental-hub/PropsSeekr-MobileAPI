@@ -76,7 +76,8 @@ namespace propseekr_file_processor
             _s3Client = s3Client;
             _sqsQueueUrl = Environment.GetEnvironmentVariable("SQS_QUEUE_URL") ?? "";
             _geocoder = new GeocodingService();
-            _defaultCity = Environment.GetEnvironmentVariable("DEFAULT_CITY") ?? "Indore";
+            _defaultCity = CityExtractor.NormalizeDefaultCity(
+                Environment.GetEnvironmentVariable("DEFAULT_CITY"));
         }
 
         // ─────────────────────────────────────────────────────
@@ -100,6 +101,9 @@ namespace propseekr_file_processor
 
                 using var jdoc = JsonDocument.Parse(body);
                 var root = jdoc.RootElement;
+                var defaultCity = root.TryGetProperty("default_city", out var cityElement)
+                    ? CityExtractor.NormalizeDefaultCity(cityElement.GetString())
+                    : _defaultCity;
 
                 // Option 1: S3 reference — read JSON file from S3
                 if (root.TryGetProperty("bucket", out var bEl) &&
@@ -158,15 +162,34 @@ namespace propseekr_file_processor
                 // Check if this S3 file was already processed (skip duplicates)
                 if (s3Bucket != null && s3Key != null)
                 {
-                    if (await IsAlreadyProcessed(conn, s3Bucket, s3Key))
+                    var processedResult = await GetProcessedFileResult(conn, s3Bucket, s3Key);
+                    if (processedResult != null)
                     {
-                        context.Logger.LogInformation("Ingest: file already processed, skipping");
-                        return Respond(200, new { message = "Already processed", skipped = true });
+                        context.Logger.LogInformation(
+                            "Ingest: file was already stored; resuming downstream embedding and matching");
+                        return Respond(200, processedResult);
                     }
                 }
 
                 // Process all listings in batch
-                var result = await ProcessListingsBatch(conn, listings, context.Logger);
+                var result = await ProcessListingsBatch(conn, listings, defaultCity, context.Logger);
+
+                // A batch where every insert failed is a systemic ingestion error,
+                // not a successfully processed file. Do not write the idempotency
+                // receipt: the durable worker must be able to retry after the schema
+                // or configuration problem is corrected.
+                if (result.Failed > 0 &&
+                    result.ListingsInserted == 0 &&
+                    result.RequirementsInserted == 0)
+                {
+                    return Respond(500, new
+                    {
+                        error = "All extracted records failed during ingestion.",
+                        detail = result.FirstFailure,
+                        failed = result.Failed,
+                        skipped = result.Skipped
+                    });
+                }
 
                 // Track processed file in DB
                 if (s3Bucket != null && s3Key != null)
@@ -218,7 +241,7 @@ namespace propseekr_file_processor
             List<PropertyListing> listings, ILambdaLogger log)
         {
             await using var conn = await _dataSource.OpenConnectionAsync();
-            var result = await ProcessListingsBatch(conn, listings, log);
+            var result = await ProcessListingsBatch(conn, listings, _defaultCity, log);
 
             // Geocode any new localities
             if (result.LocalitiesCreated > 0)
@@ -243,13 +266,13 @@ namespace propseekr_file_processor
         // ─────────────────────────────────────────────────────
 
         private async Task<IngestResult> ProcessListingsBatch(
-            NpgsqlConnection conn, List<PropertyListing> listings, ILambdaLogger log)
+            NpgsqlConnection conn, List<PropertyListing> listings, string defaultCity, ILambdaLogger log)
         {
             var result = new IngestResult();
 
             // In-memory caches to avoid repeated DB lookups within the same batch
             var brokerCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            var masterCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var masterCache = new Dictionary<string, MasterResolution>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var listing in listings)
             {
@@ -292,26 +315,34 @@ namespace propseekr_file_processor
                     // ── Step 2: Resolve locality → masterid ──────
                     var locationText = listing.Location ?? "";
                     int? masterId = null;
+                    var city = CityExtractor.NormalizeDefaultCity(defaultCity);
+                    var locationStatus = "missing";
+                    string? locationNote = null;
 
                     if (!string.IsNullOrWhiteSpace(locationText))
                     {
-                        if (masterCache.TryGetValue(locationText, out var cachedMasterId))
+                        city = CityExtractor.ExtractCity(locationText, defaultCity);
+                        var cacheKey = $"{city}|{locationText}";
+                        MasterResolution resolution;
+                        if (masterCache.TryGetValue(cacheKey, out var cachedResolution))
                         {
-                            masterId = cachedMasterId;
+                            resolution = cachedResolution;
                         }
                         else
                         {
-                            // Extract city from location text, default to configured city
-                            var city = CityExtractor.ExtractCity(locationText, _defaultCity);
                             var area = CityExtractor.RemoveCityFromLocation(locationText, city);
                             if (string.IsNullOrWhiteSpace(area)) area = locationText.Trim();
 
-                            var (mid, isNew) = await ResolveOrCreateMasterAsync(
-                                conn, area, city, _geocoder);
-                            masterId = mid > 0 ? mid : (int?)null; // 0 = rejected location
-                            if (mid > 0) masterCache[locationText] = mid;
-                            if (isNew && mid > 0) result.LocalitiesCreated++;
+                            resolution = await ResolveOrCreateMasterAsync(conn, area, city, _geocoder);
+                            masterCache[cacheKey] = resolution;
+                            if (resolution.IsNew && resolution.MasterId > 0) result.LocalitiesCreated++;
                         }
+
+                        masterId = resolution.IsTrusted && resolution.MasterId > 0
+                            ? resolution.MasterId
+                            : null;
+                        locationStatus = resolution.Status;
+                        locationNote = resolution.Note;
                     }
 
                     // ── Step 3: Normalize all fields ─────────────
@@ -347,6 +378,9 @@ namespace propseekr_file_processor
                         {
                             BrokerId = brokerId,
                             MasterIds = masterId.HasValue ? new[] { masterId.Value } : Array.Empty<int>(),
+                            City = city,
+                            LocationResolutionStatus = locationStatus,
+                            LocationResolutionNote = locationNote,
                             RequirementType = reqType,
                             PropertyType = dbPropertyType,
                             Configurations = !string.IsNullOrEmpty(dbConfig)
@@ -380,6 +414,9 @@ namespace propseekr_file_processor
                         {
                             BrokerId = brokerId,
                             MasterId = masterId,
+                            City = city,
+                            LocationResolutionStatus = locationStatus,
+                            LocationResolutionNote = locationNote,
                             ListingType = dbListingType,
                             PropertyType = dbPropertyType,
                             Configuration = dbConfig,
@@ -421,6 +458,7 @@ namespace propseekr_file_processor
                 catch (Exception ex)
                 {
                     result.Failed++;
+                    result.FirstFailure ??= ex.Message;
                     log.LogError($"Failed to ingest listing: {ex.Message}");
                 }
             }
@@ -470,7 +508,7 @@ namespace propseekr_file_processor
         //  or geocoding to enable proximity matching).
         // ─────────────────────────────────────────────────────
 
-        private static async Task<(int masterId, bool isNew)> ResolveOrCreateMasterAsync(
+        internal static async Task<MasterResolution> ResolveOrCreateMasterAsync(
             NpgsqlConnection conn, string area, string city, GeocodingService geocoder)
         {
             var cleanArea = CleanLocationForMaster(area);
@@ -479,51 +517,108 @@ namespace propseekr_file_processor
 
             // Step 1: Exact match on area + city
             await using (var exactCmd = new NpgsqlCommand(@"
-                SELECT masterid FROM master
-                WHERE LOWER(area) = LOWER(@area) AND LOWER(city) = LOWER(@city)
+                SELECT masterid, area,
+                       CASE WHEN lat IS NOT NULL AND lng IS NOT NULL
+                            THEN COALESCE(NULLIF(geocoding_status, ''), 'resolved')
+                            ELSE COALESCE(NULLIF(geocoding_status, ''), 'pending') END
+                FROM master
+                WHERE LOWER(BTRIM(area)) = LOWER(BTRIM(@area))
+                  AND LOWER(BTRIM(city)) = LOWER(BTRIM(@city))
                 LIMIT 1", conn))
             {
                 exactCmd.Parameters.AddWithValue("area", cleanArea);
                 exactCmd.Parameters.AddWithValue("city", city);
-                var result = await exactCmd.ExecuteScalarAsync();
-                if (result != null && result != DBNull.Value)
-                    return ((int)result, false);
+                int? existingId = null;
+                string? existingArea = null;
+                string? existingStatus = null;
+                await using (var reader = await exactCmd.ExecuteReaderAsync())
+                {
+                    if (await reader.ReadAsync())
+                    {
+                        existingId = reader.GetInt32(0);
+                        existingArea = reader.IsDBNull(1) ? cleanArea : reader.GetString(1);
+                        existingStatus = reader.GetString(2);
+                    }
+                }
+                if (existingId.HasValue)
+                    return await EnsureTrustedExistingMasterAsync(
+                        conn, existingId.Value, existingArea!, city, existingStatus!, geocoder);
             }
 
             // Step 2: Fuzzy match using pg_trgm (within same city)
             await using (var fuzzyCmd = new NpgsqlCommand(@"
-                SELECT masterid, similarity(LOWER(area), LOWER(@area)) AS sim
+                SELECT masterid, area, similarity(LOWER(area), LOWER(@area)) AS sim,
+                       CASE WHEN lat IS NOT NULL AND lng IS NOT NULL
+                            THEN COALESCE(NULLIF(geocoding_status, ''), 'resolved')
+                            ELSE COALESCE(NULLIF(geocoding_status, ''), 'pending') END
                 FROM master
-                WHERE LOWER(city) = LOWER(@city)
-                  AND similarity(LOWER(area), LOWER(@area)) > 0.3
+                WHERE LOWER(BTRIM(city)) = LOWER(BTRIM(@city))
+                  AND similarity(LOWER(area), LOWER(@area)) >= 0.75
                 ORDER BY sim DESC
                 LIMIT 1", conn))
             {
                 fuzzyCmd.Parameters.AddWithValue("area", cleanArea);
                 fuzzyCmd.Parameters.AddWithValue("city", city);
-                await using var reader = await fuzzyCmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                int? existingId = null;
+                string? existingArea = null;
+                string? existingStatus = null;
+                double similarity = 0;
+                await using (var reader = await fuzzyCmd.ExecuteReaderAsync())
                 {
-                    var mid = reader.GetInt32(0);
-                    await reader.CloseAsync();
-                    return (mid, false);
+                    if (await reader.ReadAsync())
+                    {
+                        existingId = reader.GetInt32(0);
+                        existingArea = reader.IsDBNull(1) ? cleanArea : reader.GetString(1);
+                        similarity = reader.GetDouble(2);
+                        existingStatus = reader.GetString(3);
+                    }
                 }
-                await reader.CloseAsync();
+                if (existingId.HasValue)
+                    return await EnsureTrustedExistingMasterAsync(
+                        conn,
+                        existingId.Value,
+                        existingArea!,
+                        city,
+                        existingStatus!,
+                        geocoder,
+                        $"Matched canonical locality with similarity {similarity:0.00}.");
             }
 
             // Step 3: Alias match (within same city)
             await using (var aliasCmd = new NpgsqlCommand(@"
-                SELECT masterid FROM master
-                WHERE LOWER(city) = LOWER(@city)
+                SELECT masterid, area,
+                       CASE WHEN lat IS NOT NULL AND lng IS NOT NULL
+                            THEN COALESCE(NULLIF(geocoding_status, ''), 'resolved')
+                            ELSE COALESCE(NULLIF(geocoding_status, ''), 'pending') END
+                FROM master
+                WHERE LOWER(BTRIM(city)) = LOWER(BTRIM(@city))
                   AND aliases IS NOT NULL
-                  AND LOWER(aliases) LIKE '%' || LOWER(@area) || '%'
+                  AND LOWER(@area) = ANY(regexp_split_to_array(LOWER(aliases), '\s*[,;|]\s*'))
                 LIMIT 1", conn))
             {
                 aliasCmd.Parameters.AddWithValue("area", cleanArea);
                 aliasCmd.Parameters.AddWithValue("city", city);
-                var result = await aliasCmd.ExecuteScalarAsync();
-                if (result != null && result != DBNull.Value)
-                    return ((int)result, false);
+                int? existingId = null;
+                string? existingArea = null;
+                string? existingStatus = null;
+                await using (var reader = await aliasCmd.ExecuteReaderAsync())
+                {
+                    if (await reader.ReadAsync())
+                    {
+                        existingId = reader.GetInt32(0);
+                        existingArea = reader.IsDBNull(1) ? cleanArea : reader.GetString(1);
+                        existingStatus = reader.GetString(2);
+                    }
+                }
+                if (existingId.HasValue)
+                    return await EnsureTrustedExistingMasterAsync(
+                        conn,
+                        existingId.Value,
+                        existingArea!,
+                        city,
+                        existingStatus!,
+                        geocoder,
+                        "Matched an exact canonical locality alias.");
             }
 
             // Step 4: No match — validate before creating new locality
@@ -556,40 +651,137 @@ namespace propseekr_file_processor
                 else
                 {
                     // Completely unrecoverable — skip master creation
-                    return (0, false);
+                    return MasterResolution.Rejected("Location text could not be isolated from the source message.");
                 }
             }
 
             // Auto-geocode new locality
-            decimal? lat = null, lng = null;
+            var geocoding = await geocoder.GeocodeDetailedAsync(cleanArea, city);
+
+            // Multiple API instances can ingest files concurrently. Serialize only
+            // the final recheck/insert section so one canonical city/locality row is
+            // created without holding the lock during external geocoding.
+            await using (var lockCmd = new NpgsqlCommand(
+                "SELECT pg_advisory_lock(hashtext('propseekr-master-location'))", conn))
+            {
+                await lockCmd.ExecuteNonQueryAsync();
+            }
 
             try
             {
-                var coords = await geocoder.GeocodeAsync(cleanArea, city);
-                if (coords.HasValue)
+                await using (var recheckCmd = new NpgsqlCommand(@"
+                    SELECT masterid,
+                           CASE WHEN lat IS NOT NULL AND lng IS NOT NULL
+                                THEN COALESCE(NULLIF(geocoding_status, ''), 'resolved')
+                                ELSE COALESCE(NULLIF(geocoding_status, ''), 'pending') END
+                    FROM master
+                    WHERE LOWER(BTRIM(area)) = LOWER(BTRIM(@area))
+                      AND LOWER(BTRIM(city)) = LOWER(BTRIM(@city))
+                    ORDER BY masterid
+                    LIMIT 1", conn))
                 {
-                    lat = coords.Value.lat;
-                    lng = coords.Value.lng;
+                    recheckCmd.Parameters.AddWithValue("city", city.Trim());
+                    recheckCmd.Parameters.AddWithValue("area", cleanArea.Trim());
+                    await using var reader = await recheckCmd.ExecuteReaderAsync();
+                    if (await reader.ReadAsync())
+                        return MasterResolution.Existing(reader.GetInt32(0), reader.GetString(1));
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Geocoding failed for '{cleanArea}, {city}': {ex.Message}");
-            }
 
-            await using (var insertCmd = new NpgsqlCommand(@"
-                INSERT INTO master (city, area, aliases, lat, lng)
-                VALUES (@city, @area, @aliases, @lat, @lng)
-                RETURNING masterid", conn))
-            {
-                insertCmd.Parameters.AddWithValue("city", city);
-                insertCmd.Parameters.AddWithValue("area", cleanArea);
+                await using var insertCmd = new NpgsqlCommand(@"
+                    INSERT INTO master (
+                        city, area, aliases, lat, lng, geocoding_status,
+                        geocoding_provider, provider_place_id, formatted_address,
+                        location_precision, geocoding_confidence, geocoded_at,
+                        geocoding_error, review_required)
+                    VALUES (
+                        @city, @area, @aliases, @lat, @lng, @status,
+                        @provider, @place_id, @formatted_address,
+                        @precision, @confidence, NOW(), @error, @review_required)
+                    RETURNING masterid", conn);
+                insertCmd.Parameters.AddWithValue("city", city.Trim());
+                insertCmd.Parameters.AddWithValue("area", cleanArea.Trim());
                 insertCmd.Parameters.AddWithValue("aliases", GenerateAliases(cleanArea));
-                insertCmd.Parameters.AddWithValue("lat", (object?)lat ?? DBNull.Value);
-                insertCmd.Parameters.AddWithValue("lng", (object?)lng ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("lat", (object?)geocoding.Latitude ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("lng", (object?)geocoding.Longitude ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("status", geocoding.Status);
+                insertCmd.Parameters.AddWithValue("provider", geocoding.Provider);
+                insertCmd.Parameters.AddWithValue("place_id", (object?)geocoding.PlaceId ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("formatted_address", (object?)geocoding.FormattedAddress ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("precision", (object?)geocoding.Precision ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("confidence", geocoding.Confidence);
+                insertCmd.Parameters.AddWithValue("error", (object?)geocoding.Error ?? DBNull.Value);
+                insertCmd.Parameters.AddWithValue("review_required", !geocoding.IsResolved);
                 var newId = (int)(await insertCmd.ExecuteScalarAsync())!;
-                return (newId, true);
+                return new MasterResolution(
+                    newId,
+                    true,
+                    geocoding.Status,
+                    geocoding.IsResolved
+                        ? "Resolved with Google server geocoding."
+                        : geocoding.Error);
             }
+            finally
+            {
+                await using var unlockCmd = new NpgsqlCommand(
+                    "SELECT pg_advisory_unlock(hashtext('propseekr-master-location'))", conn);
+                await unlockCmd.ExecuteNonQueryAsync();
+            }
+        }
+
+        private static async Task<MasterResolution> EnsureTrustedExistingMasterAsync(
+            NpgsqlConnection conn,
+            int masterId,
+            string area,
+            string city,
+            string status,
+            GeocodingService geocoder,
+            string? note = null)
+        {
+            if (status is "resolved" or "verified")
+                return MasterResolution.Existing(masterId, status, note);
+
+            var result = await geocoder.GeocodeDetailedAsync(area, city);
+            await using var update = new NpgsqlCommand(@"
+                UPDATE master
+                SET lat = @lat, lng = @lng, geocoding_status = @status,
+                    geocoding_provider = @provider, provider_place_id = @place_id,
+                    formatted_address = @formatted_address, location_precision = @precision,
+                    geocoding_confidence = @confidence, geocoded_at = NOW(),
+                    geocoding_error = @error, review_required = @review_required
+                WHERE masterid = @master_id", conn);
+            update.Parameters.AddWithValue("master_id", masterId);
+            update.Parameters.AddWithValue("lat", (object?)result.Latitude ?? DBNull.Value);
+            update.Parameters.AddWithValue("lng", (object?)result.Longitude ?? DBNull.Value);
+            update.Parameters.AddWithValue("status", result.Status);
+            update.Parameters.AddWithValue("provider", result.Provider);
+            update.Parameters.AddWithValue("place_id", (object?)result.PlaceId ?? DBNull.Value);
+            update.Parameters.AddWithValue("formatted_address", (object?)result.FormattedAddress ?? DBNull.Value);
+            update.Parameters.AddWithValue("precision", (object?)result.Precision ?? DBNull.Value);
+            update.Parameters.AddWithValue("confidence", result.Confidence);
+            update.Parameters.AddWithValue("error", (object?)result.Error ?? DBNull.Value);
+            update.Parameters.AddWithValue("review_required", !result.IsResolved);
+            await update.ExecuteNonQueryAsync();
+
+            return new MasterResolution(
+                masterId,
+                false,
+                result.Status,
+                result.IsResolved ? note ?? "Resolved existing canonical locality with Google." : result.Error);
+        }
+
+        internal sealed record MasterResolution(
+            int MasterId,
+            bool IsNew,
+            string Status,
+            string? Note)
+        {
+            public bool IsTrusted => Status is "resolved" or "verified";
+
+            public static MasterResolution Existing(int id, string status, string? note = null) =>
+                new(id, false, status, note);
+
+            public static MasterResolution Rejected(string note) =>
+                new(0, false, "review_required", note);
         }
 
         // ─────────────────────────────────────────────────────
@@ -603,7 +795,8 @@ namespace propseekr_file_processor
         {
             await using var cmd = new NpgsqlCommand(@"
                 INSERT INTO listings (
-                    broker_id, master_id, source, raw_message_text,
+                    broker_id, master_id, city, source, raw_message_text,
+                    location_resolution_status, location_resolution_note, location_resolved_at,
                     listing_type, property_type, configuration,
                     price, price_unit, size, furnishing, facing,
                     project_name, road_info, content_hash,
@@ -612,7 +805,9 @@ namespace propseekr_file_processor
                     freshness_score, freshness_category, freshness_updated_at,
                     created_at, updated_at
                 ) VALUES (
-                    @broker_id, @master_id, 'WHATSAPP', @raw_text,
+                    @broker_id, @master_id, @city, 'WHATSAPP', @raw_text,
+                    @location_status, @location_note,
+                    CASE WHEN @location_status IN ('resolved', 'verified') THEN NOW() ELSE NULL END,
                     @listing_type, @property_type, @configuration,
                     @price, @price_unit, @size, @furnishing, @facing,
                     @project_name, @road_info, @content_hash,
@@ -628,6 +823,9 @@ namespace propseekr_file_processor
 
             AddParamOrNull(cmd, "broker_id", data.BrokerId);
             AddParamOrNull(cmd, "master_id", data.MasterId);
+            AddParamOrNull(cmd, "city", data.City);
+            AddParamOrNull(cmd, "location_status", data.LocationResolutionStatus);
+            AddParamOrNull(cmd, "location_note", data.LocationResolutionNote);
             AddParamOrNull(cmd, "raw_text", data.RawMessageText);
             AddParamOrNull(cmd, "listing_type", data.ListingType);
             AddParamOrNull(cmd, "property_type", data.PropertyType);
@@ -667,7 +865,8 @@ namespace propseekr_file_processor
         {
             await using var cmd = new NpgsqlCommand(@"
                 INSERT INTO requirements (
-                    broker_id, source, raw_message_text,
+                    broker_id, city, source, raw_message_text,
+                    location_resolution_status, location_resolution_note, location_resolved_at,
                     requirement_type, property_type, configurations,
                     preferred_locality_ids, budget, budget_unit,
                     size, furnishing_pref, facing_pref, content_hash,
@@ -675,7 +874,9 @@ namespace propseekr_file_processor
                     status, expires_at,
                     created_at, updated_at
                 ) VALUES (
-                    @broker_id, 'WHATSAPP', @raw_text,
+                    @broker_id, @city, 'WHATSAPP', @raw_text,
+                    @location_status, @location_note,
+                    CASE WHEN @location_status IN ('resolved', 'verified') THEN NOW() ELSE NULL END,
                     @requirement_type, @property_type, @configurations,
                     @locality_ids, @budget, @budget_unit,
                     @size, @furnishing_pref, @facing_pref, @content_hash,
@@ -689,6 +890,9 @@ namespace propseekr_file_processor
             ", conn);
 
             AddParamOrNull(cmd, "broker_id", data.BrokerId);
+            AddParamOrNull(cmd, "city", data.City);
+            AddParamOrNull(cmd, "location_status", data.LocationResolutionStatus);
+            AddParamOrNull(cmd, "location_note", data.LocationResolutionNote);
             AddParamOrNull(cmd, "raw_text", data.RawMessageText);
             AddParamOrNull(cmd, "requirement_type", data.RequirementType);
             AddParamOrNull(cmd, "property_type", data.PropertyType);
@@ -775,17 +979,30 @@ namespace propseekr_file_processor
         //  Prevents re-processing of the same S3 file.
         // ─────────────────────────────────────────────────────
 
-        private static async Task<bool> IsAlreadyProcessed(
+        private static async Task<IngestResult?> GetProcessedFileResult(
             NpgsqlConnection conn, string bucket, string key)
         {
             await using var cmd = new NpgsqlCommand(@"
-                SELECT 1 FROM processed_files
+                SELECT listings_inserted, requirements_inserted,
+                       brokers_created, localities_created,
+                       skipped_records, failed_records
+                FROM processed_files
                 WHERE s3_bucket = @bucket AND s3_key = @key
                 LIMIT 1", conn);
             cmd.Parameters.AddWithValue("bucket", bucket);
             cmd.Parameters.AddWithValue("key", key);
-            var result = await cmd.ExecuteScalarAsync();
-            return result != null && result != DBNull.Value;
+            await using var reader = await cmd.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return null;
+
+            return new IngestResult
+            {
+                ListingsInserted = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                RequirementsInserted = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                BrokersCreated = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                LocalitiesCreated = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                Skipped = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                Failed = reader.IsDBNull(5) ? 0 : reader.GetInt32(5)
+            };
         }
 
         private static async Task TrackProcessedFile(
@@ -794,8 +1011,11 @@ namespace propseekr_file_processor
             await using var cmd = new NpgsqlCommand(@"
                 INSERT INTO processed_files (
                     s3_bucket, s3_key, listings_inserted, requirements_inserted,
-                    brokers_created, localities_created, processed_at
-                ) VALUES (@bucket, @key, @listings, @reqs, @brokers, @localities, NOW())
+                    brokers_created, localities_created, skipped_records,
+                    failed_records, processed_at
+                ) VALUES (
+                    @bucket, @key, @listings, @reqs, @brokers, @localities,
+                    @skipped, @failed, NOW())
                 ON CONFLICT (s3_bucket, s3_key) DO NOTHING", conn);
             cmd.Parameters.AddWithValue("bucket", bucket);
             cmd.Parameters.AddWithValue("key", key);
@@ -803,6 +1023,8 @@ namespace propseekr_file_processor
             cmd.Parameters.AddWithValue("reqs", result.RequirementsInserted);
             cmd.Parameters.AddWithValue("brokers", result.BrokersCreated);
             cmd.Parameters.AddWithValue("localities", result.LocalitiesCreated);
+            cmd.Parameters.AddWithValue("skipped", result.Skipped);
+            cmd.Parameters.AddWithValue("failed", result.Failed);
             await cmd.ExecuteNonQueryAsync();
         }
 
@@ -1374,6 +1596,8 @@ namespace propseekr_file_processor
             var trimmed = text.Trim();
             if (trimmed.Length < 3) return true;
             if (Regex.IsMatch(trimmed, @"^\d+$")) return true; // Reject plain digits like "2"
+            if (Regex.IsMatch(trimmed, @"^(from|to|at|in|near|location|address)$", RegexOptions.IgnoreCase))
+                return true;
 
             int score = 0;
 
@@ -1671,6 +1895,9 @@ namespace propseekr_file_processor
         {
             public int BrokerId { get; set; }
             public int? MasterId { get; set; }
+            public string City { get; set; } = "Indore";
+            public string LocationResolutionStatus { get; set; } = "missing";
+            public string? LocationResolutionNote { get; set; }
             public string ListingType { get; set; } = "";
             public string? PropertyType { get; set; }
             public string? Configuration { get; set; }
@@ -1691,6 +1918,9 @@ namespace propseekr_file_processor
         {
             public int BrokerId { get; set; }
             public int[] MasterIds { get; set; } = Array.Empty<int>();
+            public string City { get; set; } = "Indore";
+            public string LocationResolutionStatus { get; set; } = "missing";
+            public string? LocationResolutionNote { get; set; }
             public string RequirementType { get; set; } = "BUY";
             public string? PropertyType { get; set; }
             public string[] Configurations { get; set; } = Array.Empty<string>();
@@ -1719,5 +1949,6 @@ namespace propseekr_file_processor
         public int LocalitiesCreated { get; set; }
         public int Skipped { get; set; }
         public int Failed { get; set; }
+        public string? FirstFailure { get; set; }
     }
 }

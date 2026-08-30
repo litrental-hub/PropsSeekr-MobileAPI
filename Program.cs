@@ -56,6 +56,15 @@ if (!string.IsNullOrWhiteSpace(secretsManagerConfigName))
 // This lets FileProcessor:* app settings work locally while deployment
 // environment variables remain the preferred production configuration.
 FileProcessorConfigurationBridge.Apply(builder.Configuration);
+if (builder.Environment.IsDevelopment())
+{
+    // The vendored processor resolves local files from an environment variable.
+    // Use the same absolute directory as the authenticated upload endpoint so
+    // launching the API from a different working directory cannot break it.
+    Environment.SetEnvironmentVariable(
+        "LOCAL_BULK_IMPORT_DIRECTORY",
+        LocalBulkImportStorage.GetDirectory(builder.Configuration, builder.Environment));
+}
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
@@ -140,6 +149,7 @@ builder.Services.AddScoped<IEmbeddingJobService, EmbeddingJobService>();
 builder.Services.AddScoped<MatchInvalidationService>();
 builder.Services.AddHostedService<EmbeddingJobWorker>();
 builder.Services.AddHostedService<BulkImportJobWorker>();
+builder.Services.AddHostedService<LocationRemediationWorker>();
 
 builder.Services.AddAuthorization();
 
