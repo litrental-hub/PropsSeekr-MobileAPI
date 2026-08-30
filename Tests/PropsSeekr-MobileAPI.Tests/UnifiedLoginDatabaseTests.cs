@@ -3,6 +3,8 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using PropSeekr.Data;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Models;
@@ -74,8 +76,9 @@ public sealed class UnifiedLoginDatabaseTests
                 db,
                 configuration,
                 new NoopOtpDeliveryService(),
-                new EmptyServiceProvider(),
-                new NoopBrokerIdentityService());
+                new NoopEmailOtpService(),
+                new NoopBrokerIdentityService(),
+                new TestHostEnvironment());
 
             var adminResponse = await service.LoginAsync(new LoginRequestDto
             {
@@ -127,8 +130,20 @@ public sealed class UnifiedLoginDatabaseTests
         public Task<int> GetOrCreateBrokerIdAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
-    private sealed class EmptyServiceProvider : IServiceProvider
+    private sealed class NoopEmailOtpService : IEmailOtpService
     {
-        public object? GetService(Type serviceType) => null;
+        public Task<SendEmailOtpResponseDto> SendEmailOtpAsync(SendEmailOtpRequestDto request, string? clientIp, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new SendEmailOtpResponseDto());
+
+        public Task<VerifyEmailOtpResponseDto> VerifyEmailOtpAsync(VerifyEmailOtpRequestDto request, string? clientIp, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class TestHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Production;
+        public string ApplicationName { get; set; } = "PropSeekr.Tests";
+        public string ContentRootPath { get; set; } = Directory.GetCurrentDirectory();
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

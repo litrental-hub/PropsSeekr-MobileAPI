@@ -1,8 +1,10 @@
 using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
+using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Npgsql;
+using NpgsqlTypes;
 using OpenAI.Chat;
 using System.Globalization;
 using System.Linq;
@@ -29,7 +31,7 @@ namespace propseekr_file_processor
         {
             _chatClient = new Lazy<ChatClient>(CreateOpenAiChatClient, LazyThreadSafetyMode.ExecutionAndPublication);
             _embeddingClient = VertexAiEmbeddingClient.FromEnvironment();
-            _s3Client = new AmazonS3Client();
+            _s3Client = CreateS3Client();
 
             /* ERRONEOUS CODE:
             _dbConnectionString = BuildDbConnectionString();
@@ -83,6 +85,22 @@ namespace propseekr_file_processor
             _matchesApi = matchesApi;
             _listingForm = listingForm;
             _fileUpload = new FileUploadService(_s3Client);
+        }
+
+        private static AmazonS3Client CreateS3Client()
+        {
+            if (string.Equals(
+                Environment.GetEnvironmentVariable("FILE_PROCESSOR_LOCAL_MODE"),
+                "true",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                var regionName = Environment.GetEnvironmentVariable("AWS_REGION") ?? "ap-south-1";
+                return new AmazonS3Client(
+                    new AnonymousAWSCredentials(),
+                    Amazon.RegionEndpoint.GetBySystemName(regionName));
+            }
+
+            return new AmazonS3Client();
         }
 
         private static ChatClient CreateOpenAiChatClient()
@@ -270,6 +288,9 @@ namespace propseekr_file_processor
 
                 var bucket = bEl.GetString() ?? "";
                 var key = kEl.GetString() ?? "";
+                var defaultCity = root.TryGetProperty("default_city", out var cityElement)
+                    ? CityExtractor.NormalizeDefaultCity(cityElement.GetString())
+                    : "Indore";
 
                 /* ERRONEOUS CODE / PREVIOUS CODE:
                 context.Logger.LogInformation($"Reading s3://{bucket}/{key}");
@@ -313,7 +334,7 @@ namespace propseekr_file_processor
 
                 context.Logger.LogInformation($"Read {rawText.Length} chars");
 
-                var result = await ExtractPropertiesHybridFast(rawText, fileName, context);
+                var result = await ExtractPropertiesHybridFast(rawText, fileName, defaultCity, context);
 
                 // Save result JSON
                 var outputKey = key.Replace(".txt", "_listings.json");
@@ -378,24 +399,43 @@ namespace propseekr_file_processor
         // â”€â”€ FULL PIPELINE (triggered by S3 event) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //  Runs: Process â†’ Ingest â†’ Embed Listings â†’ Embed Requirements â†’ Matching SP
         // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        public async Task<IngestResult> RunBulkImportAsync(string bucket, string key, ILambdaContext context, CancellationToken cancellationToken = default)
+        public async Task<IngestResult> RunBulkImportAsync(
+            string bucket,
+            string key,
+            ILambdaContext context,
+            string defaultCity = "Indore",
+            CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            defaultCity = CityExtractor.NormalizeDefaultCity(defaultCity);
+            var listingsKey = key.Replace(".txt", "_listings.json");
+            var existingLocalOutput = PropertyListingNormalizer.ResolveLocalFilePath(
+                Path.GetFileName(listingsKey),
+                context.Logger);
+
             // â”€â”€ STEP 1: PROCESS â”€â”€
-            context.Logger.LogInformation("Pipeline 1/5: Processing...");
-            var processReq = new APIGatewayProxyRequest
+            if (existingLocalOutput == null)
             {
-                Body = JsonSerializer.Serialize(new { bucket, key }),
-                Path = "/process",
-                HttpMethod = "POST",
-                Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }
-            };
-            var processResp = await CallInternal(processReq, context);
-            if (processResp.StatusCode != 200)
-            {
-                throw new InvalidOperationException($"Bulk import processing failed: {processResp.Body}");
+                context.Logger.LogInformation("Pipeline 1/5: Processing...");
+                var processReq = new APIGatewayProxyRequest
+                {
+                    Body = JsonSerializer.Serialize(new { bucket, key, default_city = defaultCity }),
+                    Path = "/process",
+                    HttpMethod = "POST",
+                    Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }
+                };
+                var processResp = await CallInternal(processReq, context);
+                if (processResp.StatusCode != 200)
+                {
+                    throw new InvalidOperationException($"Bulk import processing failed: {processResp.Body}");
+                }
+                context.Logger.LogInformation("Pipeline 1/5: Process complete");
             }
-            context.Logger.LogInformation("Pipeline 1/5: Process complete");
+            else
+            {
+                context.Logger.LogInformation(
+                    $"Pipeline 1/5: Reusing extracted retry output {existingLocalOutput}");
+            }
 
             // â”€â”€ STEP 2: INGEST â”€â”€
             if (_ingestService == null || _dataSource == null)
@@ -404,10 +444,9 @@ namespace propseekr_file_processor
             }
 
             context.Logger.LogInformation("Pipeline 2/5: Ingesting...");
-            var listingsKey = key.Replace(".txt", "_listings.json");
             var ingestReq = new APIGatewayProxyRequest
             {
-                Body = JsonSerializer.Serialize(new { bucket, key = listingsKey }),
+                Body = JsonSerializer.Serialize(new { bucket, key = listingsKey, default_city = defaultCity }),
                 Path = "/ingest",
                 HttpMethod = "POST",
                 Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }
@@ -421,11 +460,24 @@ namespace propseekr_file_processor
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new IngestResult();
             context.Logger.LogInformation($"Pipeline 2/5: Ingest complete â€” {ingestResp.Body}");
 
+            // Do not use an empty/no-op import as an implicit global embedding
+            // backfill. There are no new records to embed or match in this case.
+            if (ingestResult.ListingsInserted == 0 && ingestResult.RequirementsInserted == 0)
+            {
+                context.Logger.LogInformation("Pipeline complete: no new records were inserted.");
+                return ingestResult;
+            }
+
             // â”€â”€ STEP 3: EMBED LISTINGS â”€â”€
             context.Logger.LogInformation("Pipeline 3/5: Embedding listings...");
             var embedListReq = new APIGatewayProxyRequest
             {
-                Body = JsonSerializer.Serialize(new { target = "listings", batch_size = 4000 }),
+                Body = JsonSerializer.Serialize(new
+                {
+                    target = "listings",
+                    batch_size = 4000,
+                    run_matching = false
+                }),
                 Path = "/embed",
                 HttpMethod = "POST",
                 Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }
@@ -487,6 +539,7 @@ namespace propseekr_file_processor
                 int batchSize = 50;
                 int? listingId = null;
                 int? requirementId = null;
+                bool runMatching = true;
 
                 if (!string.IsNullOrWhiteSpace(body) && body.Trim() != "{}")
                 {
@@ -504,6 +557,9 @@ namespace propseekr_file_processor
                         listingId = parsedListingId;
                     if (root.TryGetProperty("requirement_id", out var requirementIdEl) && requirementIdEl.TryGetInt32(out var parsedRequirementId))
                         requirementId = parsedRequirementId;
+                    if (root.TryGetProperty("run_matching", out var runMatchingEl) &&
+                        (runMatchingEl.ValueKind == JsonValueKind.True || runMatchingEl.ValueKind == JsonValueKind.False))
+                        runMatching = runMatchingEl.GetBoolean();
                 }
 
                 if (listingId.HasValue) target = "listings";
@@ -545,36 +601,42 @@ namespace propseekr_file_processor
                 }
 
 
-                // Auto-run matching after embeddings complete
-                try
+                // Auto-run matching after embeddings complete. Bulk imports suppress
+                // this for the listings phase and run it after requirements so users
+                // never observe a transient, non-vector-scored match set.
+                if (runMatching)
                 {
-                    if (_dataSource == null)
+                    try
                     {
-                        context.Logger.LogWarning("Matching engine skipped because the database is not configured.");
+                        if (_dataSource == null)
+                        {
+                            context.Logger.LogWarning("Matching engine skipped because the database is not configured.");
+                        }
+                        else
+                        {
+                            await using var matchConn = await _dataSource.OpenConnectionAsync();
+                            await using var matchCmd = new NpgsqlCommand(
+                                "CALL sp_run_matching_engine(@requirement_id, @listing_id)", matchConn);
+                            matchCmd.Parameters.Add("requirement_id", NpgsqlDbType.Integer).Value =
+                                (object?)requirementId ?? DBNull.Value;
+                            matchCmd.Parameters.Add("listing_id", NpgsqlDbType.Integer).Value =
+                                (object?)listingId ?? DBNull.Value;
+                            matchCmd.CommandTimeout = 900;
+                            await matchCmd.ExecuteNonQueryAsync();
+                            context.Logger.LogInformation("Matching engine completed after embedding");
+                        }
                     }
-                    else
+                    catch (Exception ex2)
                     {
-                        await using var matchConn = await _dataSource.OpenConnectionAsync();
-                        await using var matchCmd = new NpgsqlCommand(
-                            "CALL sp_run_matching_engine(@requirement_id, @listing_id)", matchConn);
-                        matchCmd.Parameters.AddWithValue("requirement_id", (object?)requirementId ?? DBNull.Value);
-                        matchCmd.Parameters.AddWithValue("listing_id", (object?)listingId ?? DBNull.Value);
-                        matchCmd.CommandTimeout = 900;
-                        await matchCmd.ExecuteNonQueryAsync();
-                        context.Logger.LogInformation("Matching engine completed after embedding");
+                        context.Logger.LogError($"Matching engine error: {ex2.Message}");
+                        return Respond(502, new
+                        {
+                            error = "Matching engine failed after Gemini embeddings were stored.",
+                            result.ListingsEmbedded,
+                            result.RequirementsEmbedded
+                        });
                     }
                 }
-                catch (Exception ex2)
-                {
-                    context.Logger.LogError($"Matching engine error: {ex2.Message}");
-                    return Respond(502, new
-                    {
-                        error = "Matching engine failed after Gemini embeddings were stored.",
-                        result.ListingsEmbedded,
-                        result.RequirementsEmbedded
-                    });
-                }
-
 
                 return Respond(200, result);
             }
@@ -607,7 +669,8 @@ namespace propseekr_file_processor
           AND  status != 'DELETED'
         ORDER  BY listingid
     ", conn);
-            cmd.Parameters.AddWithValue("listing_id", (object?)listingId ?? DBNull.Value);
+            cmd.Parameters.Add("listing_id", NpgsqlDbType.Integer).Value =
+                (object?)listingId ?? DBNull.Value;
 
             var rows = new List<(int id, string text)>();
             await using (var reader = await cmd.ExecuteReaderAsync())
@@ -654,7 +717,7 @@ namespace propseekr_file_processor
                         try
                         {
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE listings_table
+                        UPDATE listings
                         SET    embedding  = @vec,
                                embedding_model = @embedding_model,
                                updated_at = NOW()
@@ -693,7 +756,7 @@ namespace propseekr_file_processor
                             float[] vector = await GenerateEmbeddingAsync(text);
 
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE listings_table
+                        UPDATE listings
                         SET    embedding  = @vec,
                                embedding_model = @embedding_model,
                                updated_at = NOW()
@@ -738,7 +801,8 @@ namespace propseekr_file_processor
           AND  status != 'CLOSED'
         ORDER  BY requirementid
     ", conn);
-            cmd.Parameters.AddWithValue("requirement_id", (object?)requirementId ?? DBNull.Value);
+            cmd.Parameters.Add("requirement_id", NpgsqlDbType.Integer).Value =
+                (object?)requirementId ?? DBNull.Value;
 
             var rows = new List<(int id, string text)>();
             await using (var reader = await cmd.ExecuteReaderAsync())
@@ -783,7 +847,7 @@ namespace propseekr_file_processor
                         try
                         {
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE requirements_table
+                        UPDATE requirements
                         SET    embedding  = @vec,
                                embedding_model = @embedding_model,
                                updated_at = NOW()
@@ -820,7 +884,7 @@ namespace propseekr_file_processor
                             float[] vector = await GenerateEmbeddingAsync(text);
 
                             await using var update = new NpgsqlCommand(@"
-                        UPDATE requirements_table
+                        UPDATE requirements
                         SET    embedding  = @vec,
                                embedding_model = @embedding_model,
                                updated_at = NOW()
@@ -899,7 +963,7 @@ namespace propseekr_file_processor
         //  MAIN EXTRACTION PIPELINE
         // ---------------------------------------------
         private async Task<string> ExtractPropertiesHybridFast(
-            string rawText, string fileName, ILambdaContext? ctx = null)
+            string rawText, string fileName, string defaultCity = "Indore", ILambdaContext? ctx = null)
         {
             var blocks = NormalizeWhatsAppBlocks(SplitWhatsAppMessages(rawText));
             ctx?.Logger.LogInformation($"Parsed {blocks.Count} usable message blocks after hygiene cleanup");
@@ -941,7 +1005,9 @@ namespace propseekr_file_processor
             }
 
             var llmChunks = BuildChunksFromBlocks(llmFallbackBlocks, 12_000);
-            var llmResults = await ExtractWithLlmParallel(llmChunks);
+            var llmResults = await ExtractWithLlmParallel(
+                llmChunks,
+                CityExtractor.NormalizeDefaultCity(defaultCity));
 
             foreach (var listing in llmResults)
             {
@@ -965,7 +1031,7 @@ namespace propseekr_file_processor
         }
 
         private const string SystemPrompt = """
-You are an expert real-estate data extraction engine for WhatsApp group messages from Indore, India.
+You are an expert real-estate data extraction engine for WhatsApp group messages from India.
 
 INPUT FORMAT - each block:
   SenderName: <name>
@@ -1022,11 +1088,11 @@ propertyType (one of the following EXACT options, categorized as):
 configuration: "2BHK", "3BHK", "1RK" - uppercase, no spaces. If multiple are mentioned (e.g. "2, 3 BHK", "2-3 bhk", "2 or 3 BHK"), return them comma-separated (e.g. "2BHK, 3BHK").
 
 location
-  - Translate to English. Append "Indore" if absent.
+  - Translate to English. Return the locality and any explicitly named city. The caller supplies a separate fallback city.
   - STOP immediately at: facing / corner / garden / open / road / ft / ( / size / area / rate / price / contact / bhk / sqft / budget / furnished / RERA / @
   - Location is ONLY the locality/area name. Never include facing direction, road width, plot features.
-  - WRONG: "Palakhedi Super Corridor Indore East Facing Corner Garden 40 Ft Road"
-  - RIGHT:  "Palakhedi Super Corridor Indore"
+  - WRONG: "Palakhedi Super Corridor East Facing Corner Garden 40 Ft Road"
+  - RIGHT:  "Palakhedi Super Corridor"
   - Max ~50 chars. Locality name only - no project name inside.
   - Common localities: Vijay Nagar, Mahalaxmi Nagar, Super Corridor, Palasia, Nipania,
     Ujjain Road, Palakhedi, Saket, Rau, Khajrana, Scheme 140/78/54, Geeta Bhawan,
@@ -1100,7 +1166,7 @@ Commercial plot for sale near Phoenix Mall, Vijay Nagar
 10000 sqft, Rate 13000/- Rs per sqft
 Contact: 7772064776
 OUTPUT:
-{"listings":[{"senderName":"Ravi","messageDate":"12/09/24","listingType":"Sale","propertyType":"Plot","configuration":"","location":"Vijay Nagar Indore","projectName":"","size":[10000],"sizeUnit":"sqft","width":null,"length":null,"price":null,"priceUnit":"PerSqFt","pricePerUnit":13000,"facing":"","roadInfo":"Near Phoenix Mall","furnishing":"","contactName":"Ravi","contactNumber":"7772064776","rawText":"Commercial Plot for Sale near Phoenix Mall, Vijay Nagar\n10000 sqft, Rate 13000 Rs per sqft\nContact: 7772064776"}]}
+{"listings":[{"senderName":"Ravi","messageDate":"12/09/24","listingType":"Sale","propertyType":"Plot","configuration":"","location":"Vijay Nagar","projectName":"","size":[10000],"sizeUnit":"sqft","width":null,"length":null,"price":null,"priceUnit":"PerSqFt","pricePerUnit":13000,"facing":"","roadInfo":"Near Phoenix Mall","furnishing":"","contactName":"Ravi","contactNumber":"7772064776","rawText":"Commercial Plot for Sale near Phoenix Mall, Vijay Nagar\n10000 sqft, Rate 13000 Rs per sqft\nContact: 7772064776"}]}
 
 INPUT:
 SenderName: ~ Agent
@@ -1110,7 +1176,7 @@ Factory For Sell at Badia Keema, Near BRG Industrial Park, Neemawar Road
 Plot Size 40000 sq.ft
 Vrinda Estates: Pankaj 9425318240 / Krish 9406653181
 OUTPUT:
-{"listings":[{"senderName":"Agent","messageDate":"14/11/24","listingType":"Sale","propertyType":"Industrial","configuration":"","location":"Badia Keema Neemavar Road Indore","projectName":"","size":[40000],"sizeUnit":"sqft","width":null,"length":null,"price":null,"priceUnit":"","pricePerUnit":null,"facing":"","roadInfo":"Near BRG Industrial Park","furnishing":"","contactName":"Vrinda Estates","contactNumber":"9425318240, 9406653181","rawText":"Factory for Sale at Badia Keema, near BRG Industrial Park, Neemavar Road\nPlot Size: 40000 sqft\nVrinda Estates - Pankaj: 9425318240, Krish: 9406653181"}]}
+{"listings":[{"senderName":"Agent","messageDate":"14/11/24","listingType":"Sale","propertyType":"Industrial","configuration":"","location":"Badia Keema Neemavar Road","projectName":"","size":[40000],"sizeUnit":"sqft","width":null,"length":null,"price":null,"priceUnit":"","pricePerUnit":null,"facing":"","roadInfo":"Near BRG Industrial Park","furnishing":"","contactName":"Vrinda Estates","contactNumber":"9425318240, 9406653181","rawText":"Factory for Sale at Badia Keema, near BRG Industrial Park, Neemavar Road\nPlot Size: 40000 sqft\nVrinda Estates - Pankaj: 9425318240, Krish: 9406653181"}]}
 """;
 
         // \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -1118,7 +1184,9 @@ OUTPUT:
         // \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 
-        private async Task<List<PropertyListing>> ExtractWithLlmParallel(List<string> chunks)
+        private async Task<List<PropertyListing>> ExtractWithLlmParallel(
+            List<string> chunks,
+            string defaultCity)
         {
             if (chunks.Count == 0) return new List<PropertyListing>();
 
@@ -1132,7 +1200,10 @@ OUTPUT:
                 {
                     var messages = new List<ChatMessage>
                     {
-                        new SystemChatMessage(SystemPrompt),
+                        new SystemChatMessage(
+                            $"The upload's fallback city is {defaultCity}, India. " +
+                            "Use it only when a record does not explicitly name a city. " +
+                            "Never replace an explicitly named city.\n\n" + SystemPrompt),
                         new UserChatMessage(chunk)
                     };
 
@@ -2547,11 +2618,6 @@ OUTPUT:
                 var cut = raw.LastIndexOf(' ', 70);
                 raw = (cut > 20 ? raw[..cut] : raw[..70]).Trim();
             }
-
-            // 11. Append Indore only if not already present
-            if (!string.IsNullOrWhiteSpace(raw) &&
-                !Regex.IsMatch(raw, @"\bindore\b", RegexOptions.IgnoreCase))
-                raw += " Indore";
 
             return ToTitle(raw);
         }

@@ -38,7 +38,15 @@ public sealed class BrokerIdentityService : IBrokerIdentityService
         if (existing.HasValue) return existing.Value;
         var user = await _db.Users.SingleAsync(x => x.Id == userId, cancellationToken);
         var brokerageName = user.ReraRegistrationNumber ?? "Independent Broker";
-        await _db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO brokers (name, phone_number, brokerage_name) VALUES ({user.Name}, {user.MobileNumber}, {brokerageName})", cancellationToken);
+        await _db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO brokers (
+                name,
+                phone_number,
+                brokerage_name,
+                confirmation_compliance_rate,
+                visibility_penalty_flag)
+            VALUES ({user.Name}, {user.MobileNumber}, {brokerageName}, 100.00, FALSE)
+            """, cancellationToken);
         var brokerId = await GetBrokerIdAsync(userId, cancellationToken) ?? throw new InvalidOperationException("Broker profile could not be created.");
         user.BrokerId = brokerId;
         if (!await _db.CreditWallets.AnyAsync(w => w.BrokerId == brokerId, cancellationToken))

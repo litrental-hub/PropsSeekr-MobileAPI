@@ -25,6 +25,8 @@ public static class FileProcessorConfigurationBridge
         ("VertexLocation", "GOOGLE_CLOUD_LOCATION"),
         ("EmbeddingModel", "VERTEX_EMBEDDING_MODEL"),
         ("EmbeddingDimensions", "EMBEDDING_DIMENSIONS"),
+        ("LocalBulkImportDirectory", "LOCAL_BULK_IMPORT_DIRECTORY"),
+        ("LocalMode", "FILE_PROCESSOR_LOCAL_MODE"),
         ("GoogleServiceAccount:Type", "GOOGLE_SERVICE_ACCOUNT_TYPE"),
         ("GoogleServiceAccount:ProjectId", "GOOGLE_CLOUD_PROJECT"),
         ("GoogleServiceAccount:PrivateKeyId", "GOOGLE_PRIVATE_KEY_ID"),

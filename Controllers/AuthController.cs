@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Npgsql;
 using PropSeekr.DTOs.Auth;
 using PropSeekr.Services.Interfaces;
+using System.Net.Sockets;
 
 namespace PropSeekr.Controllers;
 
@@ -11,13 +13,16 @@ public class AuthController : ControllerBase
 {
     private readonly IAuthService _authService;
     private readonly IEmailOtpService _emailOtpService;
+    private readonly ILogger<AuthController> _logger;
 
     public AuthController(
         IAuthService authService,
-        IEmailOtpService emailOtpService)
+        IEmailOtpService emailOtpService,
+        ILogger<AuthController> logger)
     {
         _authService = authService;
         _emailOtpService = emailOtpService;
+        _logger = logger;
     }
 
     [HttpPost("register")]
@@ -41,6 +46,14 @@ public class AuthController : ControllerBase
         {
             var response = await _authService.LoginAsync(request);
             return Ok(response);
+        }
+        catch (Exception ex) when (IsDatabaseConnectivityFailure(ex))
+        {
+            _logger.LogError(ex, "Login failed because the database is temporarily unavailable.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Login is temporarily unavailable. Please try again in a moment."
+            });
         }
         catch (Exception ex)
         {
@@ -136,5 +149,16 @@ public class AuthController : ControllerBase
             success = false,
             message = "Refresh token endpoint is retired. Access tokens are single-use session tokens; please authenticate via login or OTP."
         });
+    }
+
+    private static bool IsDatabaseConnectivityFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is NpgsqlException or SocketException or TimeoutException)
+                return true;
+        }
+
+        return false;
     }
 }

@@ -116,4 +116,21 @@ public class Requirement
     [Column("posted_by")]
     [MaxLength(50)]
     public string? PostedBy { get; set; }
+
+    [Column("embedding_model")]
+    public string? EmbeddingModel { get; set; }
+
+    [Column("isavailable")]
+    public bool IsAvailable { get; set; } = true;
+
+    [Column("location_resolution_status")]
+    [MaxLength(24)]
+    public string LocationResolutionStatus { get; set; } = "missing";
+
+    [Column("location_resolution_note")]
+    [MaxLength(1000)]
+    public string? LocationResolutionNote { get; set; }
+
+    [Column("location_resolved_at")]
+    public DateTime? LocationResolvedAt { get; set; }
 }

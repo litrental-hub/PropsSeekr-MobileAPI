@@ -107,6 +107,7 @@ BEGIN
             r.embedding_model,
             r.raw_message_text,
             COALESCE(NULLIF(BTRIM(r.city), ''), NULLIF(BTRIM(first_locality.city), '')) AS resolved_city,
+            COALESCE(NULLIF(first_locality.geocoding_status, ''), 'pending') AS locality_geocoding_status,
             UPPER(COALESCE(r.budget_type, '')) IN ('FLEXIBLE', 'NOBUDGET') AS budget_is_flexible
         FROM public.requirements r
         LEFT JOIN public.master first_locality
@@ -144,6 +145,11 @@ BEGIN
         FROM requirement_base r
         WHERE r.resolved_city IS NOT NULL
           AND (r.budget_is_flexible OR r.budget IS NOT NULL)
+          AND (
+              r.preferred_locality_ids IS NULL
+              OR array_length(r.preferred_locality_ids, 1) IS NULL
+              OR r.locality_geocoding_status IN ('resolved', 'verified')
+          )
     ),
     requirement_computed AS (
         SELECT
@@ -226,6 +232,7 @@ BEGIN
             locality.city AS master_city,
             locality.lat AS listing_lat,
             locality.lng AS listing_lng,
+            COALESCE(NULLIF(locality.geocoding_status, ''), 'pending') AS locality_geocoding_status,
             COALESCE(NULLIF(BTRIM(l.city), ''), NULLIF(BTRIM(locality.city), '')) AS resolved_city
         FROM public.listings l
         LEFT JOIN public.master locality ON locality.masterid = l.master_id
@@ -255,6 +262,8 @@ BEGIN
             END AS normalized_price
         FROM listing_base l
         WHERE l.resolved_city IS NOT NULL
+          AND l.master_id IS NOT NULL
+          AND l.locality_geocoding_status IN ('resolved', 'verified')
     ),
     listing_computed AS (
         SELECT
@@ -317,6 +326,7 @@ BEGIN
                 pm.masterid = l.master_id AS is_exact
             FROM public.master pm
             WHERE pm.masterid = ANY(r.preferred_locality_ids)
+              AND COALESCE(NULLIF(pm.geocoding_status, ''), 'pending') IN ('resolved', 'verified')
             ORDER BY
                 (pm.masterid = l.master_id) DESC,
                 similarity(LOWER(COALESCE(pm.area, '')), LOWER(COALESCE(l.listing_area, ''))) DESC,

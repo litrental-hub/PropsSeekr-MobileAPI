@@ -22,6 +22,7 @@ public class CreateRequirementRequestDto
     public string? FurnishingPreference { get; set; }
     public string? FacingPreference { get; set; }
     public string? AdditionalNotes { get; set; }
+    public bool? IsAvailable { get; set; }
 }
 
 public class PreferredLocationDto

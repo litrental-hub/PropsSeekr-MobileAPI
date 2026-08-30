@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -12,9 +13,11 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260830142328_ReconcileCanonicalDatabaseDesign")]
+    partial class ReconcileCanonicalDatabaseDesign
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -182,14 +185,6 @@ namespace PropSeekr.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
 
-                    b.Property<string>("DefaultCity")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasDefaultValue("Indore")
-                        .HasColumnName("default_city");
-
                     b.Property<int>("FailedRecords")
                         .HasColumnType("integer")
                         .HasColumnName("failed_records");
@@ -202,13 +197,13 @@ namespace PropSeekr.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("listings_inserted");
 
-                    b.Property<Guid?>("LockToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("lock_token");
-
                     b.Property<DateTime?>("LockedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("locked_at");
+
+                    b.Property<Guid?>("LockToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("lock_token");
 
                     b.Property<int>("MaxAttempts")
                         .HasColumnType("integer")
@@ -686,23 +681,6 @@ namespace PropSeekr.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("listing_type");
 
-                    b.Property<string>("LocationResolutionNote")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
-                        .HasColumnName("location_resolution_note");
-
-                    b.Property<string>("LocationResolutionStatus")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(24)
-                        .HasColumnType("character varying(24)")
-                        .HasDefaultValue("missing")
-                        .HasColumnName("location_resolution_status");
-
-                    b.Property<DateTime?>("LocationResolvedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("location_resolved_at");
-
                     b.Property<int?>("MasterId")
                         .HasColumnType("integer")
                         .HasColumnName("master_id");
@@ -780,8 +758,6 @@ namespace PropSeekr.Migrations
                     b.HasIndex("PropertyType");
 
                     b.HasIndex("Status");
-
-                    b.HasIndex("LocationResolutionStatus", "Id");
 
                     b.ToTable("listings");
                 });
@@ -943,103 +919,6 @@ namespace PropSeekr.Migrations
                     b.ToTable("listing_sizes");
                 });
 
-            modelBuilder.Entity("PropSeekr.Models.LocationRemediationJob", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTime>("AvailableAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("available_at");
-
-                    b.Property<int>("BatchSize")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(25)
-                        .HasColumnName("batch_size");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("completed_at");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at");
-
-                    b.Property<int>("CursorId")
-                        .HasColumnType("integer")
-                        .HasColumnName("cursor_id");
-
-                    b.Property<string>("DefaultCity")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasDefaultValue("Indore")
-                        .HasColumnName("default_city");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("last_error");
-
-                    b.Property<int>("ListingsResolved")
-                        .HasColumnType("integer")
-                        .HasColumnName("listings_resolved");
-
-                    b.Property<Guid?>("LockToken")
-                        .HasColumnType("uuid")
-                        .HasColumnName("lock_token");
-
-                    b.Property<DateTime?>("LockedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("locked_at");
-
-                    b.Property<int>("MasterResolved")
-                        .HasColumnType("integer")
-                        .HasColumnName("master_resolved");
-
-                    b.Property<Guid>("RequestedByUserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("requested_by_user_id");
-
-                    b.Property<int>("RequirementsResolved")
-                        .HasColumnType("integer")
-                        .HasColumnName("requirements_resolved");
-
-                    b.Property<int>("ReviewRequired")
-                        .HasColumnType("integer")
-                        .HasColumnName("review_required");
-
-                    b.Property<string>("Stage")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasDefaultValue("master")
-                        .HasColumnName("stage");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasDefaultValue("queued")
-                        .HasColumnName("status");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Status", "AvailableAt");
-
-                    b.ToTable("location_remediation_jobs", (string)null);
-                });
-
             modelBuilder.Entity("PropSeekr.Models.MasterLocation", b =>
                 {
                     b.Property<int>("Id")
@@ -1061,66 +940,17 @@ namespace PropSeekr.Migrations
                         .HasColumnType("text")
                         .HasColumnName("city");
 
-                    b.Property<string>("FormattedAddress")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("formatted_address");
-
-                    b.Property<DateTime?>("GeocodedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("geocoded_at");
-
-                    b.Property<decimal?>("GeocodingConfidence")
-                        .HasColumnType("numeric")
-                        .HasColumnName("geocoding_confidence");
-
-                    b.Property<string>("GeocodingError")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
-                        .HasColumnName("geocoding_error");
-
-                    b.Property<string>("GeocodingProvider")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)")
-                        .HasColumnName("geocoding_provider");
-
-                    b.Property<string>("GeocodingStatus")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(24)
-                        .HasColumnType("character varying(24)")
-                        .HasDefaultValue("pending")
-                        .HasColumnName("geocoding_status");
-
                     b.Property<double?>("Latitude")
                         .HasColumnType("double precision")
                         .HasColumnName("lat");
-
-                    b.Property<string>("LocationPrecision")
-                        .HasMaxLength(40)
-                        .HasColumnType("character varying(40)")
-                        .HasColumnName("location_precision");
 
                     b.Property<double?>("Longitude")
                         .HasColumnType("double precision")
                         .HasColumnName("lng");
 
-                    b.Property<string>("ProviderPlaceId")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("provider_place_id");
-
-                    b.Property<bool>("ReviewRequired")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("review_required");
-
                     b.HasKey("Id");
 
                     b.HasIndex("City", "Area");
-
-                    b.HasIndex("GeocodingStatus", "Id");
 
                     b.ToTable("master", (string)null);
                 });
@@ -1854,23 +1684,6 @@ namespace PropSeekr.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_confirmed_at");
 
-                    b.Property<string>("LocationResolutionNote")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)")
-                        .HasColumnName("location_resolution_note");
-
-                    b.Property<string>("LocationResolutionStatus")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(24)
-                        .HasColumnType("character varying(24)")
-                        .HasDefaultValue("missing")
-                        .HasColumnName("location_resolution_status");
-
-                    b.Property<DateTime?>("LocationResolvedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("location_resolved_at");
-
                     b.Property<DateTime?>("MessageDatetime")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("message_datetime");
@@ -1950,8 +1763,6 @@ namespace PropSeekr.Migrations
                     b.HasIndex("RequirementType");
 
                     b.HasIndex("Status");
-
-                    b.HasIndex("LocationResolutionStatus", "Id");
 
                     b.ToTable("requirements");
                 });

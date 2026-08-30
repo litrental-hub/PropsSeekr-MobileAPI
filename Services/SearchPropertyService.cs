@@ -246,10 +246,12 @@ public class SearchPropertyService : ISearchPropertyService
             INNER JOIN public.master ml ON ml.masterid = l.master_id
             WHERE ml.lat IS NOT NULL
               AND ml.lng IS NOT NULL
+              AND COALESCE(NULLIF(ml.geocoding_status, ''), 'pending') IN ('resolved', 'verified')
               AND {distanceSql} <= @radius_km
               AND UPPER(COALESCE(l.listing_type, '')) = ANY(@transaction_types)
               AND UPPER(COALESCE(l.status, 'ACTIVE')) NOT IN
                   ('DELETED', 'CLOSED', 'SOLD', 'RENTED', 'INACTIVE', 'EXPIRED')
+              AND l.isavailable
               AND (l.expires_at IS NULL OR l.expires_at > NOW())
             """);
 
@@ -301,6 +303,7 @@ public class SearchPropertyService : ISearchPropertyService
                 FROM unnest(r.preferred_locality_ids) AS locality_id
                 INNER JOIN public.master locality ON locality.masterid = locality_id
                 WHERE locality.lat IS NOT NULL AND locality.lng IS NOT NULL
+                  AND COALESCE(NULLIF(locality.geocoding_status, ''), 'pending') IN ('resolved', 'verified')
                 ORDER BY {distanceSql}
                 LIMIT 1
             ) nearest ON TRUE
@@ -308,6 +311,7 @@ public class SearchPropertyService : ISearchPropertyService
               AND UPPER(COALESCE(r.requirement_type, '')) = ANY(@transaction_types)
               AND UPPER(COALESCE(r.status, 'ACTIVE')) NOT IN
                   ('DELETED', 'CLOSED', 'FULFILLED', 'INACTIVE', 'EXPIRED')
+              AND r.isavailable
               AND (r.expires_at IS NULL OR r.expires_at > NOW())
             """);
 

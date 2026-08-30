@@ -1,410 +1,344 @@
+using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Web;
+using Npgsql;
 
-namespace propseekr_file_processor
+namespace propseekr_file_processor;
+
+public sealed record GeocodingResult(
+    string Status,
+    decimal? Latitude,
+    decimal? Longitude,
+    string Provider,
+    string? PlaceId,
+    string? FormattedAddress,
+    string? Precision,
+    decimal Confidence,
+    string? Error)
 {
-    /// <summary>
-    /// Geocodes location strings using OpenStreetMap Nominatim (free, no API key).
-    /// Returns lat/lng coordinates for master table population.
-    /// </summary>
-    public class GeocodingService : IDisposable
+    public bool IsResolved => Status == "resolved" && Latitude.HasValue && Longitude.HasValue;
+}
+
+/// <summary>
+/// Server-side Google Geocoding API client. Results must belong to the expected
+/// city and represent the requested area rather than a generic city centre.
+/// </summary>
+public sealed class GeocodingService : IDisposable
+{
+    private const decimal AutoAcceptConfidence = 0.70m;
+    private readonly HttpClient _http = new();
+    private readonly string? _apiKey;
+    private readonly Dictionary<string, GeocodingResult> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _requestGate = new(1, 1);
+    private DateTime _lastRequestTime = DateTime.MinValue;
+
+    public GeocodingService()
     {
-        private readonly HttpClient _http;
-        private DateTime _lastRequestTime = DateTime.MinValue;
+        _apiKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY")
+            ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("PropSeekr/2.0 (server-geocoding)");
+    }
 
-        // In-memory cache to avoid re-geocoding same location within a batch
-        private readonly Dictionary<string, (decimal lat, decimal lng)?> _cache
-            = new(StringComparer.OrdinalIgnoreCase);
+    public async Task<(decimal lat, decimal lng)?> GeocodeAsync(
+        string area,
+        string city,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await GeocodeDetailedAsync(area, city, cancellationToken);
+        return result.IsResolved ? (result.Latitude!.Value, result.Longitude!.Value) : null;
+    }
 
-        // Cache for city-center coordinates to identify fallback responses
-        private readonly Dictionary<string, (decimal lat, decimal lng)?> _cityCenterCache
-            = new(StringComparer.OrdinalIgnoreCase);
+    public async Task<GeocodingResult> GeocodeDetailedAsync(
+        string area,
+        string city,
+        CancellationToken cancellationToken = default)
+    {
+        area = area?.Trim() ?? string.Empty;
+        city = CityExtractor.NormalizeDefaultCity(city);
+        var cacheKey = $"{Normalize(area)}|{Normalize(city)}";
+        if (_cache.TryGetValue(cacheKey, out var cached)) return cached;
 
-        public GeocodingService()
+        if (string.IsNullOrWhiteSpace(_apiKey))
+            return Cache(cacheKey, Failure("configuration_error", "Google server geocoding is not configured."));
+        if (string.IsNullOrWhiteSpace(area))
+            return Cache(cacheKey, Failure("review_required", "No locality text was supplied."));
+
+        await _requestGate.WaitAsync(cancellationToken);
+        try
         {
-            _http = new HttpClient();
-            // Nominatim requires a valid User-Agent identifying your app
-            _http.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "PropSeekr/1.0 (property-matching-platform)");
-        }
-
-        /// <summary>
-        /// Geocode a location string (e.g. "Super Corridor, Indore, India")
-        /// Returns (lat, lng) or null if not found.
-        /// </summary>
-        public async Task<(decimal lat, decimal lng)?> GeocodeAsync(string area, string city)
-        {
-            var cacheKey = $"{area}|{city}";
-
-            // Check cache first
-            if (_cache.TryGetValue(cacheKey, out var cached))
-                return cached;
-
-            try
-            {
-                // Respect Nominatim rate limit: max 1 request per second
-                await RespectRateLimitAsync();
-
-                // Build search query: "Super Corridor, Indore, Madhya Pradesh, India"
-                var query = BuildSearchQuery(area, city);
-                var encodedQuery = HttpUtility.UrlEncode(query);
-
-                var url = $"https://nominatim.openstreetmap.org/search" +
-                          $"?q={encodedQuery}" +
-                          $"&format=json" +
-                          $"&limit=1" +
-                          $"&countrycodes=in"; // Restrict to India
-
-                var response = await _http.GetStringAsync(url);
-                var results = JsonSerializer.Deserialize<List<NominatimResult>>(response,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                if (results != null && results.Count > 0)
-                {
-                    var first = results[0];
-                    if (decimal.TryParse(first.Lat, out var lat) &&
-                        decimal.TryParse(first.Lon, out var lng))
-                    {
-                        // Check if these coordinates are Indore's or current city's default center coordinates
-                        if (!string.IsNullOrWhiteSpace(area) && !area.Equals(city, StringComparison.OrdinalIgnoreCase))
-                        {
-                            var cityCoords = await GetCityCenterCoordsAsync(city);
-                            if (cityCoords.HasValue)
-                            {
-                                // If they are exactly the city center coordinates (within ~11 meters / 0.0001 deg),
-                                // it means Nominatim fell back to city-level geocoding. Reject it for specific sub-areas.
-                                if (Math.Abs(lat - cityCoords.Value.lat) < 0.0001m &&
-                                    Math.Abs(lng - cityCoords.Value.lng) < 0.0001m)
-                                {
-                                    Console.WriteLine($"Geocoding for '{area}, {city}' returned generic city-center coordinates. Rejecting as fallback.");
-                                    _cache[cacheKey] = null;
-                                    return null;
-                                }
-                            }
-                        }
-
-                        var coords = (lat, lng);
-                        _cache[cacheKey] = coords;
-                        return coords;
-                    }
-                }
-
-                /* PREVIOUS CODE / BACKUP: City fallback removed to prevent generic coordinates.
-                if (!string.IsNullOrWhiteSpace(area))
-                {
-                    await RespectRateLimitAsync();
-
-                    var fallbackQuery = HttpUtility.UrlEncode($"{city}, India");
-                    var fallbackUrl = $"https://nominatim.openstreetmap.org/search" +
-                                     $"?q={fallbackQuery}" +
-                                     $"&format=json" +
-                                     $"&limit=1" +
-                                     $"&countrycodes=in";
-
-                    var fallbackResponse = await _http.GetStringAsync(fallbackUrl);
-                    var fallbackResults = JsonSerializer.Deserialize<List<NominatimResult>>(
-                        fallbackResponse,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                    if (fallbackResults != null && fallbackResults.Count > 0)
-                    {
-                        var first = fallbackResults[0];
-                        if (decimal.TryParse(first.Lat, out var lat2) &&
-                            decimal.TryParse(first.Lon, out var lng2))
-                        {
-                            // Use city-level coords as approximate
-                            var coords = (lat2, lng2);
-                            _cache[cacheKey] = coords;
-                            return coords;
-                        }
-                    }
-                }
-                */
-
-                // Not found
-                _cache[cacheKey] = null;
-                return null;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Geocoding failed for '{area}, {city}': {ex.Message}");
-                _cache[cacheKey] = null;
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Batch geocode all master rows that have NULL lat/lng.
-        /// Call this after ingestion to fill missing coordinates.
-        /// </summary>
-        public async Task<int> BackfillMasterCoordinatesAsync(Npgsql.NpgsqlConnection conn)
-        {
-            // Fetch all master rows with NULL coordinates
-            var rows = new List<(int id, string area, string city)>();
-
-            await using (var cmd = new Npgsql.NpgsqlCommand(@"
-                SELECT masterid, area, city FROM master
-                WHERE lat IS NULL OR lng IS NULL
-                ORDER BY masterid", conn))
-            {
-                await using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    rows.Add((
-                        reader.GetInt32(0),
-                        reader.GetString(1),
-                        reader.GetString(2)
-                    ));
-                }
-            }
-
-            if (rows.Count == 0) return 0;
-
-            int updated = 0;
-
-            foreach (var (id, area, city) in rows)
-            {
-                var coords = await GeocodeAsync(area, city);
-                if (coords.HasValue)
-                {
-                    await using var updateCmd = new Npgsql.NpgsqlCommand(@"
-                        UPDATE master SET lat = @lat, lng = @lng
-                        WHERE masterid = @id", conn);
-                    updateCmd.Parameters.AddWithValue("id", id);
-                    updateCmd.Parameters.AddWithValue("lat", coords.Value.lat);
-                    updateCmd.Parameters.AddWithValue("lng", coords.Value.lng);
-                    await updateCmd.ExecuteNonQueryAsync();
-                    updated++;
-
-                    Console.WriteLine(
-                        $"Geocoded: {area}, {city} â†’ ({coords.Value.lat}, {coords.Value.lng})");
-                }
-                else
-                {
-                    Console.WriteLine($"Geocoding failed: {area}, {city} â†’ no results");
-                }
-            }
-
-            return updated;
-        }
-
-        private async Task<(decimal lat, decimal lng)?> GetCityCenterCoordsAsync(string city)
-        {
-            if (string.IsNullOrWhiteSpace(city)) return null;
-            if (_cityCenterCache.TryGetValue(city, out var coords)) return coords;
-
-            try
-            {
-                await RespectRateLimitAsync();
-                var encodedQuery = HttpUtility.UrlEncode($"{city}, India");
-                var url = $"https://nominatim.openstreetmap.org/search" +
-                          $"?q={encodedQuery}" +
-                          $"&format=json" +
-                          $"&limit=1" +
-                          $"&countrycodes=in";
-
-                var response = await _http.GetStringAsync(url);
-                var results = JsonSerializer.Deserialize<List<NominatimResult>>(response,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                if (results != null && results.Count > 0)
-                {
-                    var first = results[0];
-                    if (decimal.TryParse(first.Lat, out var lat) &&
-                        decimal.TryParse(first.Lon, out var lng))
-                    {
-                        var cityCoords = (lat, lng);
-                        _cityCenterCache[city] = cityCoords;
-                        return cityCoords;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Failed to get city center coords for {city}: {ex.Message}");
-            }
-
-            _cityCenterCache[city] = null;
-            return null;
-        }
-
-        // â”€â”€ HELPERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-        private string BuildSearchQuery(string area, string city)
-        {
-            // Build query with increasing specificity
-            // "Super Corridor, Indore, Madhya Pradesh, India"
-            var parts = new List<string>();
-
-            if (!string.IsNullOrWhiteSpace(area))
-                parts.Add(area.Trim());
-
-            if (!string.IsNullOrWhiteSpace(city))
-                parts.Add(city.Trim());
-
-            // Add state hint based on city (helps Nominatim accuracy)
-            var state = GetStateForCity(city);
-            if (!string.IsNullOrWhiteSpace(state))
-                parts.Add(state);
-
-            parts.Add("India");
-
-            return string.Join(", ", parts);
-        }
-
-        private static string? GetStateForCity(string? city)
-        {
-            if (string.IsNullOrWhiteSpace(city)) return null;
-
-            // Common city â†’ state mapping for India
-            return city.Trim().ToLower() switch
-            {
-                "indore" or "bhopal" or "gwalior" or "jabalpur" or "ujjain" or
-                "dewas" or "ratlam" or "dhar" or "pithampur" or "mhow"
-                    => "Madhya Pradesh",
-
-                "mumbai" or "pune" or "nagpur" or "nashik" or "thane"
-                    => "Maharashtra",
-
-                "delhi" or "new delhi" or "noida" or "gurgaon" or "gurugram" or
-                "faridabad" or "ghaziabad"
-                    => "Delhi NCR",
-
-                "bangalore" or "bengaluru" or "mysore"
-                    => "Karnataka",
-
-                "hyderabad" or "secunderabad"
-                    => "Telangana",
-
-                "chennai" or "coimbatore" or "madurai"
-                    => "Tamil Nadu",
-
-                "kolkata" or "howrah"
-                    => "West Bengal",
-
-                "ahmedabad" or "surat" or "vadodara" or "rajkot"
-                    => "Gujarat",
-
-                "jaipur" or "udaipur" or "jodhpur" or "kota"
-                    => "Rajasthan",
-
-                "lucknow" or "kanpur" or "agra" or "varanasi" or "prayagraj"
-                    => "Uttar Pradesh",
-
-                "chandigarh" or "mohali" or "ludhiana" or "amritsar"
-                    => "Punjab",
-
-                "patna" or "gaya"
-                    => "Bihar",
-
-                "bhubaneswar" or "cuttack"
-                    => "Odisha",
-
-                "kochi" or "trivandrum" or "thiruvananthapuram" or "calicut"
-                    => "Kerala",
-
-                "raipur" or "bilaspur"
-                    => "Chhattisgarh",
-
-                "ranchi" or "jamshedpur" or "dhanbad"
-                    => "Jharkhand",
-
-                "dehradun" or "haridwar" or "rishikesh"
-                    => "Uttarakhand",
-
-                "goa" or "panaji"
-                    => "Goa",
-
-                "guwahati" or "shillong"
-                    => "Assam",
-
-                _ => null
-            };
-        }
-
-        private async Task RespectRateLimitAsync()
-        {
-            // Nominatim requires max 1 request per second
             var elapsed = DateTime.UtcNow - _lastRequestTime;
-            if (elapsed.TotalMilliseconds < 1100)
-            {
-                await Task.Delay(1100 - (int)elapsed.TotalMilliseconds);
-            }
+            if (elapsed.TotalMilliseconds < 75)
+                await Task.Delay(75 - (int)elapsed.TotalMilliseconds, cancellationToken);
             _lastRequestTime = DateTime.UtcNow;
+
+            var address = string.Join(", ", new[] { area, city, StateForCity(city), "India" }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+            var url = "https://maps.googleapis.com/maps/api/geocode/json" +
+                      $"?address={HttpUtility.UrlEncode(address)}" +
+                      "&components=country%3AIN&region=in" +
+                      $"&key={HttpUtility.UrlEncode(_apiKey)}";
+            using var response = await _http.GetAsync(url, cancellationToken);
+            var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+                return Cache(cacheKey, Failure("provider_error", $"Google returned HTTP {(int)response.StatusCode}."));
+
+            var envelope = JsonSerializer.Deserialize<GoogleEnvelope>(payload,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (envelope == null || !string.Equals(envelope.Status, "OK", StringComparison.OrdinalIgnoreCase) ||
+                envelope.Results is not { Count: > 0 })
+            {
+                var message = string.IsNullOrWhiteSpace(envelope?.ErrorMessage)
+                    ? $"Google geocoding status: {envelope?.Status ?? "invalid_response"}."
+                    : envelope.ErrorMessage;
+                return Cache(cacheKey, Failure(
+                    string.Equals(envelope?.Status, "ZERO_RESULTS", StringComparison.OrdinalIgnoreCase)
+                        ? "review_required"
+                        : "provider_error",
+                    message));
+            }
+
+            var best = envelope.Results.Select(result => Score(result, area, city))
+                .OrderByDescending(candidate => candidate.Confidence)
+                .First();
+            if (best.Result.Geometry?.Location == null)
+                return Cache(cacheKey, Failure("provider_error", "Google returned a result without coordinates."));
+
+            var resolved = best.CityMatches && best.Confidence >= AutoAcceptConfidence;
+            return Cache(cacheKey, new GeocodingResult(
+                resolved ? "resolved" : "review_required",
+                resolved ? best.Result.Geometry.Location.Lat : null,
+                resolved ? best.Result.Geometry.Location.Lng : null,
+                "google",
+                Truncate(best.Result.PlaceId, 255),
+                Truncate(best.Result.FormattedAddress, 500),
+                Truncate(best.Result.Geometry.LocationType, 40),
+                best.Confidence,
+                resolved ? null : "The provider result was not precise enough or did not match the expected city."));
         }
-
-        public void Dispose()
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _http.Dispose();
+            throw;
         }
-
-        // â”€â”€ NOMINATIM RESPONSE MODEL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-        private class NominatimResult
+        catch (Exception ex)
         {
-            public string? Lat { get; set; }
-            public string? Lon { get; set; }
-            public string? DisplayName { get; set; }
-            public string? Type { get; set; }
+            return Cache(cacheKey, Failure("provider_error", ex.Message));
+        }
+        finally
+        {
+            _requestGate.Release();
         }
     }
 
-    /// <summary>
-    /// Helper to extract city from a location string.
-    /// Used when city is not explicitly provided.
-    /// </summary>
-    public static class CityExtractor
+    public async Task<int> BackfillMasterCoordinatesAsync(
+        NpgsqlConnection connection,
+        int maximumRows = 25,
+        CancellationToken cancellationToken = default)
     {
-        // Known Indian cities for extraction from location text
-        private static readonly string[] KnownCities = new[]
+        var rows = new List<(int Id, string Area, string City)>();
+        await using (var command = new NpgsqlCommand("""
+            SELECT masterid, area, city
+            FROM master
+            WHERE (lat IS NULL OR lng IS NULL)
+              AND COALESCE(geocoding_status, 'pending') IN ('pending', 'provider_error')
+            ORDER BY masterid
+            LIMIT @maximum_rows
+            """, connection))
         {
-            "Indore", "Mumbai", "Delhi", "Bangalore", "Bengaluru",
-            "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad",
-            "Jaipur", "Lucknow", "Surat", "Kanpur", "Nagpur",
-            "Bhopal", "Gwalior", "Jabalpur", "Ujjain", "Dewas",
-            "Ratlam", "Pithampur", "Mhow", "Gurgaon", "Gurugram",
-            "Noida", "Ghaziabad", "Faridabad", "Thane", "Nashik",
-            "Vadodara", "Rajkot", "Chandigarh", "Ludhiana", "Amritsar",
-            "Coimbatore", "Madurai", "Kochi", "Trivandrum",
-            "Patna", "Ranchi", "Dehradun", "Raipur", "Bhubaneswar",
-            "Guwahati", "Goa", "Udaipur", "Jodhpur", "Kota",
-            "Agra", "Varanasi", "Mysore", "Secunderabad"
+            command.Parameters.AddWithValue("maximum_rows", maximumRows);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                rows.Add((reader.GetInt32(0), reader.GetString(1), reader.GetString(2)));
+        }
+
+        var updated = 0;
+        foreach (var row in rows)
+        {
+            var result = await GeocodeDetailedAsync(row.Area, row.City, cancellationToken);
+            await using var update = new NpgsqlCommand("""
+                UPDATE master
+                SET lat = @lat, lng = @lng, geocoding_status = @status,
+                    geocoding_provider = @provider, provider_place_id = @place_id,
+                    formatted_address = @formatted_address, location_precision = @precision,
+                    geocoding_confidence = @confidence, geocoded_at = NOW(),
+                    geocoding_error = @error, review_required = @review_required
+                WHERE masterid = @id
+                """, connection);
+            update.Parameters.AddWithValue("id", row.Id);
+            update.Parameters.AddWithValue("lat", (object?)result.Latitude ?? DBNull.Value);
+            update.Parameters.AddWithValue("lng", (object?)result.Longitude ?? DBNull.Value);
+            update.Parameters.AddWithValue("status", result.Status);
+            update.Parameters.AddWithValue("provider", result.Provider);
+            update.Parameters.AddWithValue("place_id", (object?)result.PlaceId ?? DBNull.Value);
+            update.Parameters.AddWithValue("formatted_address", (object?)result.FormattedAddress ?? DBNull.Value);
+            update.Parameters.AddWithValue("precision", (object?)result.Precision ?? DBNull.Value);
+            update.Parameters.AddWithValue("confidence", result.Confidence);
+            update.Parameters.AddWithValue("error", (object?)Truncate(result.Error, 1000) ?? DBNull.Value);
+            update.Parameters.AddWithValue("review_required", !result.IsResolved);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+            if (result.IsResolved) updated++;
+        }
+        return updated;
+    }
+
+    private static ScoredResult Score(GoogleResult result, string area, string city)
+    {
+        var normalizedCity = NormalizeCityAlias(city);
+        var cityValues = result.AddressComponents
+            .Where(component => component.Types.Any(type => type is "locality" or "postal_town" or "administrative_area_level_2" or "administrative_area_level_3"))
+            .SelectMany(component => new[] { component.LongName, component.ShortName })
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => NormalizeCityAlias(value!))
+            .ToArray();
+        var normalizedAddress = Normalize(result.FormattedAddress);
+        var cityMatches = cityValues.Any(value => value == normalizedCity || value.Contains(normalizedCity) || normalizedCity.Contains(value))
+                          || normalizedAddress.Contains(normalizedCity);
+
+        var resultTypes = result.Types.Concat(result.AddressComponents.SelectMany(component => component.Types))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        decimal confidence = cityMatches ? 0.35m : 0m;
+        if (resultTypes.Overlaps(new[] { "street_address", "premise", "subpremise", "neighborhood", "sublocality", "sublocality_level_1", "route" }))
+            confidence += 0.35m;
+        else if (resultTypes.Contains("locality")) confidence += 0.15m;
+
+        confidence += result.Geometry?.LocationType?.ToUpperInvariant() switch
+        {
+            "ROOFTOP" => 0.20m,
+            "RANGE_INTERPOLATED" => 0.17m,
+            "GEOMETRIC_CENTER" => 0.12m,
+            _ => 0.05m
         };
 
-        /// <summary>
-        /// Extract city name from location text.
-        /// "Super Corridor Indore" â†’ "Indore"
-        /// "Vijay Nagar, Mumbai" â†’ "Mumbai"
-        /// Returns defaultCity if no city found.
-        /// </summary>
-        public static string ExtractCity(string? location, string defaultCity = "Indore")
-        {
-            if (string.IsNullOrWhiteSpace(location))
-                return defaultCity;
+        var normalizedArea = Normalize(area);
+        var meaningfulTokens = normalizedArea.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(token => token.Length >= 3 && token is not "road" and not "nagar" and not "near")
+            .ToArray();
+        if (normalizedAddress.Contains(normalizedArea) || meaningfulTokens.Any(normalizedAddress.Contains))
+            confidence += 0.20m;
+        return new ScoredResult(result, cityMatches, Math.Clamp(confidence, 0m, 1m));
+    }
 
-            foreach (var city in KnownCities)
-            {
-                if (location.Contains(city, StringComparison.OrdinalIgnoreCase))
-                    return city;
-            }
+    private static string Normalize(string? value) => Regex.Replace(
+        (value ?? string.Empty).Trim().ToLowerInvariant(), @"[^a-z0-9]+", " ").Trim();
 
-            return defaultCity;
-        }
+    private static string NormalizeCityAlias(string value) => Normalize(value) switch
+    {
+        "bangalore" => "bengaluru",
+        "gurgaon" => "gurugram",
+        "bombay" => "mumbai",
+        _ => Normalize(value)
+    };
 
-        /// <summary>
-        /// Remove city name from location to get just the area/locality.
-        /// "Super Corridor Indore" â†’ "Super Corridor"
-        /// </summary>
-        public static string RemoveCityFromLocation(string location, string city)
-        {
-            if (string.IsNullOrWhiteSpace(location)) return "";
+    private GeocodingResult Cache(string key, GeocodingResult result)
+    {
+        _cache[key] = result;
+        return result;
+    }
 
-            var clean = System.Text.RegularExpressions.Regex.Replace(
-                location, $@"\b{city}\b", "",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+    private static GeocodingResult Failure(string status, string error) =>
+        new(status, null, null, "google", null, null, null, 0m, Truncate(error, 1000));
+    private static string? Truncate(string? value, int length) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Length <= length ? value : value[..length];
 
-            return clean.Trim(' ', ',', '.', '-', ':');
-        }
+    private static string? StateForCity(string city) => NormalizeCityAlias(city) switch
+    {
+        "indore" or "bhopal" or "gwalior" or "jabalpur" or "ujjain" or "dewas" or "ratlam" or "dhar" or "pithampur" or "mhow" => "Madhya Pradesh",
+        "mumbai" or "pune" or "nagpur" or "nashik" or "thane" => "Maharashtra",
+        "delhi" or "new delhi" or "noida" or "gurugram" or "faridabad" or "ghaziabad" => "Delhi NCR",
+        "bengaluru" or "mysore" => "Karnataka",
+        "hyderabad" or "secunderabad" => "Telangana",
+        "chennai" or "coimbatore" or "madurai" => "Tamil Nadu",
+        "kolkata" or "howrah" => "West Bengal",
+        "ahmedabad" or "surat" or "vadodara" or "rajkot" => "Gujarat",
+        "jaipur" or "udaipur" or "jodhpur" or "kota" => "Rajasthan",
+        "lucknow" or "kanpur" or "agra" or "varanasi" or "prayagraj" => "Uttar Pradesh",
+        _ => null
+    };
+
+    public void Dispose()
+    {
+        _requestGate.Dispose();
+        _http.Dispose();
+    }
+
+    private sealed record ScoredResult(GoogleResult Result, bool CityMatches, decimal Confidence);
+    private sealed class GoogleEnvelope
+    {
+        public string? Status { get; set; }
+        [JsonPropertyName("error_message")]
+        public string? ErrorMessage { get; set; }
+        public List<GoogleResult> Results { get; set; } = [];
+    }
+    private sealed class GoogleResult
+    {
+        [JsonPropertyName("place_id")]
+        public string? PlaceId { get; set; }
+        [JsonPropertyName("formatted_address")]
+        public string? FormattedAddress { get; set; }
+        public List<string> Types { get; set; } = [];
+        [JsonPropertyName("address_components")]
+        public List<GoogleAddressComponent> AddressComponents { get; set; } = [];
+        public GoogleGeometry? Geometry { get; set; }
+    }
+    private sealed class GoogleAddressComponent
+    {
+        [JsonPropertyName("long_name")]
+        public string? LongName { get; set; }
+        [JsonPropertyName("short_name")]
+        public string? ShortName { get; set; }
+        public List<string> Types { get; set; } = [];
+    }
+    private sealed class GoogleGeometry
+    {
+        public GoogleLocation? Location { get; set; }
+        [JsonPropertyName("location_type")]
+        public string? LocationType { get; set; }
+    }
+    private sealed class GoogleLocation
+    {
+        public decimal Lat { get; set; }
+        public decimal Lng { get; set; }
     }
 }
 
+public static class CityExtractor
+{
+    private static readonly string[] KnownCities =
+    [
+        "Indore", "Mumbai", "Delhi", "New Delhi", "Bangalore", "Bengaluru",
+        "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad", "Jaipur",
+        "Lucknow", "Surat", "Kanpur", "Nagpur", "Bhopal", "Gwalior",
+        "Jabalpur", "Ujjain", "Dewas", "Ratlam", "Pithampur", "Mhow",
+        "Gurgaon", "Gurugram", "Noida", "Ghaziabad", "Faridabad", "Thane",
+        "Nashik", "Vadodara", "Rajkot", "Chandigarh", "Ludhiana", "Amritsar",
+        "Coimbatore", "Madurai", "Kochi", "Trivandrum", "Patna", "Ranchi",
+        "Dehradun", "Raipur", "Bhubaneswar", "Guwahati", "Goa", "Udaipur",
+        "Jodhpur", "Kota", "Agra", "Varanasi", "Mysore", "Secunderabad"
+    ];
+
+    public static string NormalizeDefaultCity(string? defaultCity)
+    {
+        var candidate = Regex.Replace((defaultCity ?? string.Empty).Trim(), @"\s+", " ");
+        if (candidate.Length is < 2 or > 100 || !Regex.IsMatch(candidate, @"^[\p{L} .'-]+$"))
+            return "Indore";
+        return CultureInfo.InvariantCulture.TextInfo.ToTitleCase(candidate.ToLowerInvariant());
+    }
+
+    public static string ExtractCity(string? location, string defaultCity = "Indore")
+    {
+        var fallback = NormalizeDefaultCity(defaultCity);
+        if (string.IsNullOrWhiteSpace(location)) return fallback;
+        foreach (var city in KnownCities.OrderByDescending(value => value.Length))
+            if (Regex.IsMatch(location, $@"\b{Regex.Escape(city)}\b", RegexOptions.IgnoreCase))
+                return NormalizeDefaultCity(city);
+        return fallback;
+    }
+
+    public static string RemoveCityFromLocation(string location, string city)
+    {
+        if (string.IsNullOrWhiteSpace(location)) return string.Empty;
+        var clean = Regex.Replace(location, $@"\b{Regex.Escape(city)}\b", string.Empty, RegexOptions.IgnoreCase).Trim();
+        return clean.Trim(' ', ',', '.', '-', ':');
+    }
+}

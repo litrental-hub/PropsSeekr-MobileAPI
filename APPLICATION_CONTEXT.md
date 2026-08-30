@@ -4,6 +4,9 @@ Last verified against the `Main` branch on 2026-08-29.
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
+`DATABASE_SCHEMA_CONTEXT.md` is the companion authority for canonical tables,
+relationships, indexes, legacy database differences, and schema-audit checks.
+
 ## Product purpose
 
 PropSeekr is a broker-to-broker Indian real-estate marketplace. A broker can publish property supply as a listing, publish client demand as a requirement, receive compatible matches, ask the counterparty broker to connect, and reveal contact details after mutual consent. Tokens fund successful contact reveals; creating or merely viewing a match does not spend tokens.
@@ -118,6 +121,8 @@ Migration `20260828000100_AddListingDetailsAndMedia` creates the two additive ta
 
 Manual listing and requirement creation resolve the submitted/geocoded city, locality, latitude, and longitude into the canonical `master` catalogue in the same database transaction as inventory creation. Listings persist the resulting `MasterId`; requirements persist one to five resolved IDs in `PreferredLocalityIds`. Existing catalogue coordinates are retained, and missing catalogue rows are created under a transaction-level advisory lock.
 
+Canonical master rows also persist location provenance: `geocoding_status`, provider/place ID, formatted address, precision, confidence, timestamp, error, and review flag. Coordinates selected in the manual Google Maps flow are stored as `verified`/`user`; server-geocoded imports are stored as `resolved`/`google`. Listings and requirements carry their own resolution status, note, and timestamp. Only `resolved` or `verified` canonical locations may participate in nearby search or automatic matching.
+
 New manual inventory passes through one normalization layer before persistence. Property-type aliases, BHK spacing, furnishing aliases such as `BARE`/`UNFURNISHED`, and facing abbreviations are stored using canonical values. The procedure applies equivalent normalization at read time so historical records do not require an immediate destructive backfill. Listing creation now persists the existing canonical `floor_number`, `road_info`, `price_status`, and `project_name` fields when supplied by the mobile form.
 
 The mobile listing and requirement forms geocode the property/preferred locality text. They must not attach the broker's current GPS position to an inventory record unless that position is explicitly the property/preferred location.
@@ -126,7 +131,16 @@ The mobile listing and requirement forms geocode the property/preferred locality
 
 ## Bulk TXT import pipeline
 
-Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The API records a broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` parses the text file, ingests canonical listings/requirements, embeds both targets, and runs matching asynchronously. Job status and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
+Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, including `defaultCity`, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The UI initializes the fallback from the user's selected city and uses `Indore` when none exists or the field is blank. This fallback is applied only when an extracted record has no explicit city; an explicitly named city always wins. The API records the fallback on the broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` parses the text file, ingests canonical listings/requirements, resolves locations with Google server-side Geocoding, embeds both targets, and runs matching asynchronously. Job status, fallback city, and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
+
+Server geocoding uses a backend-only Google key from `FileProcessor:GoogleMapsApiKey`, `GOOGLE_MAPS_API_KEY`, or Secrets Manager. It is separate from the Android Maps SDK key, must be restricted to the Geocoding API and production server egress IPs, and must never be committed. New provider results are automatically accepted only when the expected city matches and the confidence score is at least 0.70; all other results retain no coordinates and are marked `review_required`. Canonical name similarity in import resolution is at least 0.75, and alias matching is exact by token rather than substring.
+
+Historical remediation is managed through admin-only `POST /api/v1/location-remediation/jobs` and `GET /api/v1/location-remediation/jobs/{id}`. `LocationRemediationWorker` is cursor-based and resumable. It geocodes missing master coordinates in bounded batches, links inventory only when source text has one unambiguous trusted locality, routes all other rows to review, and invokes the matching procedure only for each repaired record. It never performs an implicit global match rebuild.
+
+Claimed bulk jobs have a unique `lock_token` and refresh `locked_at` every two
+minutes. Completion and retry updates require the same token, preventing a
+healthy import that runs longer than the 30-minute stale-job threshold from
+being reclaimed by another API instance.
 
 The legacy `/file-processor/*` facade remains internal-service-only. Mobile clients must never send the internal service key and must use `/bulk-imports` instead.
 
@@ -172,7 +186,7 @@ Hard candidate rules:
 
 - Never match the same broker to itself.
 - Both records must be active and available.
-- Resolved cities are required and must match case-insensitively.
+- Resolved cities are required and must match case-insensitively. Listing and configured requirement localities must have canonical `resolved` or `verified` geocoding status.
 - Transaction directions must be compatible: buy demand with sale supply, rental with rental, lease with lease.
 - Property type is normalized across historical aliases, then must be exact or belong to an explicit compatibility family.
 - Configuration must match when the requirement supplies configurations.
@@ -197,6 +211,10 @@ Score composition totals 100:
 Minimum and maximum size now use range semantics rather than symmetric closeness: a listing at or above a minimum is not penalized unless it exceeds an optional maximum. Fixed budgets retain the 10% hard ceiling; an optional minimum budget affects score rather than excluding a less-expensive property. Flexible budgets do not hard-reject on price but use a supplied preferred maximum for scoring. Facing and project preferences are soft scores, never hard filters.
 
 Candidates below 35 are excluded. The procedure retains at most 50 automatic matches per targeted listing/requirement scope. For a full rebuild, ranking is capped per requirement rather than globally.
+
+The `isavailable` flags are mapped in the EF listing/requirement entities. Create
+and update handlers persist an explicitly supplied value, and marketplace search
+excludes unavailable inventory in addition to the stored procedure doing so.
 
 Preservation rule: the procedure deletes/rebuilds only rows whose status is still `MATCHED` in the requested scope. Confirmed, requested, revealed, or otherwise progressed matches must survive a re-run. Never replace this with a broad delete.
 
@@ -271,7 +289,7 @@ Important contract gap: the mobile Axios interceptor calls `POST /auth/refresh`,
 
 ## External integrations and operational boundaries
 
-- Google Maps SDK configuration in the mobile client is separate from the Vertex AI service account used by the API.
+- Google Maps SDK configuration in the mobile client, the backend Geocoding API key, and the Vertex AI service account are separate credentials with separate restrictions.
 - AWS credentials should come from workload roles/OIDC and Secrets Manager. Static AWS keys must not be committed.
 - Razorpay order verification and webhook handling must remain idempotent; successful payment credits the canonical wallet and ledger once.
 - File-processor endpoints and internal matching/credit operations are currently anonymous for infrastructure compatibility. They require network/API-gateway protection before internet exposure.

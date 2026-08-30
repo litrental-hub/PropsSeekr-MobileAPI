@@ -165,7 +165,8 @@ public class MatchesController : ControllerBase
                 GroupName = propertyGroupName,
                 MessageDateTime = propertyMsgTime,
                 RawText = propertyRawText,
-                IsAvailable = (listing?.Status?.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase) == true || listing?.Status?.Equals("active", StringComparison.OrdinalIgnoreCase) == true)
+                IsAvailable = listing?.IsAvailable == true &&
+                    listing.Status?.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase) == true
             },
 
             Buyer = new
@@ -181,7 +182,8 @@ public class MatchesController : ControllerBase
                 GroupName = buyerGroupName,
                 MessageDateTime = buyerMsgTime,
                 RawText = buyerRawText,
-                IsAvailable = (requirement?.Status?.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase) == true || requirement?.Status?.Equals("active", StringComparison.OrdinalIgnoreCase) == true)
+                IsAvailable = requirement?.IsAvailable == true &&
+                    requirement.Status?.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase) == true
             },
 
             MatchDetails = new

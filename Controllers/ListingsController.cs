@@ -395,6 +395,9 @@ public class ListingsController : ControllerBase
                 effectiveLocality,
                 request.Latitude.Value,
                 request.Longitude.Value);
+            listing.LocationResolutionStatus = "verified";
+            listing.LocationResolutionNote = "Coordinates selected by the user.";
+            listing.LocationResolvedAt = DateTime.UtcNow;
         }
 
         if (request.Price.HasValue)
@@ -405,6 +408,11 @@ public class ListingsController : ControllerBase
         if (request.Status != null)
         {
             listing.Status = request.Status;
+        }
+
+        if (request.IsAvailable.HasValue)
+        {
+            listing.IsAvailable = request.IsAvailable.Value;
         }
 
         // Reset freshness timestamps on update
@@ -536,7 +544,11 @@ public class ListingsController : ControllerBase
                 MessageDatetime = request.MessageDatetime ?? DateTime.UtcNow,
                 PriceStatus = request.PriceStatus,
                 City = request.City,
-                PostedBy = request.PostedBy ?? "BROKER"
+                LocationResolutionStatus = masterId.HasValue ? "verified" : "missing",
+                LocationResolutionNote = masterId.HasValue ? "Coordinates selected by the user." : null,
+                LocationResolvedAt = masterId.HasValue ? DateTime.UtcNow : null,
+                PostedBy = request.PostedBy ?? "BROKER",
+                IsAvailable = request.IsAvailable ?? true
             };
 
             _dbContext.Listings.Add(listing);
@@ -624,6 +636,10 @@ public class ListingsController : ControllerBase
         catch (Exception ex)
         {
             await transaction.RollbackAsync();
+            _logger.LogError(ex,
+                "Failed to save listing for broker {BrokerId} from source {Source}",
+                request.BrokerId,
+                source);
             return BadRequest(new { success = false, message = ex.Message });
         }
     }
