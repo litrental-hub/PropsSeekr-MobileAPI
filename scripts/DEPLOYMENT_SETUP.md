@@ -66,53 +66,40 @@ The task role needs only `secretsmanager:GetSecretValue` for the configured
 secret ARN (and `kms:Decrypt` for its KMS key when a customer-managed key is
 used). This permission belongs on the task role, not the task execution role.
 
-Use nested ASP.NET configuration keys in the secret:
+Use only this flat key/value schema in the secret. Omit an optional key when
+the corresponding feature is disabled; do not add provider metadata, endpoint
+URLs, duplicate database fields, nested objects, or arrays.
 
 ```json
 {
-  "ConnectionStrings": {
-    "DefaultConnection": "Host=...;Port=5432;Database=...;Username=...;Password=..."
-  },
-  "Jwt": { "Key": "..." },
-  "Razorpay": {
-    "KeyId": "...",
-    "KeySecret": "...",
-    "WebhookSecret": "..."
-  },
-  "Msg91": {
-    "AuthKey": "...",
-    "OtpTemplateId": "..."
-  },
-  "InternalService": { "ApiKey": "..." },
-  "FileProcessor": {
-    "OpenAiApiKey": "...",
-    "GoogleMapsApiKey": "...",
-    "GoogleApiKey": "...",
-    "GoogleServiceAccount": {
-      "Type": "service_account",
-      "ProjectId": "...",
-      "PrivateKeyId": "...",
-      "PrivateKey": "...",
-      "ClientEmail": "...",
-      "ClientId": "...",
-      "AuthUri": "https://accounts.google.com/o/oauth2/auth",
-      "TokenUri": "https://oauth2.googleapis.com/token",
-      "AuthProviderX509CertUrl": "https://www.googleapis.com/oauth2/v1/certs",
-      "ClientX509CertUrl": "...",
-      "UniverseDomain": "googleapis.com"
-    }
-  }
+  "DB_CONNECTION_STRING": "Host=...;Port=5432;Database=...;Username=...;Password=...",
+  "JWT_KEY": "...",
+  "RAZORPAY_KEY_ID": "...",
+  "RAZORPAY_KEY_SECRET": "...",
+  "RAZORPAY_WEBHOOK_SECRET": "...",
+  "MSG91_AUTH_KEY": "...",
+  "MSG91_OTP_TEMPLATE_ID": "...",
+  "INTERNAL_SERVICE_API_KEY": "...",
+  "OPENAI_API_KEY": "...",
+  "S3_BUCKET_NAME": "...",
+  "GOOGLE_MAPS_API_KEY": "...",
+  "GOOGLE_SERVICE_ACCOUNT_TYPE": "service_account",
+  "GOOGLE_CLOUD_PROJECT": "...",
+  "GOOGLE_PRIVATE_KEY_ID": "...",
+  "GOOGLE_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n",
+  "GOOGLE_CLIENT_EMAIL": "...",
+  "GOOGLE_CLIENT_ID": "..."
 }
 ```
 
-Legacy flat names such as `DB_HOST`, `JWT_KEY`, `RAZORPAY_KEY_SECRET`, and
-`GOOGLE_PRIVATE_KEY` remain supported during migration. Nested keys are the
-canonical format. A pre-existing flat Google service-account JSON is also
-accepted using its standard `project_id`, `private_key`, `client_email`, and
-related snake_case names, but it must include `GOOGLE_SERVICE_ACCOUNT_TYPE` set
-to `service_account`. `GEMINI_API_KEY` is not used by the Vertex embedding
-client. Rotate any credential that has previously appeared in source,
-logs, screenshots, or chat before production deployment.
+`DB_CONNECTION_STRING` is the sole database secret; do not store `host`,
+`port`, `dbname`, `username`, `password`, `engine`, or `dbInstanceIdentifier`.
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, and the Google OAuth/certificate URL fields
+are not used and must not be stored. Vertex authentication needs the listed
+Google service-account fields; its endpoint URLs are safe application defaults.
+`OPENAI_API_KEY` is needed only for the legacy file-extraction chat fallback.
+Rotate any credential that has appeared in source, logs, screenshots, or chat
+before production deployment.
 
 For local API execution, authenticate with an AWS CLI/SSO developer profile and
 set only `AWS__SecretsManagerConfigName`. Do not use `dotnet user-secrets`.
