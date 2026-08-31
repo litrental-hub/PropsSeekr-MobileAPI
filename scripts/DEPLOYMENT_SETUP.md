@@ -107,7 +107,11 @@ Use nested ASP.NET configuration keys in the secret:
 
 Legacy flat names such as `DB_HOST`, `JWT_KEY`, `RAZORPAY_KEY_SECRET`, and
 `GOOGLE_PRIVATE_KEY` remain supported during migration. Nested keys are the
-canonical format. Rotate any credential that has previously appeared in source,
+canonical format. A pre-existing flat Google service-account JSON is also
+accepted using its standard `project_id`, `private_key`, `client_email`, and
+related snake_case names, but it must include `GOOGLE_SERVICE_ACCOUNT_TYPE` set
+to `service_account`. `GEMINI_API_KEY` is not used by the Vertex embedding
+client. Rotate any credential that has previously appeared in source,
 logs, screenshots, or chat before production deployment.
 
 For local API execution, authenticate with an AWS CLI/SSO developer profile and
