@@ -37,17 +37,6 @@ builder.Logging.AddDebug();
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
-var dbHost = builder.Configuration["FileProcessor:DbHost"]?.Trim();
-var dbPort = builder.Configuration["FileProcessor:DbPort"]?.Trim();
-var dbName = builder.Configuration["FileProcessor:DbName"]?.Trim();
-var dbUser = builder.Configuration["FileProcessor:DbUsername"]?.Trim();
-var dbPass = builder.Configuration["FileProcessor:DbPassword"]?.Trim();
-
-if (string.IsNullOrWhiteSpace(connectionString) && !string.IsNullOrWhiteSpace(dbHost))
-{
-    connectionString = $"Host={dbHost};Port={dbPort ?? "5432"};Database={dbName ?? "postgres"};Username={dbUser ?? "postgres"};Password={dbPass}";
-}
-
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
         connectionString,

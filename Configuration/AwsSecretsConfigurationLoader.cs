@@ -8,55 +8,20 @@ namespace PropSeekr.Configuration;
 
 /// <summary>
 /// Loads the API's runtime secrets from one AWS Secrets Manager JSON secret.
-/// The ECS task role supplies temporary AWS credentials through the SDK's
-/// default credential chain; long-lived AWS access keys are never required.
+/// The secret is intentionally a flat object of supported string key/value pairs.
 /// </summary>
 public static class AwsSecretsConfigurationLoader
 {
     private const string SecretNameKey = "AWS:SecretsManagerConfigName";
     public const string SecretsLoadedKey = "AWS:SecretsLoaded";
 
-    private static readonly string[] SecretOnlyKeys =
-    [
-        "ConnectionStrings:DefaultConnection",
-        "Jwt:Key",
-        "Razorpay:KeyId",
-        "Razorpay:KeySecret",
-        "Razorpay:WebhookSecret",
-        "Msg91:AuthKey",
-        "Msg91:OtpTemplateId",
-        "InternalService:ApiKey",
-        "FileProcessor:OpenAiApiKey",
-        "FileProcessor:DbConnectionString",
-        "FileProcessor:DbPassword",
-        "FileProcessor:GoogleMapsApiKey",
-        "FileProcessor:GoogleApiKey",
-        "FileProcessor:GoogleServiceAccount:PrivateKeyId",
-        "FileProcessor:GoogleServiceAccount:PrivateKey",
-        "FileProcessor:GoogleServiceAccount:ClientEmail",
-        "FileProcessor:GoogleServiceAccount:ClientId"
-    ];
-
-    private static readonly IReadOnlyDictionary<string, string[]> Aliases =
+    // This is the complete Secrets Manager contract. Keep it flat: do not add
+    // nested objects, arrays, duplicate database fields, or unrelated values.
+    private static readonly IReadOnlyDictionary<string, string[]> SecretKeyMappings =
         new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
         {
-            ["ConnectionStrings:DefaultConnection"] = ["FileProcessor:DbConnectionString"],
-            ["ConnectionString"] = ["ConnectionStrings:DefaultConnection", "FileProcessor:DbConnectionString"],
-            ["DefaultConnection"] = ["ConnectionStrings:DefaultConnection", "FileProcessor:DbConnectionString"],
-            ["DB_CONNECTION_STRING"] = ["ConnectionStrings:DefaultConnection", "FileProcessor:DbConnectionString"],
-            ["DB_HOST"] = ["FileProcessor:DbHost"],
-            ["DB_PORT"] = ["FileProcessor:DbPort"],
-            ["DB_NAME"] = ["FileProcessor:DbName"],
-            ["DB_USERNAME"] = ["FileProcessor:DbUsername"],
-            ["DB_PASSWORD"] = ["FileProcessor:DbPassword"],
-            ["host"] = ["FileProcessor:DbHost"],
-            ["port"] = ["FileProcessor:DbPort"],
-            ["dbname"] = ["FileProcessor:DbName"],
-            ["username"] = ["FileProcessor:DbUsername"],
-            ["password"] = ["FileProcessor:DbPassword"],
+            ["DB_CONNECTION_STRING"] = ["ConnectionStrings:DefaultConnection"],
             ["JWT_KEY"] = ["Jwt:Key"],
-            ["JWT_ISSUER"] = ["Jwt:Issuer"],
-            ["JWT_AUDIENCE"] = ["Jwt:Audience"],
             ["RAZORPAY_KEY_ID"] = ["Razorpay:KeyId"],
             ["RAZORPAY_KEY_SECRET"] = ["Razorpay:KeySecret"],
             ["RAZORPAY_WEBHOOK_SECRET"] = ["Razorpay:WebhookSecret"],
@@ -66,19 +31,17 @@ public static class AwsSecretsConfigurationLoader
             ["OPENAI_API_KEY"] = ["FileProcessor:OpenAiApiKey"],
             ["S3_BUCKET_NAME"] = ["FileProcessor:S3BucketName"],
             ["GOOGLE_MAPS_API_KEY"] = ["FileProcessor:GoogleMapsApiKey"],
-            ["GOOGLE_API_KEY"] = ["FileProcessor:GoogleApiKey"],
             ["GOOGLE_SERVICE_ACCOUNT_TYPE"] = ["FileProcessor:GoogleServiceAccount:Type"],
             ["GOOGLE_CLOUD_PROJECT"] = ["FileProcessor:GoogleServiceAccount:ProjectId"],
             ["GOOGLE_PRIVATE_KEY_ID"] = ["FileProcessor:GoogleServiceAccount:PrivateKeyId"],
             ["GOOGLE_PRIVATE_KEY"] = ["FileProcessor:GoogleServiceAccount:PrivateKey"],
             ["GOOGLE_CLIENT_EMAIL"] = ["FileProcessor:GoogleServiceAccount:ClientEmail"],
-            ["GOOGLE_CLIENT_ID"] = ["FileProcessor:GoogleServiceAccount:ClientId"],
-            ["GOOGLE_AUTH_URI"] = ["FileProcessor:GoogleServiceAccount:AuthUri"],
-            ["GOOGLE_TOKEN_URI"] = ["FileProcessor:GoogleServiceAccount:TokenUri"],
-            ["GOOGLE_AUTH_PROVIDER_CERT_URL"] = ["FileProcessor:GoogleServiceAccount:AuthProviderX509CertUrl"],
-            ["GOOGLE_CLIENT_CERT_URL"] = ["FileProcessor:GoogleServiceAccount:ClientX509CertUrl"],
-            ["GOOGLE_UNIVERSE_DOMAIN"] = ["FileProcessor:GoogleServiceAccount:UniverseDomain"]
+            ["GOOGLE_CLIENT_ID"] = ["FileProcessor:GoogleServiceAccount:ClientId"]
         };
+
+    private static readonly string[] SecretOnlyKeys = SecretKeyMappings.Values
+        .SelectMany(keys => keys)
+        .ToArray();
 
     public static void Load(WebApplicationBuilder builder)
     {
@@ -110,14 +73,27 @@ public static class AwsSecretsConfigurationLoader
         {
             using var document = JsonDocument.Parse(secretString);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
-                throw new InvalidOperationException("The AWS configuration secret must be a JSON object.");
+                throw new InvalidOperationException("The AWS configuration secret must be a flat JSON object.");
 
             var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            FlattenObject(document.RootElement, null, values);
-            ApplyAliases(values);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (!SecretKeyMappings.TryGetValue(property.Name, out var targets))
+                    throw new InvalidOperationException($"Unsupported AWS secret key '{property.Name}'. Remove it or add an explicit application mapping.");
 
-            // Once AWS loading is enabled, a missing secret must not fall back
-            // to an earlier appsettings or environment-variable provider.
+                if (property.Value.ValueKind != JsonValueKind.String)
+                    throw new InvalidOperationException($"AWS secret key '{property.Name}' must have a string value; arrays and objects are not supported.");
+
+                var value = property.Value.GetString()?.Trim();
+                if (string.IsNullOrWhiteSpace(value))
+                    throw new InvalidOperationException($"AWS secret key '{property.Name}' cannot be empty.");
+
+                foreach (var target in targets)
+                    values[target] = value;
+            }
+
+            // Do not let a missing AWS secret silently fall back to appsettings
+            // or an environment variable when Secrets Manager is configured.
             foreach (var key in SecretOnlyKeys)
                 values.TryAdd(key, null);
 
@@ -127,58 +103,6 @@ public static class AwsSecretsConfigurationLoader
         catch (JsonException ex)
         {
             throw new InvalidOperationException("The AWS configuration secret is not valid JSON.", ex);
-        }
-    }
-
-    private static void FlattenObject(
-        JsonElement element,
-        string? prefix,
-        IDictionary<string, string?> values)
-    {
-        foreach (var property in element.EnumerateObject())
-        {
-            var segment = property.Name.Replace("__", ":", StringComparison.Ordinal);
-            var key = string.IsNullOrEmpty(prefix) ? segment : $"{prefix}:{segment}";
-
-            if (property.Value.ValueKind == JsonValueKind.Object)
-            {
-                FlattenObject(property.Value, key, values);
-                continue;
-            }
-
-            if (property.Value.ValueKind == JsonValueKind.Array)
-            {
-                var index = 0;
-                foreach (var item in property.Value.EnumerateArray())
-                {
-                    values[$"{key}:{index++}"] = ScalarValue(item);
-                }
-                continue;
-            }
-
-            values[key] = ScalarValue(property.Value)?.Trim();
-        }
-    }
-
-    private static string? ScalarValue(JsonElement value) => value.ValueKind switch
-    {
-        JsonValueKind.String => value.GetString(),
-        JsonValueKind.Null or JsonValueKind.Undefined => null,
-        _ => value.GetRawText()
-    };
-
-    private static void ApplyAliases(IDictionary<string, string?> values)
-    {
-        foreach (var (alias, targets) in Aliases)
-        {
-            if (!values.TryGetValue(alias, out var value) || string.IsNullOrWhiteSpace(value))
-                continue;
-
-            foreach (var target in targets)
-            {
-                if (!values.TryGetValue(target, out var existing) || string.IsNullOrWhiteSpace(existing))
-                    values[target] = value;
-            }
         }
     }
 
