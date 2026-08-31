@@ -6,7 +6,6 @@ CREATE TABLE brokers (
   brokerid integer PRIMARY KEY,
   phone_number text NOT NULL,
   name text,
-  credit_balance integer,
   response_score numeric,
   status text,
   created_at timestamptz,
@@ -37,7 +36,6 @@ CREATE TABLE "Users" (
   "ProfilePhotoUrl" text,
   "IsMobileVerified" boolean NOT NULL DEFAULT true,
   "IsEmailVerified" boolean NOT NULL DEFAULT true,
-  "Credits" integer NOT NULL DEFAULT 0,
   "CreatedDate" timestamptz NOT NULL,
   "ModifiedDate" timestamptz NOT NULL
 );
@@ -213,14 +211,14 @@ VALUES
 INSERT INTO "Users" (
   "Id", "BrokerId", "Name", "MobileNumber", "Email", "PasswordHash",
   "AadharNumber", "PanCard", "IsMobileVerified", "IsEmailVerified",
-  "Credits", "CreatedDate", "ModifiedDate")
+  "CreatedDate", "ModifiedDate")
 VALUES
   ('11111111-1111-1111-1111-111111111111', 1, 'Broker One', '9111111111', 'broker1@example.test',
    'PBKDF2-SHA256$100000$UHJvcFNlZWtyRTJFU2FsdA==$OJCpqtZCd360mSxCrEJef7vaV0L/hD3wGSkke8NExhg=',
-   '111111111111', 'AAAAA1111A', true, true, 10, NOW(), NOW()),
+   '111111111111', 'AAAAA1111A', true, true, NOW(), NOW()),
   ('22222222-2222-2222-2222-222222222222', 2, 'Broker Two', '9222222222', 'broker2@example.test',
    'PBKDF2-SHA256$100000$UHJvcFNlZWtyRTJFU2FsdA==$OJCpqtZCd360mSxCrEJef7vaV0L/hD3wGSkke8NExhg=',
-   '222222222222', 'BBBBB2222B', true, true, 10, NOW(), NOW());
+   '222222222222', 'BBBBB2222B', true, true, NOW(), NOW());
 
 INSERT INTO listings (
   listingid, broker_id, listing_type, property_type, configuration, price,

@@ -20,9 +20,6 @@ public class Broker
     [MaxLength(255)]
     public string? Name { get; set; }
 
-    [Column("credit_balance")]
-    public int? CreditBalance { get; set; }
-
     [Column("response_score")]
     public decimal? ResponseScore { get; set; }
 

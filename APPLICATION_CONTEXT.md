@@ -85,7 +85,7 @@ There are legacy parallel models that must not be mixed into new matching work:
 
 - `PropertyRequests` is an older combined supply/demand model. Marketplace search no longer queries it; canonical inventory and matching use `Listing` and `Requirement`.
 - `Notification` is a GUID user-notification model with an older unlock path; `BrokerNotification` is the numeric broker notification model used by the current match handshake.
-- `User.Credits` and `UnlockedProperty` belong to the legacy credit/unlock flow; the current match reveal uses `CreditWallet`, `CreditTransaction`, and `Reveal`.
+- `UnlockedProperty` belongs to the legacy credit/unlock flow; the current match reveal uses `CreditWallet`, `CreditTransaction`, and `Reveal`. Legacy `Users.Credits` and `brokers.credit_balance` were removed after wallet migration; `credit_wallets` is the sole balance store.
 
 New work should extend the canonical broker/listing/requirement/match/wallet graph unless it is explicitly a migration of legacy data.
 
