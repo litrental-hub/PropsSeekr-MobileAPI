@@ -71,8 +71,6 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
         Assert.Equal(20, ledger.Amount);
         Assert.Equal(25, ledger.BalanceAfter);
         Assert.Equal(paymentId.ToString("N"), ledger.ReferenceKey);
-        Assert.Equal(25, (await _db.Users.AsNoTracking().SingleAsync()).Credits);
-        Assert.Equal(25, (await _db.Brokers.AsNoTracking().SingleAsync()).CreditBalance);
     }
 
     [PostgreSqlFact]
@@ -97,10 +95,10 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
     private static async Task SeedAsync(AppDbContext db, Guid userId, Guid paymentId, string orderId, int credits)
     {
         await db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO brokers (brokerid, phone_number, name, credit_balance)
-            VALUES (1, '+919111111111', 'Broker One', 5);
-            INSERT INTO "Users" ("Id", "BrokerId", "Name", "MobileNumber", "PasswordHash", "AadharNumber", "PanCard", "Credits", "CreatedDate", "ModifiedDate")
-            VALUES ({userId}, 1, 'Broker One', '9111111111', '', '', '', 5, NOW(), NOW());
+            INSERT INTO brokers (brokerid, phone_number, name)
+            VALUES (1, '+919111111111', 'Broker One');
+            INSERT INTO "Users" ("Id", "BrokerId", "Name", "MobileNumber", "PasswordHash", "AadharNumber", "PanCard", "CreatedDate", "ModifiedDate")
+            VALUES ({userId}, 1, 'Broker One', '9111111111', '', '', NOW(), NOW());
             INSERT INTO credit_wallets ("Id", broker_id, free_credits_balance, paid_credits_balance, created_at, updated_at)
             VALUES (1, 1, 5, 0, NOW(), NOW());
             INSERT INTO "PaymentTransactions" ("Id", "UserId", "RazorpayOrderId", "AmountInPaise", "Currency", "Receipt", "Status", "TierId", "CreditsAwarded", "CreatedDate", "ModifiedDate")
@@ -120,7 +118,7 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
 
         CREATE TABLE brokers (
             brokerid integer PRIMARY KEY, phone_number text NOT NULL, name text NULL,
-            credit_balance integer NULL, response_score numeric NULL, status text NULL,
+            response_score numeric NULL, status text NULL,
             created_at timestamptz NULL, last_active_at timestamptz NULL,
             confirmation_compliance_rate numeric NOT NULL DEFAULT 100,
             visibility_penalty_flag boolean NOT NULL DEFAULT false,
@@ -133,7 +131,7 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
             "Pincode" text NULL, "AadharNumber" text NOT NULL, "PanCard" text NOT NULL,
             "GSTNumber" text NULL, "ReraRegistrationNumber" text NULL, "ProfilePhotoUrl" text NULL,
             "IsMobileVerified" boolean NOT NULL DEFAULT false, "IsEmailVerified" boolean NOT NULL DEFAULT false,
-            "Credits" integer NOT NULL DEFAULT 0, "CreatedDate" timestamptz NOT NULL, "ModifiedDate" timestamptz NOT NULL
+            "CreatedDate" timestamptz NOT NULL, "ModifiedDate" timestamptz NOT NULL
         );
         CREATE TABLE "PaymentTransactions" (
             "Id" uuid PRIMARY KEY, "UserId" uuid NOT NULL, "RazorpayOrderId" varchar(100) NOT NULL,

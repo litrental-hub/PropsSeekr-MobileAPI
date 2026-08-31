@@ -135,12 +135,6 @@ public class PaymentsController : ControllerBase
                 };
                 _dbContext.CreditTransactions.Add(ledgerTx);
 
-                // Sync broker CreditBalance column
-                var broker = await _dbContext.Brokers.FirstOrDefaultAsync(b => b.Id == payment.BrokerId);
-                if (broker != null)
-                {
-                    _dbContext.Brokers.Update(broker);
-                }
             }
 
             await _dbContext.SaveChangesAsync();

@@ -1,6 +1,5 @@
--- Read-only wallet reconciliation report.
--- credit_wallets is authoritative. Users.Credits and brokers.credit_balance are
--- compatibility mirrors only; this script intentionally performs no updates.
+-- Read-only wallet coverage report. credit_wallets is the sole authoritative
+-- balance store; this script intentionally performs no updates.
 
 WITH wallet_totals AS (
     SELECT
@@ -10,33 +9,20 @@ WITH wallet_totals AS (
         w.free_credits_balance + w.paid_credits_balance AS wallet_total,
         w.updated_at
     FROM credit_wallets w
-), linked_accounts AS (
-    SELECT
-        u."Id" AS user_id,
-        u."BrokerId" AS broker_id,
-        u."Credits" AS user_legacy_total,
-        b.credit_balance AS broker_legacy_total
-    FROM "Users" u
-    LEFT JOIN brokers b ON b.brokerid = u."BrokerId"
-    WHERE u."BrokerId" IS NOT NULL
 )
 SELECT
-    a.broker_id,
+    b.brokerid AS broker_id,
     w.free_credits_balance,
     w.paid_credits_balance,
     w.wallet_total,
-    a.user_legacy_total,
-    a.broker_legacy_total,
     CASE
         WHEN w.broker_id IS NULL THEN 'MISSING_WALLET'
-        WHEN a.user_legacy_total IS DISTINCT FROM w.wallet_total
-          OR a.broker_legacy_total IS DISTINCT FROM w.wallet_total THEN 'LEGACY_MIRROR_MISMATCH'
         ELSE 'OK'
     END AS reconciliation_status,
     w.updated_at AS wallet_updated_at
-FROM linked_accounts a
-LEFT JOIN wallet_totals w ON w.broker_id = a.broker_id
-ORDER BY reconciliation_status DESC, a.broker_id;
+FROM brokers b
+LEFT JOIN wallet_totals w ON w.broker_id = b.brokerid
+ORDER BY reconciliation_status DESC, b.brokerid;
 
 -- Successful transactions created by the legacy singular payment flow may not
 -- have a wallet-ledger row. Do not replay them automatically: some may already

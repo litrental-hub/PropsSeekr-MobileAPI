@@ -179,7 +179,6 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
             brokerid integer PRIMARY KEY,
             phone_number text NOT NULL,
             name text NULL,
-            credit_balance integer NULL,
             response_score numeric NULL,
             status text NULL,
             created_at timestamptz NULL,
