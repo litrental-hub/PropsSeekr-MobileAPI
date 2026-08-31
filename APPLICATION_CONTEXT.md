@@ -38,9 +38,9 @@ Broker account -> broker identity -> listing or requirement
 `Users` is the authentication source. A user has a persisted `Role` and may link to one numeric legacy/canonical `BrokerId`.
 
 - Login accepts username, mobile number, or email through `POST /api/v1/auth/login`.
-- Registration creates a `User`, creates or links a `Broker`, and initializes a wallet with ten free credits when needed.
+- Registration creates a `User`; after mobile OTP verification, it creates or claims the matching normalized-phone `Broker` record and initializes a wallet with ten free credits exactly once.
 - JWTs contain the user GUID as `NameIdentifier` and a normalized `Admin` or `User` role claim.
-- `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It first uses `User.BrokerId`, then falls back to the final ten digits of the mobile number and persists the link.
+- `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It uses only the persisted `User.BrokerId`; broker claiming is permitted only after mobile verification.
 - Broker-scoped actions must derive the broker ID from the authenticated user. Do not trust a client-supplied broker ID for authenticated create, match, wallet, or reveal operations.
 - Admin list endpoints intentionally remove broker ownership scope. Currently this applies to `/listings/mine`, `/requirements/mine`, `/user-matches`, and the admin search projection.
 - Internal service endpoints (file processor, matching run/expiration, monthly credit grant, credit deduction, and WhatsApp intake) require an `X-Internal-Service-Key` header matching `InternalService:ApiKey` or `INTERNAL_SERVICE_API_KEY`.
