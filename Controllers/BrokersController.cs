@@ -461,6 +461,22 @@ public class BrokersController : ControllerBase
             .Skip((page - 1) * limit)
             .Take(limit)
             .ToListAsync();
+        var deliveredNotificationIds = dbNotifications
+            .Where(notification =>
+                notification.Channel == "in_app" &&
+                notification.ChannelStatus == "pending")
+            .Select(notification => notification.Id)
+            .ToArray();
+        if (deliveredNotificationIds.Length > 0)
+        {
+            await _dbContext.BrokerNotifications
+                .Where(notification =>
+                    deliveredNotificationIds.Contains(notification.Id) &&
+                    notification.Channel == "in_app" &&
+                    notification.ChannelStatus == "pending")
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(notification => notification.ChannelStatus, "delivered"));
+        }
         var requestIds = dbNotifications
             .Where(notification => notification.ConnectionRequestId.HasValue)
             .Select(notification => notification.ConnectionRequestId!.Value)
@@ -487,7 +503,9 @@ public class BrokersController : ControllerBase
                 message = presentation.Message,
                 isRead = notification.ReadAt.HasValue,
                 createdAt = notification.CreatedAt,
-                channelStatus = notification.ChannelStatus,
+                channelStatus = deliveredNotificationIds.Contains(notification.Id)
+                    ? "delivered"
+                    : notification.ChannelStatus,
                 actionStatus,
                 meta = new { matchId, requestId }
             };

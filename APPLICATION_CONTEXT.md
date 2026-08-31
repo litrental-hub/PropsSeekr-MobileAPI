@@ -80,6 +80,7 @@ Important sources of truth:
 - `match_connection_requests` records request direction and outcome.
 - `match_confirmations` records each broker's checklist and four-hour expiry.
 - `notifications` mapped as `BrokerNotification` is the canonical broker/matching notification stream used by the mobile UI.
+- `channel_status` tracks delivery (`pending` until an in-app poll returns it, then `delivered`); `read_at` alone tracks whether the broker has read it. A confirmation outcome is intentionally unread until the recipient marks it read.
 
 There are legacy parallel models that must not be mixed into new matching work:
 
