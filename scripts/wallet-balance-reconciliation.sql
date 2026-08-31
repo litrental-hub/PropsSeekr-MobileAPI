@@ -20,8 +20,10 @@ SELECT
         ELSE 'OK'
     END AS reconciliation_status,
     w.updated_at AS wallet_updated_at
-FROM brokers b
+FROM "Users" u
+JOIN brokers b ON b.brokerid = u."BrokerId"
 LEFT JOIN wallet_totals w ON w.broker_id = b.brokerid
+WHERE u."BrokerId" IS NOT NULL
 ORDER BY reconciliation_status DESC, b.brokerid;
 
 -- Successful transactions created by the legacy singular payment flow may not

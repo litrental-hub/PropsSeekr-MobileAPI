@@ -46,7 +46,7 @@ public class AuthService : IAuthService
     public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
     {
         var name = NormalizeRequired(request.Name, "Name");
-        var mobile = NormalizeRequired(request.Mobile, "Mobile number");
+        var mobile = NormalizeMobileNumber(request.Mobile);
         var email = NormalizeRequired(request.Email, "Email").ToLowerInvariant();
         var password = request.Password;
         var addressLine1 = NormalizeRequired(request.AddressLine1, "Address line 1");
@@ -90,7 +90,10 @@ public class AuthService : IAuthService
 
         _dbContext.Users.Add(user);
         await _dbContext.SaveChangesAsync();
-        await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
+        if (bypassVerification)
+        {
+            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
+        }
 
         if (!bypassVerification)
         {
@@ -110,7 +113,7 @@ public class AuthService : IAuthService
             VerificationChannel = bypassVerification ? null : "email",
             Message = bypassVerification
                 ? "Registration successful. Local verification was bypassed."
-                : "Registration successful. A verification code was sent to your email."
+                : "Registration successful. Verify your email and mobile number before using broker features."
         };
     }
 
@@ -132,6 +135,11 @@ public class AuthService : IAuthService
         if (role != "Admin" && !IsLocalRegistrationVerificationBypassed() && !user.IsEmailVerified)
         {
             throw new Exception("Email verification is required before login.");
+        }
+        if (role != "Admin")
+        {
+            if (!user.IsMobileVerified) throw new Exception("Mobile verification is required before login.");
+            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
         }
 
         var token = GenerateJwtToken(user, out var expiresAt, role);
@@ -292,7 +300,7 @@ public class AuthService : IAuthService
 
     public async Task<VerifyOtpResponseDto> VerifyOtpAsync(VerifyOtpRequestDto request)
     {
-        var mobileNumber = NormalizeRequired(request.Mobile, "Mobile number");
+        var mobileNumber = NormalizeMobileNumber(request.Mobile);
         var otpCode = NormalizeRequired(request.Otp, "OTP");
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync();
@@ -334,6 +342,7 @@ public class AuthService : IAuthService
             user.ModifiedDate = DateTime.UtcNow;
 
             await _dbContext.SaveChangesAsync();
+            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
             await transaction.CommitAsync();
 
             var token = GenerateJwtToken(user, out var expiresAt);
@@ -456,6 +465,13 @@ public class AuthService : IAuthService
         }
 
         return normalized;
+    }
+
+    private static string NormalizeMobileNumber(string? value)
+    {
+        var digits = new string((value ?? string.Empty).Where(char.IsDigit).ToArray());
+        if (digits.Length < 10) throw new Exception("Mobile number must contain 10 digits.");
+        return digits[^10..];
     }
 
     private static string? NormalizeOptional(string? value)

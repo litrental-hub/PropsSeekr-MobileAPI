@@ -44,9 +44,10 @@ therefore also requires application/audit validation rather than a normal FK.
 - Secondary workflow: `listing_requirements`, `notification_preferences`,
   `deals`, `visits`, `disputes`.
 
-Legacy application entities that are still compiled remain present until a
-separately verified archive migration: `PropertyRequests`,
-`UnlockedProperties`, and GUID `Notifications`. Lowercase old `users`,
+The archive migration `20260831180804_RetireLegacyCompatibilityTables` removed
+empty compatibility tables `PropertyRequests`, `UnlockedProperties`, GUID
+`Notifications`, `payments`, `match_statuses`, `deals`, `visits`, and
+`disputes`. Lowercase old `users`,
 `converted_text`, and `payment_orders` exist only in the old database and have
 no current API code references, so they must not be copied into v2 merely to
 make schemas textually identical.

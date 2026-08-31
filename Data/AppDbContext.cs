@@ -10,10 +10,7 @@ public class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
     public DbSet<EmailOtpRecord> EmailOtpRecords => Set<EmailOtpRecord>();
-    public DbSet<PropertyRequest> PropertyRequests => Set<PropertyRequest>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
-    public DbSet<UnlockedProperty> UnlockedProperties => Set<UnlockedProperty>();
-    public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Match> Matches => Set<Match>();
     public DbSet<MatchConfirmation> MatchConfirmations => Set<MatchConfirmation>();
     public DbSet<MatchConnectionRequest> MatchConnectionRequests => Set<MatchConnectionRequest>();
@@ -21,7 +18,6 @@ public class AppDbContext : DbContext
     public DbSet<CreditWallet> CreditWallets => Set<CreditWallet>();
     public DbSet<CreditTransaction> CreditTransactions => Set<CreditTransaction>();
     public DbSet<CreditPack> CreditPacks => Set<CreditPack>();
-    public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<Broker> Brokers => Set<Broker>();
     public DbSet<BrokerNotification> BrokerNotifications => Set<BrokerNotification>();
     public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
@@ -35,10 +31,6 @@ public class AppDbContext : DbContext
     public DbSet<LocationRemediationJob> LocationRemediationJobs => Set<LocationRemediationJob>();
     public DbSet<ListingSize> ListingSizes => Set<ListingSize>();
     public DbSet<ListingRequirement> ListingRequirements => Set<ListingRequirement>();
-    public DbSet<MatchStatus> MatchStatuses => Set<MatchStatus>();
-    public DbSet<Deal> Deals => Set<Deal>();
-    public DbSet<Visit> Visits => Set<Visit>();
-    public DbSet<Dispute> Disputes => Set<Dispute>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -62,16 +54,6 @@ public class AppDbContext : DbContext
         b.Entity<EmailOtpRecord>().HasIndex(x => new { x.Email, x.Purpose, x.IsUsed, x.ExpiresAt });
         b.Entity<PaymentTransaction>().HasIndex(x => x.RazorpayOrderId).IsUnique();
         b.Entity<PaymentTransaction>().HasIndex(x => x.Receipt).IsUnique();
-        b.Entity<PropertyRequest>().Property(x => x.Location).HasColumnType("geography (point)");
-        b.Entity<PropertyRequest>().HasIndex(x => x.Location).HasMethod("GIST");
-        b.Entity<PropertyRequest>().HasIndex(x => x.BudgetMin);
-        b.Entity<PropertyRequest>().HasIndex(x => x.BudgetMax);
-        b.Entity<PropertyRequest>().HasIndex(x => x.Category);
-        b.Entity<PropertyRequest>().HasIndex(x => new { x.City, x.Locality });
-        b.Entity<PropertyRequest>().HasIndex(x => x.PostedAt);
-        b.Entity<PropertyRequest>().HasIndex(x => x.PropertyTypesJson);
-        b.Entity<PropertyRequest>().HasIndex(x => x.TransactionType);
-        b.Entity<UnlockedProperty>().HasIndex(x => new { x.UserId, x.PropertyRequestId }).IsUnique();
 
         b.Entity<MasterLocation>(e =>
         {
@@ -196,9 +178,5 @@ public class AppDbContext : DbContext
         b.Entity<ListingRequirement>().HasIndex(x => new { x.ListingId, x.RequirementId }).IsUnique();
         b.Entity<CreditTransaction>().HasIndex(x => new { x.BrokerId, x.CreatedAt });
         b.Entity<NotificationPreference>().HasIndex(x => x.BrokerId).IsUnique();
-        b.Entity<Deal>().HasIndex(x => x.MatchId).IsUnique();
-        b.Entity<Dispute>().HasIndex(x => new { x.BrokerId, x.Status });
-        b.Entity<Notification>().HasIndex(x => x.CreatedAt);
-        b.Entity<Payment>(e => { e.ToTable("payments"); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.CreditPackId).HasColumnName("credit_pack_id"); e.Property(x => x.Amount).HasColumnName("amount"); e.Property(x => x.Currency).HasColumnName("currency"); e.Property(x => x.Gateway).HasColumnName("gateway"); e.Property(x => x.GatewayTxnId).HasColumnName("gateway_txn_id"); e.Property(x => x.Status).HasColumnName("status"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); });
     }
 }
