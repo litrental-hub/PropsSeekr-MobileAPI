@@ -1,7 +1,7 @@
 # PropSeekr canonical database design
 
-Last audited against the old `postgres` database, the `propseekr_v2` database,
-the EF model, migrations, and deployed routines on 2026-08-30.
+Last audited against the `propseekr_v2` DEV database, EF model, migrations, and
+canonical runtime paths on 2026-09-03.
 
 This file is the schema-level companion to `APPLICATION_CONTEXT.md`. Do not put
 credentials, connection strings, customer text, or tokens here.
@@ -15,7 +15,7 @@ The old database's `listings`/`requirements` views over `listings_table` and
 The canonical graph is:
 
 ```text
-Users -> brokers
+pending_registrations --(both OTPs verified)--> Users -> brokers
 brokers -> listings -> listing_details + listing_media + listing_sizes
 brokers -> requirements
 listings + requirements -> matches
@@ -33,7 +33,11 @@ therefore also requires application/audit validation rather than a normal FK.
 
 ## Canonical entities
 
-- Identity: `Users`, `brokers`, OTP/email OTP records.
+- Identity: `pending_registrations`, `Users`, `brokers`, OTP/email OTP records.
+  `pending_registrations` expires after 24 hours and has unique mobile, email,
+  Aadhaar, and PAN indexes. It is never an authenticated identity; only a
+  successful email-plus-mobile OTP transaction promotes it to `Users`, links or
+  creates its broker, and creates the one broker wallet.
 - Inventory: `listings`, `requirements`, `master`, `listing_sizes`,
   `listing_details`, `listing_media`.
 - Matching and consent: `matches`, `match_connection_requests`,
@@ -41,6 +45,9 @@ therefore also requires application/audit validation rather than a normal FK.
 - Tokens and payments: `credit_wallets`, `credit_transactions`, `credit_packs`,
   `PaymentTransactions`; `payments` is a compatibility payment surface.
 - Background work: `embedding_jobs`, `bulk_import_jobs`, `processed_files`.
+  `bulk_import_jobs.storage_key` is intentionally opaque; its
+  `original_file_name` is the human-readable source persisted into new
+  listing/requirement `group_name` values.
 - Secondary workflow: `listing_requirements`, `notification_preferences`,
   `deals`, `visits`, `disputes`.
 
@@ -87,16 +94,35 @@ After deployment, verify that the installed two-argument
 preservation predicate, same-broker exclusion, city/locality gates, fixed-budget
 ceiling, 35-point floor, per-requirement cap, and embedding-model guard.
 
+Migration `20260903180232_StageRegistrationsUntilBothOtpsVerify` creates
+`pending_registrations`. Apply it before deploying the verified-only
+registration API; startup migrations are disabled by default.
+
 ## Audit findings that require data remediation
 
-The 2026-08-30 v2 audit found no orphan canonical FKs, invalid match ownership,
-same-broker matches, negative wallets, duplicate match pairs, or invalid current
-radius/score/media values.
+The 2026-09-03 DEV audit found no orphan canonical FKs, invalid non-null user
+broker links, invalid match ownership, same-broker matches, negative/duplicate
+wallets, or orphan listing/requirement locality references.
 
-Historical WhatsApp imports still contain:
+Three existing verified regular users have a null `BrokerId`; they predate the
+verified-only registration path and must be repaired through the current login
+claim flow or an explicit idempotent backfill. They are not evidence that the
+current registration flow may create an incomplete user.
 
-- 2,302 active listings without `master_id` or a stored city;
-- 522 active requirements without preferred locality IDs or a stored city;
+Historical WhatsApp imports currently contain:
+
+- 2,014 active listings without `master_id`;
+- 452 active requirements without preferred locality IDs;
+
+Every one of these rows is marked `review_required` with no unambiguous trusted
+locality recoverable from historical source text. The `master` catalogue has 370
+trusted coordinate rows and 25 review-required rows. Do not assign a master ID
+or coordinates by guesswork: unresolved inventory must stay out of strict nearby
+search and automatic matching until a trusted locality is selected or resolved.
+
+Existing imported `group_name` values are historical storage-key basenames. New
+imports use the original filename; backfill historical names only by joining an
+unambiguous `bulk_import_jobs.storage_key` to its `original_file_name`.
 
 The active 2026-08-30 import subsequently completed and all 3,753 listings and
 1,061 requirements now have embeddings. Keep the audit-script embedding checks:

@@ -291,6 +291,9 @@ namespace propseekr_file_processor
                 var defaultCity = root.TryGetProperty("default_city", out var cityElement)
                     ? CityExtractor.NormalizeDefaultCity(cityElement.GetString())
                     : "Indore";
+                var sourceGroupName = root.TryGetProperty("source_group_name", out var groupElement)
+                    ? Path.GetFileName(groupElement.GetString() ?? string.Empty)
+                    : string.Empty;
 
                 /* ERRONEOUS CODE / PREVIOUS CODE:
                 context.Logger.LogInformation($"Reading s3://{bucket}/{key}");
@@ -334,7 +337,11 @@ namespace propseekr_file_processor
 
                 context.Logger.LogInformation($"Read {rawText.Length} chars");
 
-                var result = await ExtractPropertiesHybridFast(rawText, fileName, defaultCity, context);
+                var result = await ExtractPropertiesHybridFast(
+                    rawText,
+                    string.IsNullOrWhiteSpace(sourceGroupName) ? fileName : sourceGroupName,
+                    defaultCity,
+                    context);
 
                 // Save result JSON
                 var outputKey = key.Replace(".txt", "_listings.json");
@@ -404,6 +411,7 @@ namespace propseekr_file_processor
             string key,
             ILambdaContext context,
             string defaultCity = "Indore",
+            string? sourceGroupName = null,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -419,7 +427,13 @@ namespace propseekr_file_processor
                 context.Logger.LogInformation("Pipeline 1/5: Processing...");
                 var processReq = new APIGatewayProxyRequest
                 {
-                    Body = JsonSerializer.Serialize(new { bucket, key, default_city = defaultCity }),
+                    Body = JsonSerializer.Serialize(new
+                    {
+                        bucket,
+                        key,
+                        default_city = defaultCity,
+                        source_group_name = sourceGroupName
+                    }),
                     Path = "/process",
                     HttpMethod = "POST",
                     Headers = new Dictionary<string, string> { { "Content-Type", "application/json" } }

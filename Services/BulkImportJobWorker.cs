@@ -60,8 +60,9 @@ public sealed class BulkImportJobWorker(
                 bucket,
                 job.StorageKey,
                 new RestLambdaContext(logger, job.Id.ToString("N")),
-                job.DefaultCity,
-                cancellationToken);
+                defaultCity: job.DefaultCity,
+                sourceGroupName: job.OriginalFileName,
+                cancellationToken: cancellationToken);
             if (result.Failed > 0 && result.ListingsInserted == 0 && result.RequirementsInserted == 0)
                 throw new InvalidOperationException(
                     $"All {result.Failed} extracted records failed during ingestion. {result.FirstFailure}");
