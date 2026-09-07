@@ -59,16 +59,42 @@ public class AuthService : IAuthService
         var gstNumber = NormalizeOptional(request.GstNumber)?.ToUpperInvariant();
         var reraRegistrationNumber = NormalizeOptional(request.ReraRegistrationNumber);
 
-        await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
-
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync();
-
         var passwordHash = HashPassword(password);
         var bypassVerification = IsLocalRegistrationVerificationBypassed();
-
-        var user = new User
+        if (bypassVerification)
         {
-            Id = Guid.NewGuid(),
+            await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
+            await using var transaction = await _dbContext.Database.BeginTransactionAsync();
+            var user = CreateUser(
+                name, mobile, email, passwordHash, addressLine1, addressLine2, city, state,
+                pincode, aadharNumber, panCard, gstNumber, reraRegistrationNumber);
+            user.IsMobileVerified = true;
+            user.IsEmailVerified = true;
+            _dbContext.Users.Add(user);
+            await _dbContext.SaveChangesAsync();
+            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
+            await transaction.CommitAsync();
+
+            return new RegisterResponseDto
+            {
+                UserId = user.Id,
+                VerificationRequired = false,
+                Message = "Registration successful. Local verification was bypassed."
+            };
+        }
+
+        await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
+        var now = DateTime.UtcNow;
+        var existingPending = await _dbContext.PendingRegistrations
+            .Where(x => x.Email == email || x.MobileNumber == mobile ||
+                        x.AadharNumber == aadharNumber || x.PanCard == panCard)
+            .ToListAsync();
+        _dbContext.PendingRegistrations.RemoveRange(existingPending);
+        if (existingPending.Count > 0)
+            await _dbContext.SaveChangesAsync();
+
+        var pending = new PendingRegistration
+        {
             Name = name,
             MobileNumber = mobile,
             Email = email,
@@ -80,40 +106,25 @@ public class AuthService : IAuthService
             Pincode = pincode,
             AadharNumber = aadharNumber,
             PanCard = panCard,
-            GSTNumber = gstNumber,
+            GstNumber = gstNumber,
             ReraRegistrationNumber = reraRegistrationNumber,
-            IsMobileVerified = bypassVerification,
-            IsEmailVerified = bypassVerification,
-            CreatedDate = DateTime.UtcNow,
-            ModifiedDate = DateTime.UtcNow
+            CreatedAt = now,
+            ExpiresAt = now.AddHours(24)
         };
-
-        _dbContext.Users.Add(user);
+        _dbContext.PendingRegistrations.Add(pending);
         await _dbContext.SaveChangesAsync();
-        if (bypassVerification)
+        await _emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
         {
-            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
-        }
-
-        if (!bypassVerification)
-        {
-            await _emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
-            {
-                Email = email,
-                Purpose = "EmailVerification"
-            }, clientIp: null);
-        }
-
-        await transaction.CommitAsync();
+            Email = email,
+            Purpose = "EmailVerification"
+        }, clientIp: null);
 
         return new RegisterResponseDto
         {
-            UserId = user.Id,
-            VerificationRequired = !bypassVerification,
-            VerificationChannel = bypassVerification ? null : "email",
-            Message = bypassVerification
-                ? "Registration successful. Local verification was bypassed."
-                : "Registration successful. Verify your email and mobile number before using broker features."
+            PendingRegistrationId = pending.Id,
+            VerificationRequired = true,
+            VerificationChannel = "email",
+            Message = "Verify your email, then mobile number, to create your account."
         };
     }
 
@@ -246,15 +257,29 @@ public class AuthService : IAuthService
         {
             throw new Exception("PAN card already registered.");
         }
+
+        var now = DateTime.UtcNow;
+        if (await _dbContext.PendingRegistrations.AnyAsync(x => x.ExpiresAt >= now &&
+            (x.MobileNumber == mobileNumber || x.Email == email || x.AadharNumber == aadharNumber || x.PanCard == panCard)))
+        {
+            throw new Exception("A registration for these details is already awaiting verification. Complete it or register again after it expires.");
+        }
     }
 
     private async Task<OtpResponseDto> CreateOtpAsync(
         string mobileNumber,
         string message)
     {
-        if (!await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber))
+        var hasUser = await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber);
+        var pending = await _dbContext.PendingRegistrations
+            .SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber && x.ExpiresAt >= DateTime.UtcNow);
+        if (!hasUser && pending is null)
         {
-            throw new Exception("Mobile number is not registered.");
+            throw new Exception("No active registration was found for this mobile number.");
+        }
+        if (!hasUser && !await HasVerifiedRegistrationEmailAsync(pending!.Email, pending.CreatedAt))
+        {
+            throw new Exception("Email verification is required before sending the mobile OTP.");
         }
 
         var now = DateTime.UtcNow;
@@ -332,14 +357,29 @@ public class AuthService : IAuthService
             }
 
             var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
-
-            if (user == null)
+            if (user is null)
             {
-                throw new Exception("User not found for the provided mobile number.");
-            }
+                var pending = await _dbContext.PendingRegistrations
+                    .SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber && x.ExpiresAt >= DateTime.UtcNow);
+                if (pending is null || !await HasVerifiedRegistrationEmailAsync(pending.Email, pending.CreatedAt))
+                    throw new Exception("Email verification is required before creating the account.");
 
-            user.IsMobileVerified = true;
-            user.ModifiedDate = DateTime.UtcNow;
+                await EnsureFinalRegistrationIsUniqueAsync(pending);
+                user = CreateUser(
+                    pending.Name, pending.MobileNumber, pending.Email, pending.PasswordHash,
+                    pending.AddressLine1, pending.AddressLine2, pending.City, pending.State,
+                    pending.Pincode, pending.AadharNumber, pending.PanCard, pending.GstNumber,
+                    pending.ReraRegistrationNumber);
+                user.IsMobileVerified = true;
+                user.IsEmailVerified = true;
+                _dbContext.Users.Add(user);
+                _dbContext.PendingRegistrations.Remove(pending);
+            }
+            else
+            {
+                user.IsMobileVerified = true;
+                user.ModifiedDate = DateTime.UtcNow;
+            }
 
             await _dbContext.SaveChangesAsync();
             await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
@@ -362,6 +402,60 @@ public class AuthService : IAuthService
             throw;
         }
     }
+
+    private async Task<bool> HasVerifiedRegistrationEmailAsync(string email, DateTime registrationCreatedAt) =>
+        await _dbContext.EmailOtpRecords.AnyAsync(record =>
+            record.Email == email &&
+            record.Purpose == "EmailVerification" &&
+            record.IsUsed &&
+            record.UsedAt != null &&
+            record.UsedAt >= registrationCreatedAt);
+
+    private async Task EnsureFinalRegistrationIsUniqueAsync(PendingRegistration pending)
+    {
+        if (await _dbContext.Users.AnyAsync(user =>
+                user.MobileNumber == pending.MobileNumber ||
+                (user.Email != null && user.Email.ToLower() == pending.Email) ||
+                user.AadharNumber == pending.AadharNumber ||
+                user.PanCard == pending.PanCard))
+        {
+            throw new Exception("An account was created with these registration details. Please sign in instead.");
+        }
+    }
+
+    private static User CreateUser(
+        string name,
+        string mobile,
+        string email,
+        string passwordHash,
+        string addressLine1,
+        string? addressLine2,
+        string city,
+        string state,
+        string pincode,
+        string aadharNumber,
+        string panCard,
+        string? gstNumber,
+        string? reraRegistrationNumber) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            MobileNumber = mobile,
+            Email = email,
+            PasswordHash = passwordHash,
+            AddressLine1 = addressLine1,
+            AddressLine2 = addressLine2,
+            City = city,
+            State = state,
+            Pincode = pincode,
+            AadharNumber = aadharNumber,
+            PanCard = panCard,
+            GSTNumber = gstNumber,
+            ReraRegistrationNumber = reraRegistrationNumber,
+            CreatedDate = DateTime.UtcNow,
+            ModifiedDate = DateTime.UtcNow
+        };
 
     private string GenerateJwtToken(User user, out DateTime expiresAt, string? role = null)
     {

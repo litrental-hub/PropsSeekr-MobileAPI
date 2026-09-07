@@ -1,6 +1,6 @@
 # PropSeekr API application context
 
-Last verified against the `Main` branch on 2026-08-29.
+Last verified against the current API and mobile registration/import contracts on 2026-09-03.
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
@@ -35,10 +35,12 @@ Broker account -> broker identity -> listing or requirement
 
 ## Identity and authorization
 
-`Users` is the authentication source. A user has a persisted `Role` and may link to one numeric legacy/canonical `BrokerId`.
+`Users` is the authentication source. A user has a persisted `Role` and may link to one numeric legacy/canonical `BrokerId`. `pending_registrations` is a separate, short-lived staging table and is never an authenticated identity.
 
 - Login accepts username, mobile number, or email through `POST /api/v1/auth/login`.
-- Registration creates a `User`; after mobile OTP verification, it creates or claims the matching normalized-phone `Broker` record and initializes a wallet with ten free credits exactly once.
+- `POST /auth/register` validates uniqueness and stores only a 24-hour pending registration. It sends the email OTP and returns `pendingRegistrationId`, not a user identity.
+- After email OTP verification, the client requests and verifies the mobile OTP. Only the successful mobile-OTP transaction creates the `User`, creates or claims the matching normalized-phone `Broker`, and initializes a wallet with ten free credits exactly once.
+- A normal regular user must therefore have verified email, verified mobile, and a persisted `BrokerId`. Admin accounts remain the explicit exception because they do not own broker inventory.
 - JWTs contain the user GUID as `NameIdentifier` and a normalized `Admin` or `User` role claim.
 - `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It uses only the persisted `User.BrokerId`; broker claiming is permitted only after mobile verification.
 - Broker-scoped actions must derive the broker ID from the authenticated user. Do not trust a client-supplied broker ID for authenticated create, match, wallet, or reveal operations.
@@ -46,6 +48,8 @@ Broker account -> broker identity -> listing or requirement
 - Internal service endpoints (file processor, matching run/expiration, monthly credit grant, credit deduction, and WhatsApp intake) require an `X-Internal-Service-Key` header matching `InternalService:ApiKey` or `INTERNAL_SERVICE_API_KEY`.
 
 The custom `Authentication/JwtAuthenticationHandler.cs` is not registered by `Program.cs`; the active implementation is ASP.NET's standard JWT bearer handler. Do not base new behavior on the custom handler unless registration is deliberately changed and tested.
+
+Pending registrations expire after 24 hours. They contain the same protected registration/KYC payload needed to finish account creation, including a password hash, but no JWT, role-bearing user row, broker link, or wallet. Do not use this table for login, authorization, or broker-scoped operations.
 
 ## Canonical data model
 
@@ -132,7 +136,7 @@ The mobile listing and requirement forms geocode the property/preferred locality
 
 ## Bulk TXT import pipeline
 
-Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, including `defaultCity`, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The UI initializes the fallback from the user's selected city and uses `Indore` when none exists or the field is blank. This fallback is applied only when an extracted record has no explicit city; an explicitly named city always wins. The API records the fallback on the broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` parses the text file, ingests canonical listings/requirements, resolves locations with Google server-side Geocoding, embeds both targets, and runs matching asynchronously. Job status, fallback city, and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
+Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, including `defaultCity`, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The UI initializes the fallback from the user's selected city and uses `Indore` when none exists or the field is blank. This fallback is applied only when an extracted record has no explicit city; an explicitly named city always wins. The API records the fallback and original filename on the broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` passes that original filename to the processor, so `listings.group_name` and `requirements.group_name` retain a human-readable import source rather than the generated storage key. It then resolves locations with Google server-side Geocoding, embeds both targets, and runs matching asynchronously. Job status, fallback city, and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
 
 Server geocoding uses a backend-only Google key from `FileProcessor:GoogleMapsApiKey`, `GOOGLE_MAPS_API_KEY`, or Secrets Manager. It is separate from the Android Maps SDK key, must be restricted to the Geocoding API and production server egress IPs, and must never be committed. New provider results are automatically accepted only when the expected city matches and the confidence score is at least 0.70; all other results retain no coordinates and are marked `review_required`. Canonical name similarity in import resolution is at least 0.75, and alias matching is exact by token rather than substring.
 

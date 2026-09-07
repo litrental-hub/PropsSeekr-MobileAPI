@@ -10,6 +10,7 @@ public class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
     public DbSet<EmailOtpRecord> EmailOtpRecords => Set<EmailOtpRecord>();
+    public DbSet<PendingRegistration> PendingRegistrations => Set<PendingRegistration>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<Match> Matches => Set<Match>();
     public DbSet<MatchConfirmation> MatchConfirmations => Set<MatchConfirmation>();
@@ -52,6 +53,14 @@ public class AppDbContext : DbContext
         b.Entity<OtpVerification>().HasIndex(x => new { x.MobileNumber, x.OtpCode });
         b.Entity<EmailOtpRecord>().HasIndex(x => x.ExpiresAt);
         b.Entity<EmailOtpRecord>().HasIndex(x => new { x.Email, x.Purpose, x.IsUsed, x.ExpiresAt });
+        b.Entity<PendingRegistration>(e =>
+        {
+            e.HasIndex(x => x.Email).IsUnique();
+            e.HasIndex(x => x.MobileNumber).IsUnique();
+            e.HasIndex(x => x.AadharNumber).IsUnique();
+            e.HasIndex(x => x.PanCard).IsUnique();
+            e.HasIndex(x => x.ExpiresAt);
+        });
         b.Entity<PaymentTransaction>().HasIndex(x => x.RazorpayOrderId).IsUnique();
         b.Entity<PaymentTransaction>().HasIndex(x => x.Receipt).IsUnique();
 
