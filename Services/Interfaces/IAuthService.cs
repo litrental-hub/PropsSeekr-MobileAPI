@@ -9,5 +9,6 @@ public interface IAuthService
     Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request);
     Task<OtpResponseDto> ResendOtpAsync(SendOtpRequestDto request);
     Task<VerifyOtpResponseDto> VerifyOtpAsync(VerifyOtpRequestDto request);
+    Task<VerifyOtpResponseDto> VerifyWidgetOtpAsync(VerifyWidgetOtpRequestDto request, CancellationToken cancellationToken = default);
     Task<LogoutResponseDto> LogoutAsync();
 }

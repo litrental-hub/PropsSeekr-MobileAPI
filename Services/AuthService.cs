@@ -14,7 +14,7 @@ using System.Net.Sockets;
 
 namespace PropSeekr.Services;
 
-public class AuthService : IAuthService
+public partial class AuthService : IAuthService
 {
     private const int PasswordSaltSize = 16;
     private const int PasswordHashSize = 32;
@@ -26,6 +26,7 @@ public class AuthService : IAuthService
     private readonly IEmailOtpService _emailOtpService;
     private readonly IBrokerIdentityService _brokerIdentityService;
     private readonly IHostEnvironment _hostEnvironment;
+    private readonly IMsg91WidgetVerifier? _widgetVerifier;
 
     public AuthService(
         AppDbContext dbContext,
@@ -33,7 +34,8 @@ public class AuthService : IAuthService
         IOtpDeliveryService otpDeliveryService,
         IEmailOtpService emailOtpService,
         IBrokerIdentityService brokerIdentityService,
-        IHostEnvironment hostEnvironment)
+        IHostEnvironment hostEnvironment,
+        IMsg91WidgetVerifier? widgetVerifier = null)
     {
         _dbContext = dbContext;
         _configuration = configuration;
@@ -41,6 +43,7 @@ public class AuthService : IAuthService
         _emailOtpService = emailOtpService;
         _brokerIdentityService = brokerIdentityService;
         _hostEnvironment = hostEnvironment;
+        _widgetVerifier = widgetVerifier;
     }
 
     public async Task<RegisterResponseDto> RegisterAsync(RegisterRequestDto request)
@@ -240,11 +243,13 @@ public class AuthService : IAuthService
 
     public async Task<OtpResponseDto> SendOtpAsync(SendOtpRequestDto request)
     {
+        EnsureWidgetSupported(request);
         return await CreateOtpAsync(request.MobileNumber, "OTP sent successfully.");
     }
 
     public async Task<OtpResponseDto> ResendOtpAsync(SendOtpRequestDto request)
     {
+        EnsureWidgetSupported(request);
         return await CreateOtpAsync(request.MobileNumber, "OTP resent successfully.");
     }
 
@@ -294,6 +299,7 @@ public class AuthService : IAuthService
         string mobileNumber,
         string message)
     {
+        if (WidgetEnabled) mobileNumber = NormalizeIndianWidgetMobile(mobileNumber);
         mobileNumber = NormalizeMobileNumber(mobileNumber);
         var user = await _dbContext.Users.SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber);
         if (user is not null) EnsureMobileOtpUserCanAuthenticate(user);
@@ -308,6 +314,8 @@ public class AuthService : IAuthService
         {
             throw new Exception("Email verification is required before sending the mobile OTP.");
         }
+
+        if (WidgetEnabled) return await CreateWidgetSessionAsync(mobileNumber, user, pending);
 
         var now = DateTime.UtcNow;
 
@@ -352,6 +360,8 @@ public class AuthService : IAuthService
 
     public async Task<VerifyOtpResponseDto> VerifyOtpAsync(VerifyOtpRequestDto request)
     {
+        if (WidgetEnabled)
+            throw new InvalidOperationException("Please use the mobile verification widget in the updated app.");
         var mobileNumber = NormalizeMobileNumber(request.Mobile);
         var otpCode = NormalizeRequired(request.Otp, "OTP");
 
@@ -383,54 +393,59 @@ public class AuthService : IAuthService
                 throw new Exception("Invalid or expired OTP.");
             }
 
-            var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
-            if (user is null)
-            {
-                var pending = await _dbContext.PendingRegistrations
-                    .SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber && x.ExpiresAt >= DateTime.UtcNow);
-                if (pending is null || otp.CreatedDate < pending.CreatedAt ||
-                    !await HasVerifiedRegistrationEmailAsync(pending.Email, pending.CreatedAt))
-                    throw new Exception("Email verification is required before creating the account.");
-
-                await EnsureFinalRegistrationIsUniqueAsync(pending);
-                user = CreateUser(
-                    pending.Name, pending.MobileNumber, pending.Email, pending.PasswordHash,
-                    pending.AddressLine1, pending.AddressLine2, pending.City, pending.State,
-                    pending.Pincode, pending.AadharNumber, pending.PanCard, pending.GstNumber,
-                    pending.ReraRegistrationNumber);
-                user.IsMobileVerified = true;
-                user.IsEmailVerified = true;
-                _dbContext.Users.Add(user);
-                _dbContext.PendingRegistrations.Remove(pending);
-            }
-            else
-            {
-                EnsureMobileOtpUserCanAuthenticate(user);
-                user.IsMobileVerified = true;
-                user.ModifiedDate = DateTime.UtcNow;
-            }
-
-            await _dbContext.SaveChangesAsync();
-            if (NormalizeRole(user.Role) != "Admin")
-                await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
+            var result = await CompleteMobileVerificationAsync(mobileNumber, otp.CreatedDate);
             await transaction.CommitAsync();
-
-            var token = GenerateJwtToken(user, out var expiresAt);
-
-            return new VerifyOtpResponseDto
-            {
-                Token = token,
-                ExpiresAt = expiresAt,
-                UserId = user.Id,
-                BrokerId = user.BrokerId,
-                UserName = user.Name
-            };
+            return result;
         }
         catch
         {
             await transaction.RollbackAsync();
             throw;
         }
+    }
+
+    private async Task<VerifyOtpResponseDto> CompleteMobileVerificationAsync(
+        string mobileNumber, DateTime proofStartedAt, WidgetOtpChallenge? challenge = null)
+    {
+        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.MobileNumber == mobileNumber);
+        if (user is null)
+        {
+            var pending = await _dbContext.PendingRegistrations
+                .SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber && x.ExpiresAt >= DateTime.UtcNow);
+            if (pending is null || proofStartedAt < pending.CreatedAt ||
+                (challenge is not null && (challenge.UserId is not null || challenge.PendingRegistrationId != pending.Id)) ||
+                !await HasVerifiedRegistrationEmailAsync(pending.Email, pending.CreatedAt))
+                throw new InvalidOperationException("Email verification is required before creating the account.");
+
+            await EnsureFinalRegistrationIsUniqueAsync(pending);
+            user = CreateUser(
+                pending.Name, pending.MobileNumber, pending.Email, pending.PasswordHash,
+                pending.AddressLine1, pending.AddressLine2, pending.City, pending.State,
+                pending.Pincode, pending.AadharNumber, pending.PanCard, pending.GstNumber,
+                pending.ReraRegistrationNumber);
+            user.IsMobileVerified = true;
+            user.IsEmailVerified = true;
+            _dbContext.Users.Add(user);
+            _dbContext.PendingRegistrations.Remove(pending);
+        }
+        else
+        {
+            if (challenge is not null && challenge.UserId != user.Id)
+                throw new InvalidOperationException("Please start mobile verification again.");
+            EnsureMobileOtpUserCanAuthenticate(user);
+            user.IsMobileVerified = true;
+            user.ModifiedDate = DateTime.UtcNow;
+        }
+
+        await _dbContext.SaveChangesAsync();
+        if (NormalizeRole(user.Role) != "Admin")
+            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
+        var token = GenerateJwtToken(user, out var expiresAt);
+        return new VerifyOtpResponseDto
+        {
+            Token = token, ExpiresAt = expiresAt, UserId = user.Id,
+            BrokerId = user.BrokerId, UserName = user.Name, Role = NormalizeRole(user.Role)
+        };
     }
 
     private async Task<bool> HasVerifiedRegistrationEmailAsync(string email, DateTime registrationCreatedAt) =>

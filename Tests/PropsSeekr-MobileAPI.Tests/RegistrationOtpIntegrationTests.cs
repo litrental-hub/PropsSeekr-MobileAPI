@@ -30,6 +30,8 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
     private EmailOtpService _emailOtp = null!;
     private readonly CapturingEmail _email = new();
     private readonly CapturingSms _sms = new();
+    private IConfiguration _config = null!;
+    private readonly VerifyingWidget _widget = new();
 
     public async Task InitializeAsync()
     {
@@ -45,9 +47,10 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
             ["Jwt:Key"] = "test-only-signing-key-never-used-outside-isolated-tests",
             ["Otp:ResendCooldownSeconds"] = "0"
         }).Build();
+        _config = config;
         _emailOtp = new EmailOtpService(_db, config, _email, NullLogger<EmailOtpService>.Instance);
         _auth = new AuthService(_db, config, _sms, _emailOtp,
-            new BrokerIdentityService(_db), new ProductionEnvironment());
+            new BrokerIdentityService(_db), new ProductionEnvironment(), _widget);
     }
 
     public async Task DisposeAsync()
@@ -184,6 +187,125 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
         Assert.Empty(await _db.Users.ToListAsync());
     }
 
+    private void EnableWidget()
+    {
+        _config["Msg91:WidgetEnabled"] = "true";
+        _config["Msg91:WidgetId"] = "test-widget";
+        _config["Msg91:WidgetTokenAuth"] = "test-client-token";
+        _config["Msg91:AuthKey"] = "test-backend-key";
+    }
+
+    [PostgreSqlFact]
+    public async Task WidgetRegistration_PreservesBothProofsAndRejectsReplayAcrossChallenges()
+    {
+        EnableWidget();
+        await _auth.RegisterAsync(Request());
+        await Assert.ThrowsAsync<Exception>(() => _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true }));
+        await VerifyEmail();
+        var issued = await _auth.SendOtpAsync(new() { MobileNumber = "+919876543210", SupportsWidget = true });
+        Assert.NotNull(issued.Widget);
+        Assert.Equal("919876543210", issued.Widget.Identifier);
+        Assert.Empty(await _db!.OtpVerifications.ToListAsync());
+        Assert.Equal("", _sms.Code);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyOtpAsync(new() { Mobile = "9876543210", Otp = "123456" }));
+        var request = new VerifyWidgetOtpRequestDto { ChallengeId = issued.Widget.ChallengeId, AccessToken = "valid-proof" };
+        var result = await _auth.VerifyWidgetOtpAsync(request);
+        Assert.NotNull(result.BrokerId);
+        Assert.Equal("User", result.Role);
+        Assert.Empty(await _db.PendingRegistrations.ToListAsync());
+        Assert.True(Assert.Single(await _db.Users.ToListAsync()).IsEmailVerified);
+        Assert.Equal(10, Assert.Single(await _db.CreditWallets.ToListAsync()).FreeCreditsBalance);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyWidgetOtpAsync(request));
+        var next = await _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyWidgetOtpAsync(new()
+        { ChallengeId = next.Widget!.ChallengeId, AccessToken = "valid-proof" }));
+        Assert.Single(await _db.CreditWallets.ToListAsync());
+    }
+
+    [PostgreSqlFact]
+    public async Task WidgetFailureOrExpiry_CannotPromoteRegistration()
+    {
+        EnableWidget();
+        await _auth.RegisterAsync(Request());
+        await VerifyEmail();
+        var issued = await _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyWidgetOtpAsync(new()
+        { ChallengeId = issued.Widget!.ChallengeId, AccessToken = "wrong-phone-proof" }));
+        Assert.Empty(await _db!.Users.ToListAsync());
+        Assert.Null((await _db.WidgetOtpChallenges.AsNoTracking().SingleAsync()).ConsumedTokenHash);
+        await _db.WidgetOtpChallenges.ExecuteUpdateAsync(s => s.SetProperty(x => x.ExpiresAt, DateTime.UtcNow.AddMinutes(-1)));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyWidgetOtpAsync(new()
+        { ChallengeId = issued.Widget!.ChallengeId, AccessToken = "valid-proof" }));
+        Assert.Empty(await _db.CreditWallets.ToListAsync());
+    }
+
+    [PostgreSqlFact]
+    public async Task WidgetConcurrentProof_OnlyOneSessionAndWallet()
+    {
+        EnableWidget();
+        await _auth.RegisterAsync(Request());
+        await VerifyEmail();
+        var first = await _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true });
+        var second = await _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true });
+        await using var otherDb = new RegistrationDbContext(new DbContextOptionsBuilder<AppDbContext>()
+            .UseNpgsql(_db!.Database.GetConnectionString()).Options);
+        var otherAuth = new AuthService(otherDb, _config, _sms, _emailOtp,
+            new BrokerIdentityService(otherDb), new ProductionEnvironment(), _widget);
+        static async Task<bool> Complete(AuthService auth, Guid challengeId)
+        {
+            try { await auth.VerifyWidgetOtpAsync(new() { ChallengeId = challengeId, AccessToken = "valid-proof" }); return true; }
+            catch (InvalidOperationException) { return false; }
+        }
+        var results = await Task.WhenAll(Complete(_auth, first.Widget!.ChallengeId), Complete(otherAuth, second.Widget!.ChallengeId));
+        Assert.Single(results, x => x);
+        Assert.Single(await _db.Users.ToListAsync());
+        Assert.Single(await _db.CreditWallets.ToListAsync());
+        Assert.Equal(1, await _db.WidgetOtpChallenges.CountAsync(x => x.ConsumedTokenHash != null));
+    }
+
+    [PostgreSqlFact]
+    public async Task WidgetAdmission_RejectsOldClientsOtherCountriesAndExcessChallenges()
+    {
+        EnableWidget();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.SendOtpAsync(new() { MobileNumber = "9876543210" }));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.SendOtpAsync(new() { MobileNumber = "449876543210", SupportsWidget = true }));
+        await _auth.RegisterAsync(Request());
+        await VerifyEmail();
+        for (var i = 0; i < 5; i++)
+            await _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.ResendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true }));
+        Assert.Equal(5, await _db!.WidgetOtpChallenges.CountAsync());
+    }
+
+    [PostgreSqlFact]
+    public async Task WidgetRechecksActiveAccountBeforeIssuingSession()
+    {
+        EnableWidget();
+        _db!.Users.Add(new User
+        {
+            Id = Guid.NewGuid(), Name = "Test Admin", MobileNumber = "9876543210",
+            IsActive = true, IsEmailVerified = true, Role = "Admin"
+        });
+        await _db.SaveChangesAsync();
+        var session = await _auth.SendOtpAsync(new() { MobileNumber = "9876543210", SupportsWidget = true });
+        await _db.Users.ExecuteUpdateAsync(s => s.SetProperty(x => x.IsActive, false));
+        _db.ChangeTracker.Clear();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyWidgetOtpAsync(new()
+        { ChallengeId = session.Widget!.ChallengeId, AccessToken = "valid-proof" }));
+        Assert.Null((await _db.WidgetOtpChallenges.AsNoTracking().SingleAsync()).ConsumedTokenHash);
+        Assert.Empty(await _db.CreditWallets.ToListAsync());
+    }
+
+    private sealed class VerifyingWidget : IMsg91WidgetVerifier
+    {
+        public Task VerifyAsync(string accessToken, string expectedIdentifier, DateTime notBefore, CancellationToken cancellationToken = default)
+        {
+            if (accessToken != "valid-proof" || expectedIdentifier != "919876543210")
+                throw new InvalidOperationException("Invalid widget proof");
+            return Task.CompletedTask;
+        }
+    }
+
     private Task<VerifyEmailOtpResponseDto> VerifyEmail(string email = "broker@example.test", string purpose = "EmailVerification") =>
         _emailOtp.VerifyEmailOtpAsync(new() { Email = email, Purpose = purpose, Otp = _email.Code }, null);
 
@@ -199,7 +321,7 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
             CreatedDate = pending.CreatedAt.AddMinutes(-1), ExpiresAt = DateTime.UtcNow.AddMinutes(5)
         });
         await _db.SaveChangesAsync();
-        await Assert.ThrowsAsync<Exception>(() => _auth.VerifyOtpAsync(new() { Mobile = pending.MobileNumber, Otp = "123456" }));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _auth.VerifyOtpAsync(new() { Mobile = pending.MobileNumber, Otp = "123456" }));
         Assert.Empty(await _db.Users.ToListAsync());
         Assert.Empty(await _db.CreditWallets.ToListAsync());
     }
@@ -259,7 +381,7 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
         protected override void OnModelCreating(ModelBuilder builder)
         {
             base.OnModelCreating(builder);
-            var retained = new[] { typeof(User), typeof(Broker), typeof(CreditWallet), typeof(OtpVerification), typeof(EmailOtpRecord), typeof(PendingRegistration) };
+            var retained = new[] { typeof(User), typeof(Broker), typeof(CreditWallet), typeof(OtpVerification), typeof(EmailOtpRecord), typeof(PendingRegistration), typeof(WidgetOtpChallenge) };
             foreach (var entity in builder.Model.GetEntityTypes().ToArray())
                 if (!retained.Contains(entity.ClrType)) builder.Ignore(entity.ClrType);
         }

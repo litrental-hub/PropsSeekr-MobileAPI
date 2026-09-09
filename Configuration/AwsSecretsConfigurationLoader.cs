@@ -26,6 +26,8 @@ public static class AwsSecretsConfigurationLoader
             ["RAZORPAY_KEY_SECRET"] = ["Razorpay:KeySecret"],
             ["RAZORPAY_WEBHOOK_SECRET"] = ["Razorpay:WebhookSecret"],
             ["MSG91_AUTH_KEY"] = ["Msg91:AuthKey"],
+            ["MSG91_WIDGET_ID"] = ["Msg91:WidgetId"],
+            ["MSG91_WIDGET_TOKEN_AUTH"] = ["Msg91:WidgetTokenAuth"],
             ["MSG91_OTP_TEMPLATE_ID"] = ["Msg91:OtpTemplateId"],
             ["INTERNAL_SERVICE_API_KEY"] = ["InternalService:ApiKey"],
             ["OPENAI_API_KEY"] = ["FileProcessor:OpenAiApiKey"],

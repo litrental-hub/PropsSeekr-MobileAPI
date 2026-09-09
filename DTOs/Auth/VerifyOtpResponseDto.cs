@@ -2,6 +2,7 @@ namespace PropSeekr.DTOs.Auth;
 
 public class VerifyOtpResponseDto
 {
+    public string Role { get; set; } = "User";
     public string Token { get; set; } = string.Empty;
 
     public DateTime ExpiresAt { get; set; }
