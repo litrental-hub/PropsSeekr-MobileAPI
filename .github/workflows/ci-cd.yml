@@ -146,4 +146,5 @@ jobs:
           HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
           HEALTH_CHECK_PATH: /hello
           AWS_SECRETS_MANAGER_CONFIG_NAME: ${{ vars.AWS_SECRETS_MANAGER_CONFIG_NAME }}
+          MSG91_WIDGET_ENABLED: "true"
         run: bash scripts/deploy-ecs.sh

@@ -109,6 +109,10 @@ set only `AWS__SecretsManagerConfigName`. Do not use `dotnet user-secrets`.
 The React Native app must never call Secrets Manager or contain backend secrets.
 For mobile OTP Widget rollout, follow [MSG91_WIDGET_SETUP.md](MSG91_WIDGET_SETUP.md).
 Its scoped client token is deliberately returned to the SDK; the account Authkey is not.
+The production deployment workflows pass `MSG91_WIDGET_ENABLED=true`, and
+`deploy-ecs.sh` persists it as the non-secret `Msg91__WidgetEnabled` container
+setting. Set it to `false` in a controlled rollback deployment to restore the
+legacy mobile OTP path.
 It receives business data from the API. The Android Google Maps browser key is a
 public client identifier and must be supplied only at build time, restricted to
 the Android package name and signing certificate in Google Cloud.
