@@ -12,6 +12,8 @@ public sealed class AwsSecretsConfigurationLoaderTests
             {
               "DB_CONNECTION_STRING": "Host=database.internal;Password=db-password",
               "JWT_KEY": "jwt-value",
+              "MSG91_WIDGET_ID": "test-widget-id",
+              "MSG91_WIDGET_TOKEN_AUTH": "test-client-token",
               "GOOGLE_PRIVATE_KEY": "private-key"
             }
             """;
@@ -20,6 +22,8 @@ public sealed class AwsSecretsConfigurationLoaderTests
 
         Assert.Equal("Host=database.internal;Password=db-password", result["ConnectionStrings:DefaultConnection"]);
         Assert.Equal("jwt-value", result["Jwt:Key"]);
+        Assert.Equal("test-widget-id", result["Msg91:WidgetId"]);
+        Assert.Equal("test-client-token", result["Msg91:WidgetTokenAuth"]);
         Assert.Equal("private-key", result["FileProcessor:GoogleServiceAccount:PrivateKey"]);
         Assert.Equal(bool.TrueString, result[AwsSecretsConfigurationLoader.SecretsLoadedKey]);
     }

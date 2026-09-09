@@ -78,6 +78,8 @@ URLs, duplicate database fields, nested objects, or arrays.
   "RAZORPAY_KEY_SECRET": "...",
   "RAZORPAY_WEBHOOK_SECRET": "...",
   "MSG91_AUTH_KEY": "...",
+  "MSG91_WIDGET_ID": "...",
+  "MSG91_WIDGET_TOKEN_AUTH": "...",
   "MSG91_OTP_TEMPLATE_ID": "...",
   "INTERNAL_SERVICE_API_KEY": "...",
   "OPENAI_API_KEY": "...",
@@ -105,6 +107,8 @@ For local API execution, authenticate with an AWS CLI/SSO developer profile and
 set only `AWS__SecretsManagerConfigName`. Do not use `dotnet user-secrets`.
 
 The React Native app must never call Secrets Manager or contain backend secrets.
+For mobile OTP Widget rollout, follow [MSG91_WIDGET_SETUP.md](MSG91_WIDGET_SETUP.md).
+Its scoped client token is deliberately returned to the SDK; the account Authkey is not.
 It receives business data from the API. The Android Google Maps browser key is a
 public client identifier and must be supplied only at build time, restricted to
 the Android package name and signing certificate in Google Cloud.

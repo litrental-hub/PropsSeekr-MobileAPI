@@ -9,6 +9,7 @@ public class AppDbContext : DbContext
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
     public DbSet<User> Users => Set<User>();
     public DbSet<OtpVerification> OtpVerifications => Set<OtpVerification>();
+    public DbSet<WidgetOtpChallenge> WidgetOtpChallenges => Set<WidgetOtpChallenge>();
     public DbSet<EmailOtpRecord> EmailOtpRecords => Set<EmailOtpRecord>();
     public DbSet<PendingRegistration> PendingRegistrations => Set<PendingRegistration>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
@@ -36,6 +37,12 @@ public class AppDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.Entity<OtpVerification>().ToTable("OtpVerifications");
+        b.Entity<WidgetOtpChallenge>(e =>
+        {
+            e.ToTable("widget_otp_challenges");
+            e.HasIndex(x => x.ConsumedTokenHash).IsUnique();
+            e.HasIndex(x => new { x.MobileNumber, x.CreatedAt });
+        });
         b.Entity<User>().HasIndex(x => x.MobileNumber).IsUnique();
         b.Entity<User>().HasIndex(x => x.Email).IsUnique();
         b.Entity<User>().HasIndex(x => x.AadharNumber).IsUnique();

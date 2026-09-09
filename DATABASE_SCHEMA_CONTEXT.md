@@ -33,6 +33,7 @@ therefore also requires application/audit validation rather than a normal FK.
 
 ## Canonical entities
 
+- Widget verification: additive migration `20260909075218_AddWidgetOtpChallenges` creates `widget_otp_challenges`. Its UUID challenge targets one existing user or pending registration and expires after 15 minutes. Target IDs are application-validated rather than foreign keys because pending records are deleted on promotion and consumed proof must survive. `ConsumedTokenHash` is a nullable SHA-256 hex string with a unique index (multiple unconsumed nulls allowed). Consumption, user/broker creation and wallet initialization commit together. Retain consumed hashes to reject cross-challenge replay; raw MSG91 tokens are never stored. This source change has not been applied to any application database.
 - Identity: `pending_registrations`, `Users`, `brokers`, OTP/email OTP records.
   `pending_registrations` expires after 24 hours and has unique mobile, email,
   Aadhaar, and PAN indexes. It is never an authenticated identity; only a
