@@ -12,6 +12,28 @@ public partial class RetireLegacyCompatibilityTables : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
     {
+        // A DEV audit does not establish that these tables are empty in every
+        // deployment. Fail before the first drop if any history needs archiving.
+        // Locks remain held by the migration transaction through the drops.
+        migrationBuilder.Sql("""
+            DO $guard$
+            DECLARE
+                legacy_table text;
+                has_rows boolean;
+            BEGIN
+                FOREACH legacy_table IN ARRAY ARRAY[
+                    'deals', 'disputes', 'match_statuses', 'payments',
+                    'UnlockedProperties', 'visits', 'PropertyRequests', 'Notifications']
+                LOOP
+                    EXECUTE format('LOCK TABLE %I IN ACCESS EXCLUSIVE MODE', legacy_table);
+                    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I LIMIT 1)', legacy_table) INTO has_rows;
+                    IF has_rows THEN
+                        RAISE EXCEPTION 'Refusing to retire non-empty legacy table %. Archive and verify its data before retrying this migration.', legacy_table;
+                    END IF;
+                END LOOP;
+            END
+            $guard$;
+            """);
         // PostgreSQL treats quoted "Notifications" and unquoted notifications as
         // distinct relations. The lowercase broker notification stream is canonical.
         migrationBuilder.DropTable(name: "deals");

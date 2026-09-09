@@ -1,6 +1,6 @@
 # PropSeekr API application context
 
-Last verified against the current API and mobile registration/import contracts on 2026-09-03.
+Last verified against the current API and mobile contracts on 2026-09-07 (local review and isolated tests; not a target-database audit).
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
@@ -50,6 +50,12 @@ Broker account -> broker identity -> listing or requirement
 The custom `Authentication/JwtAuthenticationHandler.cs` is not registered by `Program.cs`; the active implementation is ASP.NET's standard JWT bearer handler. Do not base new behavior on the custom handler unless registration is deliberately changed and tested.
 
 Pending registrations expire after 24 hours. They contain the same protected registration/KYC payload needed to finish account creation, including a password hash, but no JWT, role-bearing user row, broker link, or wallet. Do not use this table for login, authorization, or broker-scoped operations.
+
+Registration recovery preserves the durable pending row when email delivery fails and returns a verification-required response with resend guidance. A repeat submission may resume only the same mobile/email/Aadhaar/PAN identity with its original password; it does not overwrite staged fields or extend expiry. Email proof must have been issued and verified after that registration began. A mobile code issued before the current pending registration cannot promote it.
+
+Mobile OTP authentication rejects inactive accounts and regular accounts without verified email (except the existing Development-only bypass). Admin mobile authentication does not create a broker wallet. Email OTP returns a session only for active, fully verified accounts with a persisted broker link, or verified admins; it includes the persisted role and broker identity. Password-reset OTP does not return a session token.
+
+The Secrets Manager contract now accepts only the explicitly mapped flat string keys documented in `scripts/DEPLOYMENT_SETUP.md`. `DB_CONNECTION_STRING` maps to `ConnectionStrings:DefaultConnection`; old nested secrets and separate database fields are rejected. Verify the deployed secret shape before rolling out this branch; a local build does not validate AWS configuration.
 
 ## Canonical data model
 

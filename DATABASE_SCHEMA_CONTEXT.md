@@ -51,13 +51,22 @@ therefore also requires application/audit validation rather than a normal FK.
 - Secondary workflow: `listing_requirements`, `notification_preferences`,
   `deals`, `visits`, `disputes`.
 
-The archive migration `20260831180804_RetireLegacyCompatibilityTables` removed
+The retirement migration `20260831180804_RetireLegacyCompatibilityTables` removes
 empty compatibility tables `PropertyRequests`, `UnlockedProperties`, GUID
 `Notifications`, `payments`, `match_statuses`, `deals`, `visits`, and
 `disputes`. Lowercase old `users`,
 `converted_text`, and `payment_orders` exist only in the old database and have
 no current API code references, so they must not be copied into v2 merely to
 make schemas textually identical.
+
+The 2026-09-07 code review added a transactional pre-drop guard to this migration:
+it locks and checks all eight tables, and refuses retirement when any contain
+rows. Archive and independently verify historical data before retrying. This
+guard protects only databases where the migration has not already run; it does
+not restore previously dropped data. The earlier DEV audit is not evidence that
+another target database is empty. No application-database migration was applied
+during this review. Review wallet reconciliation separately before dropping the
+legacy balance columns.
 
 Old `search_vector` columns/triggers and the old `fn_get_*matches` overloads are
 also not canonical v2 dependencies. Current nearby search uses structured

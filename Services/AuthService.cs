@@ -83,6 +83,15 @@ public class AuthService : IAuthService
             };
         }
 
+        // Resume only the same identity with proof of its original password.
+        // Never overwrite another live pending registration or reset its expiry.
+        var resumable = await _dbContext.PendingRegistrations.SingleOrDefaultAsync(x =>
+            x.MobileNumber == mobile && x.Email == email &&
+            x.AadharNumber == aadharNumber && x.PanCard == panCard &&
+            x.ExpiresAt >= DateTime.UtcNow);
+        if (resumable is not null && VerifyPassword(password, resumable.PasswordHash))
+            return await SendPendingRegistrationEmailAsync(resumable);
+
         await EnsureRegistrationIsUniqueAsync(mobile, email, aadharNumber, panCard);
         var now = DateTime.UtcNow;
         var existingPending = await _dbContext.PendingRegistrations
@@ -113,18 +122,33 @@ public class AuthService : IAuthService
         };
         _dbContext.PendingRegistrations.Add(pending);
         await _dbContext.SaveChangesAsync();
-        await _emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
+        return await SendPendingRegistrationEmailAsync(pending);
+    }
+
+    private async Task<RegisterResponseDto> SendPendingRegistrationEmailAsync(PendingRegistration pending)
+    {
+        var message = "Verify your email, then mobile number, to create your account.";
+        try
         {
-            Email = email,
-            Purpose = "EmailVerification"
-        }, clientIp: null);
+            await _emailOtpService.SendEmailOtpAsync(new SendEmailOtpRequestDto
+            {
+                Email = pending.Email,
+                Purpose = "EmailVerification"
+            }, clientIp: null);
+        }
+        catch
+        {
+            // The pending row is already durable. Let the client reach Resend
+            // rather than report a failed registration that blocks retries for 24h.
+            message = "Registration is pending. The email code could not be sent. Use Resend OTP on the verification screen to try again.";
+        }
 
         return new RegisterResponseDto
         {
             PendingRegistrationId = pending.Id,
             VerificationRequired = true,
             VerificationChannel = "email",
-            Message = "Verify your email, then mobile number, to create your account."
+            Message = message
         };
     }
 
@@ -270,7 +294,10 @@ public class AuthService : IAuthService
         string mobileNumber,
         string message)
     {
-        var hasUser = await _dbContext.Users.AnyAsync(x => x.MobileNumber == mobileNumber);
+        mobileNumber = NormalizeMobileNumber(mobileNumber);
+        var user = await _dbContext.Users.SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber);
+        if (user is not null) EnsureMobileOtpUserCanAuthenticate(user);
+        var hasUser = user is not null;
         var pending = await _dbContext.PendingRegistrations
             .SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber && x.ExpiresAt >= DateTime.UtcNow);
         if (!hasUser && pending is null)
@@ -361,7 +388,8 @@ public class AuthService : IAuthService
             {
                 var pending = await _dbContext.PendingRegistrations
                     .SingleOrDefaultAsync(x => x.MobileNumber == mobileNumber && x.ExpiresAt >= DateTime.UtcNow);
-                if (pending is null || !await HasVerifiedRegistrationEmailAsync(pending.Email, pending.CreatedAt))
+                if (pending is null || otp.CreatedDate < pending.CreatedAt ||
+                    !await HasVerifiedRegistrationEmailAsync(pending.Email, pending.CreatedAt))
                     throw new Exception("Email verification is required before creating the account.");
 
                 await EnsureFinalRegistrationIsUniqueAsync(pending);
@@ -377,12 +405,14 @@ public class AuthService : IAuthService
             }
             else
             {
+                EnsureMobileOtpUserCanAuthenticate(user);
                 user.IsMobileVerified = true;
                 user.ModifiedDate = DateTime.UtcNow;
             }
 
             await _dbContext.SaveChangesAsync();
-            await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
+            if (NormalizeRole(user.Role) != "Admin")
+                await _brokerIdentityService.GetOrCreateBrokerIdAsync(user.Id);
             await transaction.CommitAsync();
 
             var token = GenerateJwtToken(user, out var expiresAt);
@@ -407,9 +437,19 @@ public class AuthService : IAuthService
         await _dbContext.EmailOtpRecords.AnyAsync(record =>
             record.Email == email &&
             record.Purpose == "EmailVerification" &&
+            record.CreatedAt >= registrationCreatedAt &&
             record.IsUsed &&
             record.UsedAt != null &&
             record.UsedAt >= registrationCreatedAt);
+
+    private void EnsureMobileOtpUserCanAuthenticate(User user)
+    {
+        if (!user.IsActive)
+            throw new InvalidOperationException("This account cannot authenticate.");
+        if (NormalizeRole(user.Role) != "Admin" &&
+            !IsLocalRegistrationVerificationBypassed() && !user.IsEmailVerified)
+            throw new InvalidOperationException("Email verification is required before login.");
+    }
 
     private async Task EnsureFinalRegistrationIsUniqueAsync(PendingRegistration pending)
     {
