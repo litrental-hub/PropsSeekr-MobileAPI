@@ -17,6 +17,7 @@ readonly HEALTH_CHECK_INTERVAL_SECONDS="${HEALTH_CHECK_INTERVAL_SECONDS:-10}"
 readonly ECS_TASK_ROLE_ARN="${ECS_TASK_ROLE_ARN:-arn:aws:iam::307869868474:role/MobileApiEcsTaskRole}"
 readonly AWS_SECRETS_MANAGER_CONFIG_NAME
 readonly MSG91_WIDGET_ENABLED="${MSG91_WIDGET_ENABLED:-false}"
+readonly MSG91_WIDGET_ID="${MSG91_WIDGET_ID:-}"
 
 service_updated=false
 previous_task_definition=""
@@ -194,15 +195,21 @@ jq \
     --arg image "${IMAGE_URI}" \
     --arg task_role "${ECS_TASK_ROLE_ARN}" \
     --arg secrets_config "${AWS_SECRETS_MANAGER_CONFIG_NAME}" \
-    --arg msg91_widget_enabled "${MSG91_WIDGET_ENABLED}" '
+    --arg msg91_widget_enabled "${MSG91_WIDGET_ENABLED}" \
+    --arg msg91_widget_id "${MSG91_WIDGET_ID}" '
     .containerDefinitions |= map(
         if .name == $container_name then
             .image = $image
             | .environment |= (
-                map(select(.name != "AWS__SecretsManagerConfigName" and .name != "Msg91__WidgetEnabled")) +
+                map(select(
+                    .name != "AWS__SecretsManagerConfigName"
+                    and .name != "Msg91__WidgetEnabled"
+                    and .name != "Msg91__WidgetId"
+                )) +
                 [
                     { "name": "AWS__SecretsManagerConfigName", "value": $secrets_config },
-                    { "name": "Msg91__WidgetEnabled", "value": $msg91_widget_enabled }
+                    { "name": "Msg91__WidgetEnabled", "value": $msg91_widget_enabled },
+                    { "name": "Msg91__WidgetId", "value": $msg91_widget_id }
                 ]
             )
         else
