@@ -13,6 +13,7 @@ namespace PropSeekr.Configuration;
 public static class AwsSecretsConfigurationLoader
 {
     private const string SecretNameKey = "AWS:SecretsManagerConfigName";
+    private const string WidgetIdEnvironmentVariable = "Msg91__WidgetId";
     public const string SecretsLoadedKey = "AWS:SecretsLoaded";
 
     // This is the complete Secrets Manager contract. Keep it flat: do not add
@@ -60,7 +61,8 @@ public static class AwsSecretsConfigurationLoader
         }
 
         var secretString = FetchSecret(secretName, builder.Configuration);
-        var values = ParseSecret(secretString);
+        var values = new Dictionary<string, string?>(ParseSecret(secretString), StringComparer.OrdinalIgnoreCase);
+        ApplyNonSecretOverrides(values, Environment.GetEnvironmentVariable(WidgetIdEnvironmentVariable));
         builder.Configuration.AddInMemoryCollection(values);
 
         Console.WriteLine("[Configuration] Runtime secrets loaded from AWS Secrets Manager.");
@@ -106,6 +108,12 @@ public static class AwsSecretsConfigurationLoader
         {
             throw new InvalidOperationException("The AWS configuration secret is not valid JSON.", ex);
         }
+    }
+
+    internal static void ApplyNonSecretOverrides(IDictionary<string, string?> values, string? widgetId)
+    {
+        if (!string.IsNullOrWhiteSpace(widgetId))
+            values["Msg91:WidgetId"] = widgetId.Trim();
     }
 
     private static string FetchSecret(string secretName, IConfiguration configuration)

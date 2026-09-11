@@ -46,4 +46,34 @@ public sealed class AwsSecretsConfigurationLoaderTests
         Assert.True(result.ContainsKey("Razorpay:KeySecret"));
         Assert.Null(result["Razorpay:KeySecret"]);
     }
+
+    [Fact]
+    public void ApplyNonSecretOverrides_ReplacesOnlyTheWidgetId()
+    {
+        var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Msg91:WidgetId"] = "secret-widget-id",
+            ["Msg91:WidgetTokenAuth"] = "secret-token",
+            ["Jwt:Key"] = "secret-jwt"
+        };
+
+        AwsSecretsConfigurationLoader.ApplyNonSecretOverrides(values, "  deployed-widget-id  ");
+
+        Assert.Equal("deployed-widget-id", values["Msg91:WidgetId"]);
+        Assert.Equal("secret-token", values["Msg91:WidgetTokenAuth"]);
+        Assert.Equal("secret-jwt", values["Jwt:Key"]);
+    }
+
+    [Fact]
+    public void ApplyNonSecretOverrides_IgnoresAnEmptyWidgetId()
+    {
+        var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Msg91:WidgetId"] = "secret-widget-id"
+        };
+
+        AwsSecretsConfigurationLoader.ApplyNonSecretOverrides(values, "   ");
+
+        Assert.Equal("secret-widget-id", values["Msg91:WidgetId"]);
+    }
 }
