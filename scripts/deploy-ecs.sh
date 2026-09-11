@@ -347,8 +347,27 @@ while true; do
 
     echo "ECS Express deployment status: ${deployment_status}"
 
-    # Calculate state hash to check for stagnation (status, reason, task counts)
-    current_state_hash=$(jq -c '[.serviceDeployments[0].status, .serviceDeployments[0].statusReason, .serviceDeployments[0].runningTaskCount, .serviceDeployments[0].pendingTaskCount]' <<< "${deployment_details}" 2>/dev/null || echo "${deployment_status}")
+    # Include latest service event id in state hash to avoid false stagnation while ECS emits progress events.
+    latest_service_event_json="$(
+        aws ecs describe-services \
+            --region "${AWS_REGION}" \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --query 'services[0].events[0].{id:id,message:message}' \
+            --output json \
+            2>/dev/null || echo '{}'
+    )"
+
+    latest_service_event_id="$(
+        jq -r '.id // empty' <<< "${latest_service_event_json}" 2>/dev/null || true
+    )"
+
+    latest_service_event_message="$(
+        jq -r '.message // empty' <<< "${latest_service_event_json}" 2>/dev/null || true
+    )"
+
+    # Calculate state hash to check for stagnation (status, reason, task counts, latest ECS event id)
+    current_state_hash="$(jq -c '[.serviceDeployments[0].status, .serviceDeployments[0].statusReason, .serviceDeployments[0].runningTaskCount, .serviceDeployments[0].pendingTaskCount]' <<< "${deployment_details}" 2>/dev/null || echo "${deployment_status}")|${latest_service_event_id}"
 
     if [[ "${current_state_hash}" == "${last_state_hash}" ]]; then
         stagnant_checks=$((stagnant_checks + 1))
@@ -359,9 +378,8 @@ while true; do
 
     # Print latest event if stuck in the same state for a while for live debugging feedback
     if [[ $stagnant_checks -ge 12 ]]; then
-        latest_event=$(aws ecs describe-services --region "${AWS_REGION}" --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --query 'services[0].events[0].message' --output text 2>/dev/null || true)
-        if [[ -n "${latest_event}" ]]; then
-            echo "   [ECS Event Detail] ${latest_event}"
+        if [[ -n "${latest_service_event_message}" ]]; then
+            echo "   [ECS Event Detail] ${latest_service_event_message}"
         fi
     fi
 
