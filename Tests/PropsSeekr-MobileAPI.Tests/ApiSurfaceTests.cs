@@ -38,4 +38,12 @@ public sealed class ApiSurfaceTests
             "api/v1/user-matches/matches/{matchId}/confirm", "api/v1/user-matches/matches/{matchId}/reject" })
             Assert.Single(routes, r => r.Verb == "POST" && r.Path == path);
     }
+
+    [Fact]
+    public void Program_ExposesLegacyHelloEndpoint_ForDeploymentHealthChecks()
+    {
+        var programPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../Program.cs"));
+        var source = File.ReadAllText(programPath);
+        Assert.Contains("app.MapGet(\"/hello\"", source);
+    }
 }

@@ -228,6 +228,7 @@ app.UseAuthorization();
 
 // Routes
 app.MapControllers();
+app.MapGet("/hello", () => Results.Ok("PropSeekr Mobile API"));
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
