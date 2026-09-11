@@ -67,6 +67,14 @@ public sealed class UserMatchesService : IUserMatchesService
             .OrderBy(item => item.SortOrder)
             .ThenBy(item => item.Id)
             .ToListAsync();
+        var mediaVisible = brokerId is null ||
+                           brokerId == match.ListingBrokerId ||
+                           string.Equals(listingDetails?.PhotoSharingPreference, "SHARE_FREELY", StringComparison.OrdinalIgnoreCase) ||
+                           (isRevealed && string.Equals(
+                               listingDetails?.PhotoSharingPreference,
+                               "ON_REQUEST",
+                               StringComparison.OrdinalIgnoreCase));
+        if (!mediaVisible) media.Clear();
         var sizes = await _db.ListingSizes.AsNoTracking()
             .Where(item => item.ListingId == match.ListingId)
             .OrderBy(item => item.Id)
@@ -76,9 +84,9 @@ public sealed class UserMatchesService : IUserMatchesService
             .OrderByDescending(item => item.Id)
             .FirstOrDefaultAsync();
 
-        var currentBrokerConfirmation = brokerId.HasValue
+        var currentBrokerConfirmation = brokerId.HasValue && connectionRequest is not null
             ? await _db.MatchConfirmations.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.MatchId == match.Id && item.BrokerId == brokerId.Value)
+                .SingleOrDefaultAsync(item => item.ConnectionRequestId == connectionRequest.Id && item.BrokerId == brokerId.Value)
             : null;
 
         ContactDetailsDto? contact = null;
@@ -327,7 +335,10 @@ public sealed class UserMatchesService : IUserMatchesService
         var now = DateTime.UtcNow;
         var items = matches.Select(match =>
         {
-            var matchConfirmations = confirmations.Where(c => c.MatchId == match.Id).ToList();
+            var connectionRequest = connectionRequests.FirstOrDefault(request => request.MatchId == match.Id);
+            var matchConfirmations = confirmations
+                .Where(c => connectionRequest != null && c.ConnectionRequestId == connectionRequest.Id)
+                .ToList();
             var callerConfirmation = brokerId.HasValue
                 ? matchConfirmations.FirstOrDefault(c => c.BrokerId == brokerId.Value)
                 : null;
@@ -361,7 +372,6 @@ public sealed class UserMatchesService : IUserMatchesService
                 };
             }
 
-            var connectionRequest = connectionRequests.FirstOrDefault(request => request.MatchId == match.Id);
             return MapMatch(match, brokerId, state, callerConfirmation, activeExpiry, isRevealed, contact, connectionRequest);
         }).ToList();
 
@@ -409,6 +419,8 @@ public sealed class UserMatchesService : IUserMatchesService
             IsRevealed = isRevealed,
             UnlockedContact = contact,
             ConnectionRequestId = connectionRequest?.Id,
+            ListingVersion = connectionRequest?.ListingVersion,
+            RequirementVersion = connectionRequest?.RequirementVersion,
             ConnectionRequestStatus = connectionRequest?.Status,
             DeliveryChannel = connectionRequest?.DeliveryChannel,
             IncomingConnectionRequest = brokerId.HasValue && connectionRequest is

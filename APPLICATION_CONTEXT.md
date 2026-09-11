@@ -1,6 +1,16 @@
 # PropSeekr API application context
 
-Last verified against the current API and mobile contracts on 2026-09-07 (local review and isolated tests; not a target-database audit).
+Last reviewed on 2026-09-11, including the development database deployment checkpoint documented in `DATABASE_SCHEMA_CONTEXT.md`. This does not certify production deployment.
+
+## 2026-09-11 audit and route cleanup
+
+The development database now has the preservation-safe `scripts/harden-matching-engine.sql` body and the three 2026-09-11 additive migrations installed. The three previously overdue pending requests were closed through the canonical expiry transition without charges; the revealed row and all confirmation/request evidence remain linked. No broad matching rebuild was run. Four missing inventory embeddings are versioned queued jobs awaiting a correctly configured worker.
+
+The original audit performed no writes and found all 26 FK checks clean, while 2,354 saved matches used the historical city-only requirement-locality path. The later authorized deployment is recorded above and in `DATABASE_SCHEMA_CONTEXT.md`. Freshness policy, historical wallet opening reconciliation, and evidence-based location remediation remain outstanding.
+
+Removed unused HTTP surfaces after local caller review: duplicate `PaymentsController`, GUID `NotificationsController`, legacy `PropertyInventoryController`, manual `ListingRequirementsController`, duplicate `MatchesController`/`HandshakeController`, the retired auth refresh action, and retired user-match reveal/unlock/history actions. Removed unused mobile wrappers for deleted payment/manual-link routes. Removed routes now return 404 after deployment, not 410; canonical `/payment`, `/user-matches`, `/listings`, `/requirements`, and broker notifications remain. No schema/model/table was removed. Existing deployed clients outside the reviewed workspace still require release-log compatibility checks.
+
+The current implementation branch closes the previously identified internal/webhook fail-open behavior, reveal retry/version checks, listing update invalidation, verified identity-update rules, monthly accounting, and private-media storage gaps. Its additive database migrations and matching SQL are installed in development; the API/mobile source changes, provider configuration, and production release remain undeployed.
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
@@ -30,6 +40,7 @@ Broker account -> broker identity -> listing or requirement
 - AWS Secrets Manager, S3, SES, ECS/ECR, and Razorpay integrations.
 - Local HTTP profile: `http://localhost:5150`; container port: `8080`.
 - Database migrations do not run at startup unless `Database:ApplyMigrationsOnStartup` is explicitly enabled.
+- Background workers are disabled by default in Development so local Swagger/API runs do not process queue state in a shared database. Set `Workers:Enabled` to `true` when intentionally testing workers locally; non-Development environments enable them by default. Embedding jobs carry target versions, lease tokens, and heartbeats so stale workers cannot publish results for edited inventory.
 
 `Program.cs` is the composition root. In every non-development server environment it requires and loads the JSON configuration secret named by `AWS:SecretsManagerConfigName`, using the ECS task role/default AWS credential chain. It bridges `FileProcessor:*` settings into the environment names expected by the processor, configures the database, registers services, configures authentication/authorization, and exposes controllers plus `/hello`. The project does not use .NET Secret Manager or static AWS access keys.
 
@@ -110,10 +121,10 @@ New work should extend the canonical broker/listing/requirement/match/wallet gra
 2. Normalizes transaction values to `RENT`, `SELL`, or `LEASE`.
 3. Creates the listing and optional size/link rows in a database transaction.
 4. Commits the listing transaction before calling the matching pipeline.
-5. Currently waits synchronously for targeted embedding and matching, then returns `embedding_completed` and `match_count`.
-6. A pipeline failure does not roll back the already-created listing; the response reports `embedding_completed: false`.
+5. Enqueues a durable, version-bound embedding job in the inventory transaction and returns the saved resource plus queued processing state.
+6. Clients poll the owner-authorized embedding-job route; worker/provider failure does not remove the saved listing and can be retried safely.
 
-Manual listing creation can also persist a JSON object in `details` (maximum 32 KB) and `photo_sharing_preference`. Authenticated listing owners upload up to 12 JPG/PNG/WEBP/MP4/MOV/WEBM files through `POST /api/v1/listings/{listingId}/media`. Images are limited to 10 MB and videos to 100 MB by default. Media bytes currently live below the API web root, while database rows store relative paths; production with ephemeral or horizontally scaled API instances must move bytes to durable shared/object storage without changing reveal rules.
+Manual listing creation can also persist a JSON object in `details` (maximum 32 KB) and `photo_sharing_preference`. Authenticated listing owners upload up to 12 JPG/PNG/WEBP/MP4/MOV/WEBM files through `POST /api/v1/listings/{listingId}/media`. Images are limited to 10 MB and videos to 100 MB by default. Media bytes live outside the web root in Development and in a private S3 prefix outside Development. Reads stream through the authenticated, match-party-checked API; production configuration must keep the bucket/prefix private.
 
 Migration `20260828000100_AddListingDetailsAndMedia` creates the two additive tables. Migration `20260828000200_AddRequirementMatchingPreferences` adds requirement range/radius/project columns and updates the active requirements view. Both must be applied explicitly in each target database because startup migrations remain disabled by default. Apply and verify `scripts/harden-matching-engine.sql` after the migrations; compiling the API does not install the procedure.
 
@@ -127,8 +138,8 @@ Migration `20260828000100_AddListingDetailsAndMedia` creates the two additive ta
 2. Resolves the broker from the authenticated user.
 3. Normalizes `RENTAL` to `RENT` and buy variants to `BUY`.
 4. Creates the canonical requirement with optional `budget_min`, `size_max`, `radius_km`, and `preferred_project_names`. Historical callers remain compatible: fixed budget is the default, one legacy locality is accepted, and a missing stored radius matches at 3 km.
-5. Currently invokes targeted embedding and matching synchronously after its transaction commits.
-6. Returns `embeddingCompleted` and `matchCount`; a pipeline failure leaves the requirement saved and reports `embeddingCompleted: false`.
+5. Enqueues a durable, version-bound embedding job in the same transaction.
+6. Returns the saved requirement with queued processing state; owner-authorized polling/retry reports eventual completion or failure.
 
 Manual listing and requirement creation resolve the submitted/geocoded city, locality, latitude, and longitude into the canonical `master` catalogue in the same database transaction as inventory creation. Listings persist the resulting `MasterId`; requirements persist one to five resolved IDs in `PreferredLocalityIds`. Existing catalogue coordinates are retained, and missing catalogue rows are created under a transaction-level advisory lock.
 
@@ -169,7 +180,7 @@ ListingsController or RequirementService
 
 Key behavior:
 
-- `embedding_jobs`, `EmbeddingJobWorker`, `GET /api/v1/embedding-jobs/{jobId}`, and the owner-authorized retry route exist, but the current manual listing/requirement create and update handlers have not yet been wired to enqueue them. They are therefore not the source of truth for those UI submissions today.
+- `embedding_jobs`, `EmbeddingJobWorker`, `GET /api/v1/embedding-jobs/{jobId}`, and the owner-authorized retry route are wired to manual listing/requirement creates and matching-relevant edits.
 - The partial unique database index allows at most one queued job for a listing or requirement once the manual handlers are wired to enqueue. A PostgreSQL advisory lock protects enqueue/retry decisions across API instances.
 - Only rows with `embedding IS NULL`, non-empty `raw_message_text`, and a non-deleted/non-closed status are selected.
 - Embedding text combines property type, transaction/listing type, and at most the first 300 characters of raw text.
@@ -229,7 +240,7 @@ excludes unavailable inventory in addition to the stored procedure doing so.
 
 Preservation rule: the procedure deletes/rebuilds only rows whose status is still `MATCHED` in the requested scope. Confirmed, requested, revealed, or otherwise progressed matches must survive a re-run. Never replace this with a broad delete.
 
-The database tier labels are currently 80+ `TIER1`, 60+ `TIER2`, otherwise `TIER3`. `UserMatchesService` aggregate buckets currently use 90+ excellent, 75–89 good, and below 75 fair. The mobile card labels currently use 80/60. This is a known semantic inconsistency; choose one product definition and change database, API, tests, and UI together.
+The database tiers, canonical `UserMatchesService` aggregate buckets, and mobile labels use 80/60 thresholds. The divergent legacy match-details controller was removed during API cleanup.
 
 ## Mutual connection and contact reveal
 
@@ -257,13 +268,20 @@ Safety properties:
 
 - A row lock on the match plus the unique reveal constraint makes retries/concurrency idempotent.
 - Both brokers are charged exactly once or neither broker is charged.
-- Insufficient credit sets the request to `credit_required`; it must not create a reveal or partial ledger entries.
+- Insufficient credit sets the request to `credit_required`; it must not create a reveal or partial ledger entries. A later top-up retry remains bound to the original fixed attempt deadline and inventory versions.
+- Repeated confirmation taps in one attempt are idempotent and never extend or rewrite the original consent deadline.
 - Only a broker who is a party to the match can confirm/reveal.
 - Only the receiving broker can accept or reject a pending request.
 - Rejection resets confirmations, reveals nothing, and deducts nothing.
 - Expiration reveals nothing and deducts nothing.
 
-Legacy/direct reveal endpoints still exist. They are not authorization to bypass mutual confirmation in the mobile experience. If a direct reveal endpoint is retained, treat it as an internal/idempotent completion or compatibility surface and protect it accordingly.
+When background workers are enabled, `ConnectionExpiryWorker` runs the same bounded, idempotent transition used by the protected expiry endpoint. Each batch closes overdue pending/credit-required attempts, clears their current consent proof without deleting the evidence row, resets an otherwise eligible match to Matched, and creates at most one expiry outcome notification. Worker interval and batch size are bounded configuration values.
+
+Retired direct reveal/unlock endpoints are not part of the active HTTP surface. The internal service implementation retains an idempotent completion method used only behind the canonical confirmation flow and tests.
+
+## Wallet accounting
+
+All current wallet mutations use `WalletAccountingService` under row locks. Signup creates the current-period grant exactly once; purchases credit paid tokens; reveal and approved internal adjustments debit free tokens before paid tokens; lazy settlement runs before spending. Monthly settlement expires only the actual unused free balance, preserves paid tokens, and writes a separately keyed grant. The accounting month is the calendar month in Asia/Kolkata, represented by UTC instants (month start is 18:30 UTC on the preceding date). The internal monthly endpoint processes a bounded batch of due wallets linked to active, email- and mobile-verified accounts; it does not create wallets for unverified imported brokers.
 
 ## Current API surface
 
@@ -275,13 +293,13 @@ All routes are under `/api/v1` unless stated otherwise.
 | Listings | `GET /listings/mine`, `POST /listings`, `POST /listings/{id}/media`, `GET /listings/{id}`, `GET /listings`, `PATCH /listings/{id}`, anonymous `/listings/whatsapp-intake` |
 | Requirements | `GET /requirements/mine`, `POST /requirements` |
 | Search | `POST /search/properties` |
-| Matches | `GET /user-matches`, `GET /user-matches/matches/{id}/details`, authenticated match media, confirm, reject, reveal compatibility action, unlock compatibility action, unlocked history |
-| Broker data | broker register/get/update, matches, wallet, ledger, notifications, notification preferences |
-| Wallet/payment | credit packs, Razorpay order/verify/webhook, alternate `/payments` flow, internal monthly grant/deduct |
+| Matches | `GET /user-matches`, `GET /user-matches/matches/{id}/details`, authenticated match media, confirm, reject |
+| Broker data | broker get/update, wallet, ledger, notifications, notification preferences; legacy broker-match alias remains a migration candidate |
+| Wallet/payment | credit packs, canonical Razorpay order/verify/webhook, internal monthly grant/deduct |
 | File processor | process, embed, ingest, matches, listing, presigned upload, full pipeline callback |
 | Operations | matching run/expiry check, `/hello`, Swagger/OpenAPI |
 
-Important contract gap: the mobile Axios interceptor calls `POST /auth/refresh`, but the current `AuthController` exposes no refresh endpoint and the API does not persist refresh tokens. Expired access tokens therefore lead to logout. Implement refresh end-to-end before relying on it.
+The mobile Axios interceptor logs out on 401 and does not call refresh. The retired refresh action was removed; persistent refresh sessions require a new end-to-end contract. Access JWTs are reusable until expiry, not single-use tokens.
 
 ## Mobile-facing response rules
 
@@ -303,13 +321,13 @@ Important contract gap: the mobile Axios interceptor calls `POST /auth/refresh`,
 - MSG91 OTP Widget support is disabled by default (`Msg91:WidgetEnabled`). With it enabled, mobile send/resend requires `supportsWidget: true` and returns `success`, legacy `status`, and a `widget` object containing `challengeId`, widget-scoped `tokenAuth`, `widgetId`, expected `identifier` and expiry. It does not generate or send a local OTP. Older apps receive an update-required error; legacy `/auth/verify-otp` is rejected while widget mode is active. Email verification and password login remain unchanged.
 - `POST /auth/verify-widget-otp` accepts only a challenge ID and transient MSG91 access token. The backend POSTs to MSG91 `/api/v5/widget/verifyAccessToken` with its private Authkey header, checks HTTP and application success and the exact `91`-prefixed Indian mobile, then checks authenticated JWT issuance/expiry. Proof must be issued after the challenge (whole-second precision), not future-issued or expired. Missing/malformed timestamps fail closed. This JWT contract needs a real-provider smoke test before rollout.
 - `widget_otp_challenges` binds a 15-minute challenge to a specific user or staged registration. Atomic consumption and a unique SHA-256 token-hash index prevent challenge/token replay across instances. No raw provider tokens or OTPs are stored. Promotion uses the same email-proof, active-account, broker-identity and wallet transaction as legacy verification. Consumed hashes must be retained; no automatic deletion is implemented. Per-number admission is capped at five challenges per 15 minutes under a PostgreSQL advisory lock; mobile endpoints also have a 10/minute per-remote-IP limiter per process. Provider-side client-token controls and edge/distributed rate limiting remain necessary because clients can call the SDK directly.
-- Apply additive migration `20260909075218_AddWidgetOtpChallenges` explicitly before enabling. Backend secrets are `MSG91_AUTH_KEY`, `MSG91_WIDGET_ID`, and `MSG91_WIDGET_TOKEN_AUTH`; the legacy `MSG91_OTP_TEMPLATE_ID` is not used in widget mode. See `scripts/MSG91_WIDGET_SETUP.md` for rollout, secure configuration and live-test requirements. No target database or provider-account configuration is changed by these source changes.
+- Migration `20260909075218_AddWidgetOtpChallenges` is installed in development but must still be applied and verified independently in every other target before enabling. Backend secrets are `MSG91_AUTH_KEY`, `MSG91_WIDGET_ID`, and `MSG91_WIDGET_TOKEN_AUTH`; the legacy `MSG91_OTP_TEMPLATE_ID` is not used in widget mode. See `scripts/MSG91_WIDGET_SETUP.md` for rollout, secure configuration and live-test requirements.
 - Google Maps SDK configuration in the mobile client, the backend Geocoding API key, and the Vertex AI service account are separate credentials with separate restrictions.
 - AWS credentials should come from workload roles/OIDC and Secrets Manager. Static AWS keys must not be committed.
 - Razorpay order verification and webhook handling must remain idempotent; successful payment credits the canonical wallet and ledger once.
-- File-processor endpoints and internal matching/credit operations are currently anonymous for infrastructure compatibility. They require network/API-gateway protection before internet exposure.
-- CORS currently allows every origin and Swagger is enabled globally. Tighten these for production as a coordinated deployment change.
-- The current health endpoint is liveness-only (`/hello`). A database-aware readiness endpoint is still needed.
+- File-processor and internal matching/credit operations fail closed unless the configured internal service key is present. Network/API-gateway restrictions remain an additional deployment layer.
+- Browser CORS is allow-list based, production API documentation defaults off, and configuration validation rejects unsafe required-integration settings.
+- `/health/live` reports process liveness; `/health/ready` checks database connectivity plus required schema/procedure compatibility with bounded timeouts.
 
 ## Known architectural seams
 

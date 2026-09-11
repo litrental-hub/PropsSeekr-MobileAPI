@@ -13,18 +13,21 @@ public class RequirementService : IRequirementService
 {
     private readonly AppDbContext _dbContext;
     private readonly IBrokerIdentityService _brokerIdentityService;
-    private readonly IMatchingPipelineService _matchingPipeline;
+    private readonly IEmbeddingJobService _embeddingJobs;
+    private readonly MatchInvalidationService _matchInvalidation;
     private readonly ILogger<RequirementService> _logger;
 
     public RequirementService(
         AppDbContext dbContext,
         IBrokerIdentityService brokerIdentityService,
-        IMatchingPipelineService matchingPipeline,
+        IEmbeddingJobService embeddingJobs,
+        MatchInvalidationService matchInvalidation,
         ILogger<RequirementService> logger)
     {
         _dbContext = dbContext;
         _brokerIdentityService = brokerIdentityService;
-        _matchingPipeline = matchingPipeline;
+        _embeddingJobs = embeddingJobs;
+        _matchInvalidation = matchInvalidation;
         _logger = logger;
     }
 
@@ -347,36 +350,20 @@ public class RequirementService : IRequirementService
 
             _dbContext.Requirements.Add(requirement);
             await _dbContext.SaveChangesAsync();
+            var job = await _embeddingJobs.EnqueueAsync("requirement", requirement.Id);
             await transaction.CommitAsync();
-        }
 
-        IReadOnlyList<int> matches = [];
-        var embeddingCompleted = true;
-        try
-        {
-            await _matchingPipeline.TriggerForRequirementAsync(requirement.Id);
-            matches = await _dbContext.Matches
-                .AsNoTracking()
-                .Where(match => match.RequirementId == requirement.Id && match.Status == "MATCHED")
-                .Select(match => match.Id)
-                .ToListAsync();
+            return new CreateRequirementResponseDto
+            {
+                Success = true,
+                RequirementId = requirement.Id.ToString(),
+                MatchCount = 0,
+                EmbeddingCompleted = false,
+                EmbeddingStatus = job.Status,
+                EmbeddingJobId = job.Id,
+                Message = "Requirement saved. Matching is queued and can be tracked with the embedding job ID."
+            };
         }
-        catch (Exception ex)
-        {
-            embeddingCompleted = false;
-            _logger.LogError(ex, "Embedding and matching pipeline failed for requirement {RequirementId}", requirement.Id);
-        }
-
-        return new CreateRequirementResponseDto
-        {
-            Success = true,
-            RequirementId = requirement.Id.ToString(),
-            MatchCount = matches.Count,
-            EmbeddingCompleted = embeddingCompleted,
-            Message = embeddingCompleted
-                ? "Requirement posted successfully. Gemini embedding and matching completed."
-                : "Requirement posted, but Gemini embedding or matching failed. Check API logs and retry the embedding."
-        };
     }
 
     public async Task<CreateRequirementResponseDto> UpdateRequirementAsync(Guid userId, int requirementId, CreateRequirementRequestDto request)
@@ -473,38 +460,25 @@ public class RequirementService : IRequirementService
         if (request.IsAvailable.HasValue)
             requirement.IsAvailable = request.IsAvailable.Value;
         requirement.UpdatedAt = DateTime.UtcNow;
+        requirement.EmbeddingModel = null;
 
         _dbContext.Requirements.Update(requirement);
         await _dbContext.SaveChangesAsync();
-
+        await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE requirements SET embedding = NULL, embedding_model = NULL WHERE requirementid = {requirement.Id}");
+        await _matchInvalidation.InvalidateForRequirementAsync(requirement.Id);
+        var embeddingJob = await _embeddingJobs.EnqueueAsync("requirement", requirement.Id);
         await transaction.CommitAsync();
-
-        IReadOnlyList<int> matches = [];
-        var embeddingCompleted = true;
-        try
-        {
-            await _matchingPipeline.TriggerForRequirementAsync(requirement.Id);
-            matches = await _dbContext.Matches
-                .AsNoTracking()
-                .Where(match => match.RequirementId == requirement.Id && match.Status == "MATCHED")
-                .Select(match => match.Id)
-                .ToListAsync();
-        }
-        catch (Exception ex)
-        {
-            embeddingCompleted = false;
-            _logger.LogError(ex, "Embedding and matching pipeline failed for requirement update {RequirementId}", requirement.Id);
-        }
 
         return new CreateRequirementResponseDto
         {
             Success = true,
             RequirementId = requirement.Id.ToString(),
-            MatchCount = matches.Count,
-            EmbeddingCompleted = embeddingCompleted,
-            Message = embeddingCompleted
-                ? "Requirement updated successfully."
-                : "Requirement updated, but matching pipeline encountered an issue."
+            MatchCount = 0,
+            EmbeddingCompleted = false,
+            EmbeddingStatus = embeddingJob.Status,
+            EmbeddingJobId = embeddingJob.Id,
+            Message = "Requirement updated. Matching is queued."
         };
     }
 

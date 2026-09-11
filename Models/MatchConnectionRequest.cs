@@ -19,6 +19,12 @@ public sealed class MatchConnectionRequest
     [Column("receiving_broker_id")]
     public int ReceivingBrokerId { get; set; }
 
+    [Column("listing_version")]
+    public int ListingVersion { get; set; } = 1;
+
+    [Column("requirement_version")]
+    public int RequirementVersion { get; set; } = 1;
+
     [Column("status")]
     [MaxLength(30)]
     public string Status { get; set; } = ConnectionRequestStatuses.Pending;

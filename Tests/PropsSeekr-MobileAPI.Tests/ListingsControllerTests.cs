@@ -8,6 +8,7 @@ using PropSeekr.Data;
 using PropSeekr.DTOs.Inventory;
 using PropSeekr.DTOs.Matches;
 using PropSeekr.Models;
+using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
 using Xunit;
 
@@ -128,7 +129,8 @@ public sealed class ListingsControllerTests
             db,
             brokerIdentity,
             listings,
-            new StubMatchingPipelineService(),
+            new EmbeddingJobService(db),
+            new MatchInvalidationService(db),
             NullLogger<ListingsController>.Instance);
         controller.ControllerContext = new ControllerContext
         {
@@ -195,16 +197,4 @@ public sealed class ListingsControllerTests
         }
     }
 
-    private sealed class StubMatchingPipelineService : IMatchingPipelineService
-    {
-        public Task TriggerForListingAsync(
-            int listingId,
-            CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
-
-        public Task TriggerForRequirementAsync(
-            int requirementId,
-            CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
-    }
 }

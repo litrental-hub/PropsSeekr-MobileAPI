@@ -1,4 +1,6 @@
 using System;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -26,23 +28,42 @@ public sealed class RequireInternalServiceKeyAttribute : Attribute, IAsyncAction
         var expectedKey = configuration[ConfigKey]?.Trim()
             ?? Environment.GetEnvironmentVariable(EnvVarName)?.Trim();
 
-        // If an API key is configured, enforce strict validation against incoming header
-        if (!string.IsNullOrWhiteSpace(expectedKey))
+        // Internal endpoints must never become public because a deployment secret
+        // was omitted. Treat a missing server-side key as an unavailable service.
+        if (string.IsNullOrWhiteSpace(expectedKey))
         {
-            if (!context.HttpContext.Request.Headers.TryGetValue(HeaderName, out var providedHeader) ||
-                string.IsNullOrWhiteSpace(providedHeader) ||
-                !string.Equals(expectedKey, providedHeader.ToString().Trim(), StringComparison.Ordinal))
+            context.Result = new ObjectResult(new
             {
-                context.Result = new UnauthorizedObjectResult(new
-                {
-                    success = false,
-                    message = "Unauthorized internal service access. Valid X-Internal-Service-Key header is required."
-                });
-                return;
-            }
+                success = false,
+                message = "Internal service authentication is unavailable."
+            })
+            {
+                StatusCode = StatusCodes.Status503ServiceUnavailable
+            };
+            return;
+        }
+
+        if (!context.HttpContext.Request.Headers.TryGetValue(HeaderName, out var providedHeader) ||
+            string.IsNullOrWhiteSpace(providedHeader) ||
+            !KeysMatch(expectedKey, providedHeader.ToString().Trim()))
+        {
+            context.Result = new UnauthorizedObjectResult(new
+            {
+                success = false,
+                message = "Unauthorized internal service access. Valid X-Internal-Service-Key header is required."
+            });
+            return;
         }
 
         await next();
     }
-}
 
+    private static bool KeysMatch(string expected, string provided)
+    {
+        var expectedBytes = Encoding.UTF8.GetBytes(expected);
+        var providedBytes = Encoding.UTF8.GetBytes(provided);
+
+        return expectedBytes.Length == providedBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
+    }
+}

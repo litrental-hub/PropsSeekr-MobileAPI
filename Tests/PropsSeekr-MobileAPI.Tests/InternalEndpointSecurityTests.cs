@@ -16,6 +16,35 @@ namespace PropSeekr.Tests;
 public class InternalEndpointSecurityTests
 {
     [Fact]
+    public async Task OnActionExecutionAsync_WhenApiKeyIsNotConfigured_Returns503()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection().Build();
+        var services = new ServiceCollection();
+        services.AddSingleton<IConfiguration>(configuration);
+        var serviceProvider = services.BuildServiceProvider();
+        var httpContext = new DefaultHttpContext { RequestServices = serviceProvider };
+        httpContext.Request.Headers[RequireInternalServiceKeyAttribute.HeaderName] = "attacker-supplied-key";
+        var actionContext = new ActionContext(httpContext, new RouteData(), new ActionDescriptor());
+        var executingContext = new ActionExecutingContext(
+            actionContext,
+            new List<IFilterMetadata>(),
+            new Dictionary<string, object?>(),
+            new object());
+        var filter = new RequireInternalServiceKeyAttribute();
+        var wasNextCalled = false;
+
+        await filter.OnActionExecutionAsync(executingContext, () =>
+        {
+            wasNextCalled = true;
+            return Task.FromResult<ActionExecutedContext>(null!);
+        });
+
+        Assert.False(wasNextCalled);
+        var result = Assert.IsType<ObjectResult>(executingContext.Result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, result.StatusCode);
+    }
+
+    [Fact]
     public async Task OnActionExecutionAsync_WhenApiKeyConfigured_AndHeaderMissing_Returns401()
     {
         // Arrange
@@ -149,4 +178,3 @@ public class InternalEndpointSecurityTests
         Assert.Null(executingContext.Result);
     }
 }
-

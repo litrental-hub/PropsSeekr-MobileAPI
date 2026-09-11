@@ -10,6 +10,9 @@ public class DeductCreditsRequestDto
     [JsonPropertyName("amount")]
     public int Amount { get; set; }
 
-    [JsonPropertyName("notes")]
-    public string? Notes { get; set; }
+    [JsonPropertyName("operation_key")]
+    public string OperationKey { get; set; } = string.Empty;
+
+    [JsonPropertyName("reason")]
+    public string Reason { get; set; } = string.Empty;
 }

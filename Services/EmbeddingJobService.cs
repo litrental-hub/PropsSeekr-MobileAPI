@@ -26,17 +26,32 @@ public sealed class EmbeddingJobService(AppDbContext dbContext) : IEmbeddingJobS
         await dbContext.Database.ExecuteSqlInterpolatedAsync(
             $"SELECT pg_advisory_xact_lock(hashtext({lockKey}))", cancellationToken);
 
+        var targetVersion = entityType == "listing"
+            ? await dbContext.Listings.Where(item => item.Id == entityId).Select(item => (int?)item.ContentVersion).SingleOrDefaultAsync(cancellationToken)
+            : await dbContext.Requirements.Where(item => item.Id == entityId).Select(item => (int?)item.ContentVersion).SingleOrDefaultAsync(cancellationToken);
+        if (!targetVersion.HasValue)
+            throw new KeyNotFoundException($"The {entityType} no longer exists.");
+
         // A queued job will read the latest persisted content. A processing job
         // may already hold old content, so an edit must create a successor job.
         var existing = await dbContext.EmbeddingJobs.FirstOrDefaultAsync(job =>
             job.EntityType == entityType && job.EntityId == entityId && job.Status == "queued", cancellationToken);
         if (existing is not null)
         {
+            if (existing.TargetVersion < targetVersion.Value)
+            {
+                existing.TargetVersion = targetVersion.Value;
+                existing.AvailableAt = DateTime.UtcNow;
+                existing.AttemptCount = 0;
+                existing.LastError = null;
+                existing.UpdatedAt = DateTime.UtcNow;
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
             if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
             return existing;
         }
 
-        var job = new EmbeddingJob { EntityType = entityType, EntityId = entityId };
+        var job = new EmbeddingJob { EntityType = entityType, EntityId = entityId, TargetVersion = targetVersion.Value };
         dbContext.EmbeddingJobs.Add(job);
         await dbContext.SaveChangesAsync(cancellationToken);
         if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
@@ -64,6 +79,8 @@ public sealed class EmbeddingJobService(AppDbContext dbContext) : IEmbeddingJobS
         job.AttemptCount = 0;
         job.AvailableAt = DateTime.UtcNow;
         job.LockedAt = null;
+        job.LockToken = null;
+        job.HeartbeatAt = null;
         job.CompletedAt = null;
         job.LastError = null;
         job.UpdatedAt = DateTime.UtcNow;

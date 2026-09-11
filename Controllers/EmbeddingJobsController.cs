@@ -19,7 +19,7 @@ public sealed class EmbeddingJobsController(AppDbContext dbContext, IBrokerIdent
         var job = await dbContext.EmbeddingJobs.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
         if (job is null) return NotFound(new { success = false, message = "Embedding job not found." });
         if (!await CanAccessAsync(job.EntityType, job.EntityId, userId, cancellationToken)) return Forbid();
-        return Ok(new { success = true, job_id = job.Id, entity_type = job.EntityType, entity_id = job.EntityId, status = job.Status, attempt_count = job.AttemptCount, max_attempts = job.MaxAttempts, completed_at = job.CompletedAt, last_error = job.Status == "failed" ? job.LastError : null });
+        return Ok(new { success = true, job_id = job.Id, entity_type = job.EntityType, entity_id = job.EntityId, target_version = job.TargetVersion, status = job.Status, attempt_count = job.AttemptCount, max_attempts = job.MaxAttempts, completed_at = job.CompletedAt, last_error = job.Status is "failed" or "superseded" ? job.LastError : null });
     }
 
     [HttpPost("{id:guid}/retry")]

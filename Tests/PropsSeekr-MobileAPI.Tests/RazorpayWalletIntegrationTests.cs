@@ -32,7 +32,7 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
             ["Razorpay:KeySecret"] = KeySecret,
             ["Razorpay:WebhookSecret"] = "test_webhook_secret"
         }).Build();
-        _service = new RazorpayService(_db, new StubHttpClientFactory(), configuration, NullLogger<RazorpayService>.Instance);
+        _service = new RazorpayService(_db, new StubHttpClientFactory(), configuration, NullLogger<RazorpayService>.Instance, new WalletAccountingService(_db));
     }
 
     public async Task DisposeAsync()
@@ -90,6 +90,41 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
         Assert.False(response.Success);
         Assert.Equal(5, (await _db.CreditWallets.AsNoTracking().SingleAsync()).FreeCreditsBalance);
         Assert.Empty(await _db.CreditTransactions.AsNoTracking().ToListAsync());
+    }
+
+    [PostgreSqlFact]
+    public async Task ProviderAmountMismatch_DoesNotCreditWallet()
+    {
+        if (_db is null || _service is null) return;
+        var userId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        await SeedAsync(_db, userId, Guid.NewGuid(), "order_wrong_amount", credits: 20);
+        const string paymentId = "pay_wrong_amount";
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.VerifyPaymentSignatureAsync(userId, new VerifyPaymentRequestDto
+        {
+            RazorpayOrderId = "order_wrong_amount",
+            RazorpayPaymentId = paymentId,
+            RazorpaySignature = Sign($"order_wrong_amount|{paymentId}", KeySecret)
+        }));
+
+        Assert.Equal(5, (await _db.CreditWallets.AsNoTracking().SingleAsync()).FreeCreditsBalance);
+        Assert.Empty(await _db.CreditTransactions.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task WebhookWithoutConfiguredSecret_FailsClosed()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var context = new AppDbContext(options);
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Razorpay:KeyId"] = "test_key_id",
+            ["Razorpay:KeySecret"] = KeySecret,
+            ["Razorpay:WebhookSecret"] = ""
+        }).Build();
+        var service = new RazorpayService(context, new StubHttpClientFactory(), configuration, NullLogger<RazorpayService>.Instance, new WalletAccountingService(context));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ProcessWebhookEventAsync("{}", "attacker-signature"));
     }
 
     private static async Task SeedAsync(AppDbContext db, Guid userId, Guid paymentId, string orderId, int credits)
@@ -159,6 +194,28 @@ public sealed class RazorpayWalletIntegrationTests : IAsyncLifetime
 
     private sealed class StubHttpClientFactory : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => new();
+        public HttpClient CreateClient(string name) => new(new StubRazorpayHandler());
+    }
+
+    private sealed class StubRazorpayHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var paymentId = request.RequestUri?.Segments.Last().TrimEnd('/') ?? string.Empty;
+            var (orderId, amount, status) = paymentId switch
+            {
+                "pay_123" => ("order_123", 560000L, "captured"),
+                "pay_wrong_amount" => ("order_wrong_amount", 1L, "captured"),
+                "pay_pending" => ("order_pending", 560000L, "authorized"),
+                _ => ("order_unknown", 560000L, "captured")
+            };
+            var json = $$"""
+                {"id":"{{paymentId}}","order_id":"{{orderId}}","status":"{{status}}","amount":{{amount}},"currency":"INR"}
+                """;
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
     }
 }

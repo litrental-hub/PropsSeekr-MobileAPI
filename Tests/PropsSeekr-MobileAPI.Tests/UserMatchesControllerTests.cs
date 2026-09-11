@@ -199,6 +199,8 @@ public sealed class UserMatchesControllerTests
         public Task<MatchRejectionResponseDto> RejectMatchAsync(int brokerId, MatchRejectionRequestDto request) =>
             throw new NotSupportedException();
 
+        public Task<int> ExpirePendingRequestsAsync(int batchSize = 200) => throw new NotSupportedException();
+
         public Task<bool> IsMatchRevealedAsync(int matchId, Guid userId) =>
             throw new NotSupportedException();
 
@@ -227,6 +229,7 @@ public sealed class UserMatchesControllerTests
         }
 
         public Task<MatchConfirmationResponseDto> ConfirmMatchAsync(int brokerId, MatchConfirmationRequestDto request) => throw new NotSupportedException();
+        public Task<int> ExpirePendingRequestsAsync(int batchSize = 200) => throw new NotSupportedException();
         public Task<UnlockPropertyResponseDto> UnlockMatchAsync(int brokerId, UnlockPropertyRequestDto request) => throw new NotSupportedException();
         public Task<bool> IsMatchRevealedAsync(int matchId, Guid userId) => throw new NotSupportedException();
         public Task<CreditWallet> GetWalletAsync(Guid userId) => throw new NotSupportedException();

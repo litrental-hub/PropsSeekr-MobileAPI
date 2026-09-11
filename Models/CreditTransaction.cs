@@ -16,6 +16,14 @@ public class CreditTransaction
 
     public int BalanceAfter { get; set; }
 
+    public int? FreeCreditsAmount { get; set; }
+    public int? PaidCreditsAmount { get; set; }
+    public int? FreeBalanceAfter { get; set; }
+    public int? PaidBalanceAfter { get; set; }
+
+    [MaxLength(20)]
+    public string? PeriodKey { get; set; }
+
     public string? ReferenceType { get; set; } // reveal, payment, dispute, monthly_grant
     public long? ReferenceId { get; set; }
     public string? ReferenceKey { get; set; }

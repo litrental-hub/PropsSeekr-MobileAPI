@@ -121,6 +121,16 @@ public class Listing
     [Column("embedding_model")]
     public string? EmbeddingModel { get; set; }
 
+    [Column("content_version")]
+    public int ContentVersion { get; set; } = 1;
+
+    [Column("embedding_version")]
+    public int? EmbeddingVersion { get; set; }
+
+    [Column("embedding_status")]
+    [MaxLength(20)]
+    public string EmbeddingStatus { get; set; } = "queued";
+
     [Column("isavailable")]
     public bool IsAvailable { get; set; } = true;
 

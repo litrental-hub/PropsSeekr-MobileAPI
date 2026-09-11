@@ -83,8 +83,16 @@ public class AppDbContext : DbContext
 
         b.Entity<Listing>(e =>
         {
+            e.ToTable("listings", table =>
+            {
+                table.HasCheckConstraint("CK_listings_content_version_positive", "content_version > 0");
+                table.HasCheckConstraint("CK_listings_embedding_version_valid", "embedding_version IS NULL OR (embedding_version > 0 AND embedding_version <= content_version)");
+                table.HasCheckConstraint("CK_listings_embedding_status_valid", "embedding_status IN ('queued', 'processing', 'completed', 'failed', 'not_required')");
+            });
             e.Property(x => x.IsAvailable).HasDefaultValue(true);
             e.Property(x => x.LocationResolutionStatus).HasDefaultValue("missing");
+            e.Property(x => x.ContentVersion).HasDefaultValue(1);
+            e.Property(x => x.EmbeddingStatus).HasDefaultValue("queued");
             e.HasIndex(x => x.MasterId);
             e.HasIndex(x => x.ListingType);
             e.HasIndex(x => x.PropertyType);
@@ -100,8 +108,16 @@ public class AppDbContext : DbContext
 
         b.Entity<Requirement>(e =>
         {
+            e.ToTable("requirements", table =>
+            {
+                table.HasCheckConstraint("CK_requirements_content_version_positive", "content_version > 0");
+                table.HasCheckConstraint("CK_requirements_embedding_version_valid", "embedding_version IS NULL OR (embedding_version > 0 AND embedding_version <= content_version)");
+                table.HasCheckConstraint("CK_requirements_embedding_status_valid", "embedding_status IN ('queued', 'processing', 'completed', 'failed', 'not_required')");
+            });
             e.Property(x => x.IsAvailable).HasDefaultValue(true);
             e.Property(x => x.LocationResolutionStatus).HasDefaultValue("missing");
+            e.Property(x => x.ContentVersion).HasDefaultValue(1);
+            e.Property(x => x.EmbeddingStatus).HasDefaultValue("queued");
             e.HasIndex(x => x.RequirementType);
             e.HasIndex(x => x.PropertyType);
             e.HasIndex(x => x.Status);
@@ -135,10 +151,14 @@ public class AppDbContext : DbContext
             e.HasIndex(x => x.Status);
             e.HasIndex(x => x.State);
         });
-        b.Entity<MatchConfirmation>(e => { e.ToTable("match_confirmations"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.AvailabilityConfirmed).HasColumnName("availability_confirmed"); e.Property(x => x.PriceValid).HasColumnName("price_valid"); e.Property(x => x.PriceNegotiable).HasColumnName("price_negotiable"); e.Property(x => x.ReadyToConnect).HasColumnName("ready_to_connect"); e.Property(x => x.ConfirmedAt).HasColumnName("confirmed_at"); e.Property(x => x.WindowExpiresAt).HasColumnName("window_expires_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.HasIndex(x => new { x.MatchId, x.BrokerId }).IsUnique(); e.HasIndex(x => x.WindowExpiresAt); });
+        b.Entity<MatchConfirmation>(e => { e.ToTable("match_confirmations"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.ConnectionRequestId).HasColumnName("connection_request_id"); e.Property(x => x.AvailabilityConfirmed).HasColumnName("availability_confirmed"); e.Property(x => x.PriceValid).HasColumnName("price_valid"); e.Property(x => x.PriceNegotiable).HasColumnName("price_negotiable"); e.Property(x => x.ReadyToConnect).HasColumnName("ready_to_connect"); e.Property(x => x.AvailabilityDate).HasColumnName("availability_date"); e.Property(x => x.ConfirmedAt).HasColumnName("confirmed_at"); e.Property(x => x.WindowExpiresAt).HasColumnName("window_expires_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.HasIndex(x => new { x.ConnectionRequestId, x.BrokerId }).IsUnique(); e.HasIndex(x => new { x.MatchId, x.BrokerId }); e.HasIndex(x => x.WindowExpiresAt); e.HasOne(x => x.ConnectionRequest).WithMany().HasForeignKey(x => x.ConnectionRequestId).OnDelete(DeleteBehavior.Restrict); });
         b.Entity<MatchConnectionRequest>(e =>
         {
+            e.Property(x => x.ListingVersion).HasDefaultValue(1);
+            e.Property(x => x.RequirementVersion).HasDefaultValue(1);
             e.HasIndex(x => new { x.MatchId, x.Status });
+            e.HasIndex(x => x.MatchId).IsUnique().HasDatabaseName("UX_match_connection_requests_active_match")
+                .HasFilter("status IN ('pending', 'credit_required')");
             e.HasIndex(x => new { x.ReceivingBrokerId, x.Status });
             e.HasIndex(x => new { x.Status, x.ExpiresAt });
             e.HasOne(x => x.Match).WithMany().HasForeignKey(x => x.MatchId).OnDelete(DeleteBehavior.Cascade);
@@ -154,16 +174,22 @@ public class AppDbContext : DbContext
         });
         b.Entity<EmbeddingJob>(e =>
         {
-            e.ToTable("embedding_jobs");
+            e.ToTable("embedding_jobs", table =>
+            {
+                table.HasCheckConstraint("CK_embedding_jobs_target_version_positive", "target_version > 0");
+                table.HasCheckConstraint("CK_embedding_jobs_status_valid", "status IN ('queued', 'processing', 'completed', 'failed', 'superseded')");
+            });
             e.HasKey(x => x.Id);
+            e.Property(x => x.TargetVersion).HasDefaultValue(1);
             e.HasIndex(x => new { x.Status, x.AvailableAt });
             e.HasIndex(x => new { x.EntityType, x.EntityId });
+            e.HasIndex(x => new { x.Status, x.HeartbeatAt });
             e.HasIndex(x => new { x.EntityType, x.EntityId })
                 .HasDatabaseName("UX_embedding_jobs_one_queued_per_entity")
                 .IsUnique()
                 .HasFilter("status = 'queued'");
         });
-        b.Entity<BulkImportJob>(e => { e.ToTable("bulk_import_jobs"); e.HasKey(x => x.Id); e.Property(x => x.DefaultCity).HasDefaultValue("Indore"); e.HasIndex(x => new { x.Status, x.AvailableAt }); e.HasIndex(x => x.BrokerId); e.HasIndex(x => x.StorageKey).IsUnique(); e.HasOne(x => x.Broker).WithMany().HasForeignKey(x => x.BrokerId).OnDelete(DeleteBehavior.Restrict); });
+        b.Entity<BulkImportJob>(e => { e.ToTable("bulk_import_jobs", table => table.HasCheckConstraint("CK_bulk_import_jobs_upload_size_positive", "upload_size_bytes IS NULL OR upload_size_bytes > 0")); e.HasKey(x => x.Id); e.Property(x => x.DefaultCity).HasDefaultValue("Indore"); e.HasIndex(x => new { x.Status, x.AvailableAt }); e.HasIndex(x => x.BrokerId); e.HasIndex(x => x.StorageKey).IsUnique(); e.HasOne(x => x.Broker).WithMany().HasForeignKey(x => x.BrokerId).OnDelete(DeleteBehavior.Restrict); });
         b.Entity<LocationRemediationJob>(e =>
         {
             e.ToTable("location_remediation_jobs");
@@ -174,10 +200,10 @@ public class AppDbContext : DbContext
             e.Property(x => x.BatchSize).HasDefaultValue(25);
             e.HasIndex(x => new { x.Status, x.AvailableAt });
         });
-        b.Entity<Reveal>(e => { e.ToTable("reveals"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.RevealedAt).HasColumnName("revealed_at"); e.HasIndex(x => x.MatchId).IsUnique(); });
-        b.Entity<CreditWallet>(e => { e.ToTable("credit_wallets"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.FreeCreditsBalance).HasColumnName("free_credits_balance"); e.Property(x => x.PaidCreditsBalance).HasColumnName("paid_credits_balance"); e.Property(x => x.FreeCreditsResetAt).HasColumnName("free_credits_reset_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); e.HasIndex(x => x.BrokerId).IsUnique(); });
-        b.Entity<CreditTransaction>(e => { e.ToTable("credit_transactions"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.Type).HasColumnName("Type"); e.Property(x => x.Amount).HasColumnName("Amount"); e.Property(x => x.BalanceAfter).HasColumnName("balance_after"); e.Property(x => x.ReferenceType).HasColumnName("reference_type"); e.Property(x => x.ReferenceId).HasColumnName("reference_id"); e.Property(x => x.ReferenceKey).HasColumnName("reference_key").HasMaxLength(100); e.Property(x => x.Notes).HasColumnName("Notes"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); e.HasIndex(x => new { x.BrokerId, x.ReferenceType, x.ReferenceKey }).IsUnique().HasFilter("reference_key IS NOT NULL"); });
-        b.Entity<CreditPack>(e => { e.ToTable("credit_packs"); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.Name).HasColumnName("Name"); e.Property(x => x.Credits).HasColumnName("Credits"); e.Property(x => x.Price).HasColumnName("Price"); e.Property(x => x.Active).HasColumnName("Active"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); });
+        b.Entity<Reveal>(e => { e.ToTable("reveals"); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.MatchId).HasColumnName("match_id"); e.Property(x => x.ConnectionRequestId).HasColumnName("connection_request_id"); e.Property(x => x.RevealedAt).HasColumnName("revealed_at"); e.HasIndex(x => x.MatchId).IsUnique(); e.HasIndex(x => x.ConnectionRequestId).IsUnique().HasFilter("connection_request_id IS NOT NULL"); e.HasOne(x => x.ConnectionRequest).WithMany().HasForeignKey(x => x.ConnectionRequestId).OnDelete(DeleteBehavior.Restrict); });
+        b.Entity<CreditWallet>(e => { e.ToTable("credit_wallets", table => { table.HasCheckConstraint("CK_credit_wallets_free_nonnegative", "free_credits_balance >= 0"); table.HasCheckConstraint("CK_credit_wallets_paid_nonnegative", "paid_credits_balance >= 0"); }); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.FreeCreditsBalance).HasColumnName("free_credits_balance"); e.Property(x => x.PaidCreditsBalance).HasColumnName("paid_credits_balance"); e.Property(x => x.FreeCreditsResetAt).HasColumnName("free_credits_reset_at"); e.Property(x => x.CreatedAt).HasColumnName("created_at"); e.Property(x => x.UpdatedAt).HasColumnName("updated_at"); e.HasIndex(x => x.BrokerId).IsUnique(); });
+        b.Entity<CreditTransaction>(e => { e.ToTable("credit_transactions", table => { table.HasCheckConstraint("CK_credit_transactions_amount_positive", "\"Amount\" > 0"); table.HasCheckConstraint("CK_credit_transactions_allocation_valid", "(free_credits_amount IS NULL AND paid_credits_amount IS NULL) OR (free_credits_amount >= 0 AND paid_credits_amount >= 0 AND free_credits_amount + paid_credits_amount = \"Amount\")"); }); e.HasKey(x => x.Id); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.BrokerId).HasColumnName("broker_id"); e.Property(x => x.Type).HasColumnName("Type"); e.Property(x => x.Amount).HasColumnName("Amount"); e.Property(x => x.BalanceAfter).HasColumnName("balance_after"); e.Property(x => x.FreeCreditsAmount).HasColumnName("free_credits_amount"); e.Property(x => x.PaidCreditsAmount).HasColumnName("paid_credits_amount"); e.Property(x => x.FreeBalanceAfter).HasColumnName("free_balance_after"); e.Property(x => x.PaidBalanceAfter).HasColumnName("paid_balance_after"); e.Property(x => x.PeriodKey).HasColumnName("period_key"); e.Property(x => x.ReferenceType).HasColumnName("reference_type"); e.Property(x => x.ReferenceId).HasColumnName("reference_id"); e.Property(x => x.ReferenceKey).HasColumnName("reference_key").HasMaxLength(100); e.Property(x => x.Notes).HasColumnName("Notes"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); e.HasIndex(x => new { x.BrokerId, x.ReferenceType, x.ReferenceKey }).IsUnique().HasFilter("reference_key IS NOT NULL"); });
+        b.Entity<CreditPack>(e => { e.ToTable("credit_packs", table => { table.HasCheckConstraint("CK_credit_packs_credits_positive", "\"Credits\" > 0"); table.HasCheckConstraint("CK_credit_packs_amount_positive", "\"AmountInPaise\" > 0"); }); e.Property(x => x.Id).HasColumnName("Id"); e.Property(x => x.Name).HasColumnName("Name"); e.Property(x => x.Code).HasColumnName("Code"); e.Property(x => x.Version).HasColumnName("Version").HasDefaultValue(1); e.Property(x => x.Currency).HasColumnName("Currency").HasDefaultValue("INR"); e.Property(x => x.AmountInPaise).HasColumnName("AmountInPaise"); e.Property(x => x.Credits).HasColumnName("Credits"); e.Property(x => x.Price).HasColumnName("Price"); e.Property(x => x.Active).HasColumnName("Active"); e.Property(x => x.CreatedAt).HasColumnName("CreatedAt"); e.Property(x => x.EffectiveFrom).HasColumnName("EffectiveFrom").HasDefaultValueSql("NOW()"); e.Property(x => x.EffectiveTo).HasColumnName("EffectiveTo"); e.HasIndex(x => new { x.Code, x.Version }).IsUnique(); });
         b.Entity<ListingDetail>(e =>
         {
             e.HasKey(x => x.ListingId);

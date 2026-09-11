@@ -13,6 +13,8 @@ public interface IUnlockService
 
     Task<MatchRejectionResponseDto> RejectMatchAsync(int brokerId, MatchRejectionRequestDto request);
 
+    Task<int> ExpirePendingRequestsAsync(int batchSize = 200);
+
     /// <summary>
     /// Unlock/reveal contact details for confirmed match.
     /// Deducts credits and creates reveal record.

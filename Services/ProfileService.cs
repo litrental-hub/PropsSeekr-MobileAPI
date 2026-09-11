@@ -52,22 +52,13 @@ public class ProfileService : IProfileService
 
         ValidateProfilePhotoUrl(normalizedProfilePhotoUrl);
 
-        if (normalizedEmail != null)
-        {
-            var emailInUse = await _dbContext.Users.AnyAsync(x => x.Id != userId && x.Email != null && x.Email.ToLower() == normalizedEmail);
-            if (emailInUse)
-            {
-                throw new Exception("Email already registered.");
-            }
-        }
-
         if (!string.Equals(user.Email, normalizedEmail, StringComparison.OrdinalIgnoreCase))
         {
-            user.IsEmailVerified = false;
+            throw new InvalidOperationException(
+                "Email changes require a dedicated verification flow. Your verified email was not changed.");
         }
 
         user.Name = request.Name.Trim();
-        user.Email = normalizedEmail;
         user.ProfilePhotoUrl = normalizedProfilePhotoUrl;
         user.ModifiedDate = DateTime.UtcNow;
 

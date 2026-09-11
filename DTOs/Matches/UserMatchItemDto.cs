@@ -42,6 +42,8 @@ public class UserMatchItemDto
     public bool IsRevealed { get; set; }
     public ContactDetailsDto? UnlockedContact { get; set; }
     public long? ConnectionRequestId { get; set; }
+    public int? ListingVersion { get; set; }
+    public int? RequirementVersion { get; set; }
     public string? ConnectionRequestStatus { get; set; }
     public string? DeliveryChannel { get; set; }
     public bool IncomingConnectionRequest { get; set; }

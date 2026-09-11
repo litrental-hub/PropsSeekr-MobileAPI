@@ -32,10 +32,10 @@ public class BrokerDetailsResponseDto
     public bool VisibilityPenaltyFlag { get; set; }
 
     [JsonPropertyName("free_credits_balance")]
-    public int FreeCreditsBalance { get; set; }
+    public int? FreeCreditsBalance { get; set; }
 
     [JsonPropertyName("paid_credits_balance")]
-    public int PaidCreditsBalance { get; set; }
+    public int? PaidCreditsBalance { get; set; }
 
     // Additional fields mapped from the User entity
     [JsonPropertyName("email")]
