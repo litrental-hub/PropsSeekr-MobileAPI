@@ -17,6 +17,9 @@ public class EmbeddingJob
     [Column("entity_id")]
     public int EntityId { get; set; }
 
+    [Column("target_version")]
+    public int TargetVersion { get; set; } = 1;
+
     [Column("status")]
     [MaxLength(20)]
     public string Status { get; set; } = "queued";
@@ -32,6 +35,12 @@ public class EmbeddingJob
 
     [Column("locked_at")]
     public DateTime? LockedAt { get; set; }
+
+    [Column("lock_token")]
+    public Guid? LockToken { get; set; }
+
+    [Column("heartbeat_at")]
+    public DateTime? HeartbeatAt { get; set; }
 
     [Column("completed_at")]
     public DateTime? CompletedAt { get; set; }

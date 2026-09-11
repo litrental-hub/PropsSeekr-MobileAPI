@@ -107,7 +107,7 @@ public class UserMatchesController : ControllerBase
         [FromRoute] int matchId,
         [FromRoute] long mediaId,
         [FromServices] AppDbContext dbContext,
-        [FromServices] IWebHostEnvironment environment)
+        [FromServices] IListingMediaStorage mediaStorage)
     {
         if (!TryGetCurrentUserId(out var userId))
             return Unauthorized(new { message = "Invalid authenticated user." });
@@ -126,19 +126,27 @@ public class UserMatchesController : ControllerBase
         if (brokerId.HasValue && match.ListingBrokerId != brokerId && match.RequirementBrokerId != brokerId)
             return Forbid();
 
+        if (!User.IsInRole("Admin") && brokerId != match.ListingBrokerId)
+        {
+            var preference = await dbContext.ListingDetails.AsNoTracking()
+                .Where(detail => detail.ListingId == match.ListingId)
+                .Select(detail => detail.PhotoSharingPreference)
+                .SingleOrDefaultAsync();
+            var revealed = await dbContext.Reveals.AsNoTracking().AnyAsync(item => item.MatchId == matchId);
+            var canView = string.Equals(preference, "SHARE_FREELY", StringComparison.OrdinalIgnoreCase) ||
+                          (string.Equals(preference, "ON_REQUEST", StringComparison.OrdinalIgnoreCase) && revealed);
+            if (!canView) return Forbid();
+        }
+
         var media = await dbContext.ListingMedia.AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == mediaId && item.ListingId == match.ListingId);
         if (media is null) return NotFound(new { success = false, message = "Media not found." });
 
-        var webRoot = environment.WebRootPath;
-        if (string.IsNullOrWhiteSpace(webRoot)) webRoot = Path.Combine(environment.ContentRootPath, "wwwroot");
-        var root = Path.GetFullPath(webRoot);
-        var filePath = Path.GetFullPath(Path.Combine(root, media.StoragePath));
-        if (!filePath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) || !System.IO.File.Exists(filePath))
-            return NotFound(new { success = false, message = "Media file is unavailable." });
+        var stream = await mediaStorage.OpenReadAsync(media.StoragePath, HttpContext.RequestAborted);
+        if (stream is null) return NotFound(new { success = false, message = "Media file is unavailable." });
 
         Response.Headers.XContentTypeOptions = "nosniff";
-        return PhysicalFile(filePath, media.MimeType, enableRangeProcessing: media.MediaType == "video");
+        return File(stream, media.MimeType, enableRangeProcessing: media.MediaType == "video");
     }
 
     /// <summary>
@@ -219,33 +227,6 @@ public class UserMatchesController : ControllerBase
             _logger.LogError(ex, "Error rejecting match {MatchId} for user {UserId}", matchId, userId);
             return BadRequest(new { success = false, message = ex.Message });
         }
-    }
-
-    /// <summary>
-    /// Reveal/unlock contact details for a confirmed match.
-    /// Deducts credits and creates reveal record.
-    /// </summary>
-    [HttpPost("matches/{matchId}/reveal")]
-    public IActionResult RevealMatch(int matchId, [FromBody] UnlockPropertyRequestDto request)
-    {
-        return StatusCode(StatusCodes.Status410Gone, new { message = "Direct reveal is retired. Confirm the match through POST /api/v1/user-matches/matches/{matchId}/confirm." });
-    }
-
-    /// <summary>
-    /// Legacy endpoint - replaced by /matches/{matchId}/reveal
-    /// Kept for backward compatibility during migration.
-    /// </summary>
-    [HttpPost("unlock")]
-    [Obsolete("Use POST /matches/{matchId}/reveal instead")]
-    public IActionResult UnlockProperty([FromBody] UnlockPropertyRequestDto request)
-    {
-        return StatusCode(StatusCodes.Status410Gone, new { message = "The legacy unlock route is retired. Use POST /api/v1/user-matches/matches/{matchId}/confirm." });
-    }
-
-    [HttpGet("unlocked")]
-    public IActionResult GetUnlockedProperties([FromQuery] int page = 1, [FromQuery] int limit = 20)
-    {
-        return StatusCode(StatusCodes.Status410Gone, new { message = "Legacy unlocked-property history is retired. Use GET /api/v1/user-matches and its reveal fields." });
     }
 
     private bool TryGetCurrentUserId(out Guid userId)

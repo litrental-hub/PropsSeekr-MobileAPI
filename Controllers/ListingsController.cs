@@ -35,20 +35,23 @@ public class ListingsController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly IBrokerIdentityService _brokerIdentityService;
     private readonly IBrokerListingsService _brokerListingsService;
-    private readonly IMatchingPipelineService _matchingPipeline;
+    private readonly IEmbeddingJobService _embeddingJobs;
+    private readonly MatchInvalidationService _matchInvalidation;
     private readonly ILogger<ListingsController> _logger;
 
     public ListingsController(
         AppDbContext dbContext,
         IBrokerIdentityService brokerIdentityService,
         IBrokerListingsService brokerListingsService,
-        IMatchingPipelineService matchingPipeline,
+        IEmbeddingJobService embeddingJobs,
+        MatchInvalidationService matchInvalidation,
         ILogger<ListingsController> logger)
     {
         _dbContext = dbContext;
         _brokerIdentityService = brokerIdentityService;
         _brokerListingsService = brokerListingsService;
-        _matchingPipeline = matchingPipeline;
+        _embeddingJobs = embeddingJobs;
+        _matchInvalidation = matchInvalidation;
         _logger = logger;
     }
 
@@ -203,8 +206,8 @@ public class ListingsController : ControllerBase
     public async Task<IActionResult> UploadListingMedia(
         [FromRoute] int id,
         [FromForm] List<IFormFile> files,
-        [FromServices] IWebHostEnvironment environment,
-        [FromServices] IConfiguration configuration)
+        [FromServices] IConfiguration configuration,
+        [FromServices] IListingMediaStorage mediaStorage)
     {
         var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userIdClaim, out var userId))
@@ -235,12 +238,6 @@ public class ListingsController : ControllerBase
                 return BadRequest(new { success = false, message = $"{file.FileName} exceeds the allowed file size." });
         }
 
-        var webRoot = environment.WebRootPath;
-        if (string.IsNullOrWhiteSpace(webRoot)) webRoot = Path.Combine(environment.ContentRootPath, "wwwroot");
-        var relativeFolder = Path.Combine("uploads", "listing-media", id.ToString());
-        var uploadFolder = Path.Combine(webRoot, relativeFolder);
-        Directory.CreateDirectory(uploadFolder);
-
         var createdFiles = new List<string>();
         try
         {
@@ -249,19 +246,14 @@ public class ListingsController : ControllerBase
             foreach (var file in files)
             {
                 var extension = AllowedMediaTypes[file.ContentType];
-                var fileName = $"{Guid.NewGuid():N}{extension}";
-                var filePath = Path.Combine(uploadFolder, fileName);
-                await using (var stream = new FileStream(filePath, FileMode.CreateNew))
-                {
-                    await file.CopyToAsync(stream);
-                }
-                createdFiles.Add(filePath);
+                var storagePath = await mediaStorage.SaveAsync(id, file, extension, HttpContext.RequestAborted);
+                createdFiles.Add(storagePath);
 
                 var media = new ListingMedia
                 {
                     ListingId = id,
                     MediaType = file.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ? "video" : "image",
-                    StoragePath = Path.Combine(relativeFolder, fileName),
+                    StoragePath = storagePath,
                     OriginalFileName = Path.GetFileName(file.FileName),
                     MimeType = file.ContentType,
                     FileSizeBytes = file.Length,
@@ -288,9 +280,9 @@ public class ListingsController : ControllerBase
         }
         catch
         {
-            foreach (var filePath in createdFiles)
+            foreach (var storagePath in createdFiles)
             {
-                if (System.IO.File.Exists(filePath)) System.IO.File.Delete(filePath);
+                await mediaStorage.DeleteAsync(storagePath, HttpContext.RequestAborted);
             }
             throw;
         }
@@ -368,6 +360,10 @@ public class ListingsController : ControllerBase
             });
         }
 
+        await using var transaction = _dbContext.Database.IsRelational()
+            ? await _dbContext.Database.BeginTransactionAsync()
+            : null;
+
         // Apply fields if supplied in patch payload
         if (request.PropertyType != null)
         {
@@ -419,6 +415,10 @@ public class ListingsController : ControllerBase
         listing.FreshnessUpdatedAt = DateTime.UtcNow;
         listing.LastRefreshedAt = DateTime.UtcNow;
         listing.UpdatedAt = DateTime.UtcNow;
+        listing.EmbeddingModel = null;
+        listing.ContentVersion++;
+        listing.EmbeddingVersion = null;
+        listing.EmbeddingStatus = "queued";
 
         _dbContext.Listings.Update(listing);
 
@@ -451,12 +451,23 @@ public class ListingsController : ControllerBase
         }
 
         await _dbContext.SaveChangesAsync();
+        EmbeddingJob? embeddingJob = null;
+        if (_dbContext.Database.IsRelational())
+        {
+            await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE listings SET embedding = NULL, embedding_model = NULL WHERE listingid = {listing.Id}");
+            await _matchInvalidation.InvalidateForListingAsync(listing.Id);
+            embeddingJob = await _embeddingJobs.EnqueueAsync("listing", listing.Id);
+            await transaction!.CommitAsync();
+        }
 
         return Ok(new
         {
             success = true,
             message = "Listing updated successfully.",
-            listing_id = listing.Id
+            listing_id = listing.Id,
+            embedding_status = embeddingJob?.Status ?? "not_queued_in_test_provider",
+            embedding_job_id = embeddingJob?.Id
         });
     }
 
@@ -603,34 +614,18 @@ public class ListingsController : ControllerBase
                 await _dbContext.SaveChangesAsync();
             }
 
+            var embeddingJob = await _embeddingJobs.EnqueueAsync("listing", listing.Id);
             await transaction.CommitAsync();
 
-            IReadOnlyList<int> matches = [];
-            var embeddingCompleted = true;
-            try
-            {
-                await _matchingPipeline.TriggerForListingAsync(listing.Id);
-                matches = await _dbContext.Matches
-                    .AsNoTracking()
-                    .Where(match => match.ListingId == listing.Id && match.Status == "MATCHED")
-                    .Select(match => match.Id)
-                    .ToListAsync();
-            }
-            catch (Exception ex)
-            {
-                embeddingCompleted = false;
-                _logger.LogError(ex, "Embedding and matching pipeline failed for listing {ListingId}", listing.Id);
-            }
-
-            return Ok(new
+            return StatusCode(StatusCodes.Status201Created, new
             {
                 success = true,
                 listing_id = listing.Id,
-                match_count = matches.Count,
-                embedding_completed = embeddingCompleted,
-                message = embeddingCompleted
-                    ? "Listing created successfully. Gemini embedding and matching completed."
-                    : "Listing created, but Gemini embedding or matching failed. Check API logs and retry the embedding."
+                match_count = 0,
+                embedding_completed = false,
+                embedding_status = embeddingJob.Status,
+                embedding_job_id = embeddingJob.Id,
+                message = "Listing saved. Matching is queued and can be tracked with the embedding job ID."
             });
         }
         catch (Exception ex)

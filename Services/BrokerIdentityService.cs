@@ -9,7 +9,12 @@ namespace PropSeekr.Services;
 public sealed class BrokerIdentityService : IBrokerIdentityService
 {
     private readonly AppDbContext _db;
-    public BrokerIdentityService(AppDbContext db) => _db = db;
+    private readonly IWalletAccountingService _walletAccounting;
+    public BrokerIdentityService(AppDbContext db, IWalletAccountingService walletAccounting)
+    {
+        _db = db;
+        _walletAccounting = walletAccounting;
+    }
 
     public async Task<int?> GetBrokerIdAsync(Guid userId, CancellationToken cancellationToken = default)
     {
@@ -69,12 +74,8 @@ public sealed class BrokerIdentityService : IBrokerIdentityService
         return brokerId.BrokerId;
     }
 
-    private async Task EnsureWalletAsync(int brokerId, CancellationToken cancellationToken) =>
-        await _db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO credit_wallets (broker_id, free_credits_balance, paid_credits_balance, created_at, updated_at)
-            VALUES ({brokerId}, 10, 0, NOW(), NOW())
-            ON CONFLICT (broker_id) DO NOTHING
-            """, cancellationToken);
+    private Task EnsureWalletAsync(int brokerId, CancellationToken cancellationToken) =>
+        _walletAccounting.EnsureCurrentPeriodWalletAsync(brokerId, DateTime.UtcNow, cancellationToken);
 
     private static string Digits(string value) => new(value.Where(char.IsDigit).ToArray());
     private sealed class BrokerIdRow { public int BrokerId { get; set; } }

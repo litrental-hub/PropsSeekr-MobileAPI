@@ -25,82 +25,6 @@ public class BrokersController : ControllerBase
         _dbContext = dbContext;
     }
 
-    [AllowAnonymous]
-    [HttpPost("register")]
-    public async Task<IActionResult> RegisterBroker([FromBody] RegisterBrokerRequestDto request)
-    {
-        if (string.IsNullOrWhiteSpace(request.Phone))
-        {
-            return BadRequest(new { message = "Phone number is required." });
-        }
-
-        var existingBroker = await _dbContext.Brokers.FirstOrDefaultAsync(b => b.PhoneNumber == request.Phone);
-        if (existingBroker != null)
-        {
-            return Conflict(new { message = "Broker with this phone number is already registered." });
-        }
-
-        using var transaction = await _dbContext.Database.BeginTransactionAsync();
-        try
-        {
-            var broker = new Broker
-            {
-                Name = request.Name,
-                PhoneNumber = request.Phone,
-                Locality = request.Locality,
-                BrokerageName = request.BrokerageName,
-                Status = "active",
-                CreatedAt = DateTime.UtcNow,
-                LastActiveAt = DateTime.UtcNow
-            };
-
-            _dbContext.Brokers.Add(broker);
-            await _dbContext.SaveChangesAsync();
-
-            var wallet = new CreditWallet
-            {
-                BrokerId = broker.Id,
-                FreeCreditsBalance = 10,
-                PaidCreditsBalance = 0,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-
-            _dbContext.CreditWallets.Add(wallet);
-            await _dbContext.SaveChangesAsync();
-
-            var grantTx = new CreditTransaction
-            {
-                BrokerId = broker.Id,
-                Type = "grant",
-                Amount = 10,
-                BalanceAfter = 10,
-                ReferenceType = "monthly_grant",
-                Notes = "Initial broker registration free grant",
-                CreatedAt = DateTime.UtcNow
-            };
-
-            _dbContext.CreditTransactions.Add(grantTx);
-            await _dbContext.SaveChangesAsync();
-
-            await transaction.CommitAsync();
-
-            var response = new RegisterBrokerResponseDto
-            {
-                BrokerId = broker.Id,
-                FreeCreditsBalance = wallet.FreeCreditsBalance,
-                Status = broker.Status ?? "active"
-            };
-
-            return Ok(response);
-        }
-        catch (Exception ex)
-        {
-            await transaction.RollbackAsync();
-            return BadRequest(new { message = ex.Message });
-        }
-    }
-
     [HttpGet("{brokerId}")]
     public async Task<IActionResult> GetBrokerDetails([FromRoute] int brokerId)
     {
@@ -128,17 +52,16 @@ public class BrokersController : ControllerBase
             return NotFound(new { message = "Target broker not found." });
         }
 
-        var isUnlocked = await _dbContext.Reveals.AnyAsync(r =>
-            (r.Match!.Listing!.BrokerId == callingBrokerId && r.Match.Requirement!.BrokerId == brokerId) ||
-            (r.Match!.Requirement!.BrokerId == callingBrokerId && r.Match.Listing!.BrokerId == brokerId));
-
         var targetUser = await _dbContext.Users.AsNoTracking().FirstOrDefaultAsync(u => u.BrokerId == brokerId);
 
-        var wallet = await _dbContext.CreditWallets.AsNoTracking().FirstOrDefaultAsync(w => w.BrokerId == brokerId);
-        var freeCredits = wallet?.FreeCreditsBalance ?? 0;
-        var paidCredits = wallet?.PaidCreditsBalance ?? 0;
+        var isOwnProfile = callingBrokerId == brokerId;
+        var wallet = isOwnProfile
+            ? await _dbContext.CreditWallets.AsNoTracking().FirstOrDefaultAsync(w => w.BrokerId == brokerId)
+            : null;
 
-        var canViewPrivateDetails = callingBrokerId == brokerId || isUnlocked;
+        // Counterparty contact is reveal-authorized per match and is returned by
+        // the match endpoint. A broker-directory lookup does not broaden it.
+        var canViewPrivateDetails = isOwnProfile;
         var phone = targetBroker.PhoneNumber;
         var displayPhone = canViewPrivateDetails
             ? phone
@@ -157,8 +80,8 @@ public class BrokersController : ControllerBase
             ResponseScore = targetBroker.ResponseScore ?? 100.00m,
             ConfirmationComplianceRate = targetBroker.ConfirmationComplianceRate,
             VisibilityPenaltyFlag = targetBroker.VisibilityPenaltyFlag,
-            FreeCreditsBalance = freeCredits,
-            PaidCreditsBalance = paidCredits,
+            FreeCreditsBalance = wallet?.FreeCreditsBalance,
+            PaidCreditsBalance = wallet?.PaidCreditsBalance,
             Email = canViewPrivateDetails ? targetUser?.Email : null,
             CompanyGst = canViewPrivateDetails ? targetUser?.GSTNumber : null,
             CompanyAddress = canViewPrivateDetails ? targetUser?.AddressLine1 : null,
@@ -200,16 +123,13 @@ public class BrokersController : ControllerBase
         }
 
         var phoneToUpdate = request.MobileNumber ?? request.Phone;
-        if (phoneToUpdate != null)
+        if (phoneToUpdate != null &&
+            !string.Equals(phoneToUpdate.Trim(), broker.PhoneNumber, StringComparison.Ordinal))
         {
-            // Verify unique phone number
-            var existingPhone = await _dbContext.Brokers.AnyAsync(b => b.PhoneNumber == phoneToUpdate && b.Id != brokerId);
-            if (existingPhone)
+            return BadRequest(new
             {
-                return Conflict(new { message = "Another broker is already registered with this phone number." });
-            }
-            broker.PhoneNumber = phoneToUpdate;
-            callingUser.MobileNumber = phoneToUpdate;
+                message = "Mobile number changes require OTP verification and are not supported by this profile endpoint."
+            });
         }
 
         if (request.Locality != null)
@@ -225,14 +145,13 @@ public class BrokersController : ControllerBase
         if (request.Email != null)
         {
             var normalizedEmail = request.Email.Trim();
-            var emailInUse = await _dbContext.Users.AnyAsync(user =>
-                user.Id != callingUser.Id && user.Email == normalizedEmail);
-            if (emailInUse)
+            if (!string.Equals(normalizedEmail, callingUser.Email, StringComparison.OrdinalIgnoreCase))
             {
-                return Conflict(new { message = "Another account is already registered with this email address." });
+                return BadRequest(new
+                {
+                    message = "Email changes require verification and are not supported by this profile endpoint."
+                });
             }
-
-            callingUser.Email = normalizedEmail;
         }
 
         if (request.CompanyGst != null)

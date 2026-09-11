@@ -21,6 +21,7 @@ public sealed class BulkImportsController(
     IBrokerIdentityService brokerIdentityService,
     IConfiguration configuration,
     IHostEnvironment environment,
+    IAmazonS3 s3,
     ILogger<BulkImportsController> logger) : ControllerBase
 {
     private const long DefaultMaximumUploadBytes = 10 * 1024 * 1024;
@@ -33,6 +34,11 @@ public sealed class BulkImportsController(
             return BadRequest(new { success = false, message = "Only .txt files are supported." });
         var brokerId = await brokerIdentityService.GetBrokerIdAsync(userId, cancellationToken);
         if (!brokerId.HasValue) return NotFound(new { success = false, message = "No broker profile is linked to this account." });
+        var activeJobLimit = configuration.GetValue<int?>("BulkImports:ConcurrentJobLimit") ?? 3;
+        var activeJobCount = await db.BulkImportJobs.CountAsync(item => item.BrokerId == brokerId.Value &&
+            (item.Status == "awaiting_upload" || item.Status == "queued" || item.Status == "processing"), cancellationToken);
+        if (activeJobCount >= activeJobLimit)
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { success = false, message = "Complete or wait for an existing import before starting another." });
 
         var safeFileName = Path.GetFileName(request.FileName);
         var job = new BulkImportJob
@@ -67,7 +73,6 @@ public sealed class BulkImportsController(
         string uploadUrl;
         try
         {
-            using var s3 = new AmazonS3Client();
             uploadUrl = s3.GetPreSignedURL(new GetPreSignedUrlRequest
             {
                 BucketName = bucket,
@@ -148,6 +153,9 @@ public sealed class BulkImportsController(
                 .Where(item => item.Id == id && item.Status == "awaiting_upload")
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(x => x.Status, "queued")
+                    .SetProperty(x => x.UploadETag, (string?)null)
+                    .SetProperty(x => x.UploadSizeBytes, file.Length)
+                    .SetProperty(x => x.UploadVerifiedAt, DateTime.UtcNow)
                     .SetProperty(x => x.AvailableAt, DateTime.UtcNow)
                     .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), cancellationToken);
 
@@ -168,11 +176,58 @@ public sealed class BulkImportsController(
     [HttpPost("{id:guid}/complete")]
     public async Task<IActionResult> Complete(Guid id, CancellationToken cancellationToken)
     {
-        var job = await GetOwnedJobAsync(id, cancellationToken);
-        if (job.Result is not null) return job.Result;
-        if (job.Job!.Status != "awaiting_upload") return Conflict(new { success = false, message = "This import has already been submitted." });
-        await db.BulkImportJobs.Where(item => item.Id == id && item.Status == "awaiting_upload").ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "queued").SetProperty(x => x.AvailableAt, DateTime.UtcNow).SetProperty(x => x.UpdatedAt, DateTime.UtcNow), cancellationToken);
-        return Accepted(new { success = true, job_id = id, status = "queued" });
+        var owned = await GetOwnedJobAsync(id, cancellationToken);
+        if (owned.Result is not null) return owned.Result;
+        var job = owned.Job!;
+        if (job.Status is "queued" or "processing" or "completed")
+            return Accepted(new { success = true, job_id = id, status = job.Status, idempotent_replay = true });
+        if (job.Status != "awaiting_upload")
+            return Conflict(new { success = false, message = "This import cannot be submitted in its current state." });
+        if (LocalBulkImportStorage.IsLocalKey(job.StorageKey))
+            return Conflict(new { success = false, message = "Local uploads are queued by the content endpoint." });
+
+        var bucket = configuration["FileProcessor:S3BucketName"] ?? Environment.GetEnvironmentVariable("S3_BUCKET_NAME");
+        if (string.IsNullOrWhiteSpace(bucket))
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { success = false, message = "Bulk import storage is not configured." });
+
+        GetObjectMetadataResponse metadata;
+        try
+        {
+            metadata = await s3.GetObjectMetadataAsync(bucket, job.StorageKey, cancellationToken);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return BadRequest(new { success = false, message = "The uploaded object was not found. Upload the file before completing the import." });
+        }
+        catch (AmazonClientException ex)
+        {
+            logger.LogError(ex, "Unable to verify S3 upload for bulk import {JobId}.", id);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { success = false, message = "Upload verification is temporarily unavailable." });
+        }
+
+        var maximumUploadBytes = configuration.GetValue<long?>("BulkImports:MaximumUploadBytes") ?? DefaultMaximumUploadBytes;
+        if (metadata.ContentLength <= 0 || metadata.ContentLength > maximumUploadBytes)
+            return BadRequest(new { success = false, message = "The uploaded object is empty or exceeds the configured upload limit." });
+        if (!string.Equals(metadata.Headers.ContentType, "text/plain", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { success = false, message = "The uploaded object must have content type text/plain." });
+
+        var now = DateTime.UtcNow;
+        var updated = await db.BulkImportJobs.Where(item => item.Id == id && item.Status == "awaiting_upload")
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, "queued")
+                .SetProperty(item => item.UploadETag, metadata.ETag)
+                .SetProperty(item => item.UploadSizeBytes, metadata.ContentLength)
+                .SetProperty(item => item.UploadVerifiedAt, now)
+                .SetProperty(item => item.AvailableAt, now)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (updated == 0)
+        {
+            var currentStatus = await db.BulkImportJobs.Where(item => item.Id == id).Select(item => item.Status).SingleAsync(cancellationToken);
+            if (currentStatus is "queued" or "processing" or "completed")
+                return Accepted(new { success = true, job_id = id, status = currentStatus, idempotent_replay = true });
+            return Conflict(new { success = false, message = "This import changed state while the upload was being verified." });
+        }
+        return Accepted(new { success = true, job_id = id, status = "queued", idempotent_replay = false });
     }
 
     [HttpGet("{id:guid}")]

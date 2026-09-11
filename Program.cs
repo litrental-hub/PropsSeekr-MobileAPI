@@ -11,10 +11,13 @@ using PropSeekr.Services;
 using PropSeekr.Services.Interfaces;
 using PropSeekr.FileProcessing;
 using PropSeekr.Configuration;
+using Amazon.S3;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
 AwsSecretsConfigurationLoader.Load(builder);
+RuntimeConfigurationValidator.Validate(builder.Configuration, builder.Environment);
 
 // The migrated processor retains the Lambda's proven configuration names.
 // This bridges the AWS-backed FileProcessor:* configuration into the names
@@ -66,9 +69,21 @@ builder.Services.AddScoped<IAutomatedMatchingService, AutomatedMatchingService>(
 builder.Services.AddScoped<IMatchingPipelineService, MatchingPipelineService>();
 builder.Services.AddScoped<IEmbeddingJobService, EmbeddingJobService>();
 builder.Services.AddScoped<MatchInvalidationService>();
-builder.Services.AddHostedService<EmbeddingJobWorker>();
-builder.Services.AddHostedService<BulkImportJobWorker>();
-builder.Services.AddHostedService<LocationRemediationWorker>();
+builder.Services.AddScoped<IWalletAccountingService, WalletAccountingService>();
+builder.Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client());
+builder.Services.AddScoped<IListingMediaStorage, ListingMediaStorage>();
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseReadinessHealthCheck>("database_schema", tags: ["ready"]);
+
+var runBackgroundWorkers = builder.Configuration.GetValue<bool?>("Workers:Enabled")
+    ?? !builder.Environment.IsDevelopment();
+if (runBackgroundWorkers)
+{
+    builder.Services.AddHostedService<EmbeddingJobWorker>();
+    builder.Services.AddHostedService<BulkImportJobWorker>();
+    builder.Services.AddHostedService<LocationRemediationWorker>();
+    builder.Services.AddHostedService<ConnectionExpiryWorker>();
+}
 
 builder.Services.AddAuthorization();
 
@@ -142,14 +157,14 @@ if (!string.IsNullOrEmpty(jwtKey))
     });
 }
 
-// CORS setup for frontend
+// CORS setup for browser clients. Native mobile clients are not governed by CORS.
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowAll", policy =>
+    options.AddPolicy("BrowserClients", policy =>
     {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
+        if (allowedOrigins.Length > 0)
+            policy.WithOrigins(allowedOrigins).AllowAnyMethod().AllowAnyHeader();
     });
 });
 
@@ -181,14 +196,31 @@ var uploadFolder = app.Configuration["Uploads:ProfilePhotoFolder"] ?? "uploads/p
 Directory.CreateDirectory(Path.Combine(webRootPath, uploadFolder.TrimStart('/', '\\')));
 app.Environment.WebRootFileProvider = new PhysicalFileProvider(webRootPath);
 
-// Enable Swagger globally for testing and API documentation
-app.MapOpenApi();
-app.UseSwagger();
-app.UseSwaggerUI();
+var exposeApiDocumentation = app.Configuration.GetValue<bool?>("ApiDocumentation:Enabled")
+    ?? app.Environment.IsDevelopment();
+if (exposeApiDocumentation)
+{
+    app.MapOpenApi();
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
 // Middleware
+app.Use(async (context, next) =>
+{
+    const string headerName = "X-Correlation-ID";
+    var supplied = context.Request.Headers[headerName].FirstOrDefault();
+    var correlationId = !string.IsNullOrWhiteSpace(supplied) && supplied.Length <= 100 &&
+        supplied.All(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.')
+            ? supplied
+            : Guid.NewGuid().ToString("N");
+    context.TraceIdentifier = correlationId;
+    context.Response.Headers[headerName] = correlationId;
+    using (app.Logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = correlationId }))
+        await next();
+});
 app.UseHttpsRedirection();
-app.UseCors("AllowAll");
+app.UseCors("BrowserClients");
 app.UseStaticFiles();
 app.UseRateLimiter();
 app.UseAuthentication();
@@ -197,7 +229,10 @@ app.UseAuthorization();
 // Routes
 app.MapControllers();
 
-// Health check endpoint
-app.MapGet("/hello", () => "Hello World");
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = registration => registration.Tags.Contains("ready")
+});
 
 app.Run();

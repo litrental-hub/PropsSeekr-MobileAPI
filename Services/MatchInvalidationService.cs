@@ -32,8 +32,19 @@ public sealed class MatchInvalidationService(AppDbContext db)
             .SetProperty(match => match.Status, "INVALIDATED")
             .SetProperty(match => match.State, "expired")
             .SetProperty(match => match.StatusUpdatedAt, now), cancellationToken);
-        await db.MatchConnectionRequests.Where(request => matchIds.Contains(request.MatchId) && request.Status == "pending")
-            .ExecuteUpdateAsync(setters => setters.SetProperty(request => request.Status, "expired"), cancellationToken);
-        await db.MatchConfirmations.Where(confirmation => matchIds.Contains(confirmation.MatchId)).ExecuteDeleteAsync(cancellationToken);
+        await db.MatchConnectionRequests.Where(request =>
+                matchIds.Contains(request.MatchId) &&
+                (request.Status == "pending" || request.Status == "credit_required"))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(request => request.Status, "expired")
+                .SetProperty(request => request.RespondedAt, now), cancellationToken);
+        await db.MatchConfirmations.Where(confirmation => matchIds.Contains(confirmation.MatchId))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(confirmation => confirmation.ConfirmedAt, (DateTime?)null)
+                .SetProperty(confirmation => confirmation.WindowExpiresAt, (DateTime?)null)
+                .SetProperty(confirmation => confirmation.AvailabilityConfirmed, (bool?)null)
+                .SetProperty(confirmation => confirmation.PriceValid, (bool?)null)
+                .SetProperty(confirmation => confirmation.PriceNegotiable, (bool?)null)
+                .SetProperty(confirmation => confirmation.ReadyToConnect, (bool?)null), cancellationToken);
     }
 }

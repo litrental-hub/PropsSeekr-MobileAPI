@@ -34,7 +34,7 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
             .Options;
         _db = new AppDbContext(options);
         await CreateSchemaAsync(_db);
-        _service = new UnlockService(_db, NullLogger<UnlockService>.Instance);
+        _service = new UnlockService(_db, NullLogger<UnlockService>.Instance, new WalletAccountingService(_db));
     }
 
     public async Task DisposeAsync()
@@ -65,9 +65,17 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
             Assert.Equal(1, payload.RootElement.GetProperty("initiator_broker_id").GetInt32());
         }
 
+        var originalDeadline = (await _db.MatchConnectionRequests.AsNoTracking()
+            .SingleAsync(item => item.MatchId == 100)).ExpiresAt;
+        var originalConfirmationDeadline = (await _db.MatchConfirmations.AsNoTracking()
+            .SingleAsync(item => item.MatchId == 100)).WindowExpiresAt;
         var firstRetry = await _service.ConfirmMatchAsync(1, Confirmation(100, 1));
         Assert.Equal("pending_confirmation", firstRetry.State);
         Assert.Equal(1, await _db.BrokerNotifications.CountAsync());
+        Assert.Equal(originalDeadline, (await _db.MatchConnectionRequests.AsNoTracking()
+            .SingleAsync(item => item.MatchId == 100)).ExpiresAt);
+        Assert.Equal(originalConfirmationDeadline, (await _db.MatchConfirmations.AsNoTracking()
+            .SingleAsync(item => item.MatchId == 100)).WindowExpiresAt);
 
         var second = await _service.ConfirmMatchAsync(2, Confirmation(100, 2));
         Assert.Equal("revealed", second.State);
@@ -126,13 +134,22 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
     {
         if (_service is null || _db is null || string.IsNullOrWhiteSpace(_connectionString)) return;
         await SeedMatchAsync(_db, matchId: 400, firstBalance: 10, secondBalance: 10);
-        await _db.Database.ExecuteSqlRawAsync("UPDATE matches SET state = 'confirmed' WHERE matchid = 400;");
+        await _db.Database.ExecuteSqlRawAsync("""
+            UPDATE matches SET state = 'confirmed', status = 'CONFIRMED' WHERE matchid = 400;
+            INSERT INTO match_connection_requests
+                (match_id, requesting_broker_id, receiving_broker_id, listing_version, requirement_version, status, delivery_channel, delivery_status, created_at, expires_at)
+            VALUES (400, 1, 2, 1, 1, 'pending', 'in_app', 'delivered', NOW(), NOW() + interval '4 hours');
+            INSERT INTO match_confirmations
+                (connection_request_id, match_id, broker_id, availability_confirmed, price_valid, price_negotiable, ready_to_connect, confirmed_at, window_expires_at, created_at)
+            VALUES ((SELECT max(request_id) FROM match_connection_requests WHERE match_id = 400), 400, 1, true, true, false, true, NOW(), NOW() + interval '4 hours', NOW()),
+                   ((SELECT max(request_id) FROM match_connection_requests WHERE match_id = 400), 400, 2, true, true, false, true, NOW(), NOW() + interval '4 hours', NOW());
+            """);
 
         var options = new DbContextOptionsBuilder<AppDbContext>()
             .UseNpgsql(_connectionString, postgres => postgres.UseNetTopologySuite())
             .Options;
         await using var secondDb = new AppDbContext(options);
-        var secondService = new UnlockService(secondDb, NullLogger<UnlockService>.Instance);
+        var secondService = new UnlockService(secondDb, NullLogger<UnlockService>.Instance, new WalletAccountingService(secondDb));
 
         var responses = await Task.WhenAll(
             _service.UnlockMatchAsync(1, new UnlockPropertyRequestDto { MatchId = 400 }),
@@ -142,6 +159,27 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
         Assert.Equal(1, await _db.Reveals.CountAsync());
         Assert.Equal(2, await _db.CreditTransactions.CountAsync());
         Assert.All(await _db.CreditWallets.ToListAsync(), wallet => Assert.Equal(9, wallet.FreeCreditsBalance));
+    }
+
+    [PostgreSqlFact]
+    public async Task ExpiredPendingRequest_ResetsConsentWithoutChargingOrDeletingEvidence()
+    {
+        if (_service is null || _db is null) return;
+        await SeedMatchAsync(_db, matchId: 500, firstBalance: 10, secondBalance: 10);
+        await _service.ConfirmMatchAsync(1, Confirmation(500, 1));
+        await _db.Database.ExecuteSqlRawAsync("""
+            UPDATE match_connection_requests SET expires_at = NOW() - interval '1 minute' WHERE match_id = 500;
+            UPDATE match_confirmations SET window_expires_at = NOW() - interval '1 minute' WHERE match_id = 500;
+            """);
+
+        Assert.Equal(1, await _service.ExpirePendingRequestsAsync());
+        Assert.Equal("matched", (await _db.Matches.AsNoTracking().SingleAsync(item => item.Id == 500)).State);
+        Assert.Equal("expired", (await _db.MatchConnectionRequests.AsNoTracking().SingleAsync(item => item.MatchId == 500)).Status);
+        var preservedEvidence = await _db.MatchConfirmations.AsNoTracking().SingleAsync(item => item.MatchId == 500);
+        Assert.Null(preservedEvidence.ConfirmedAt);
+        Assert.Empty(await _db.CreditTransactions.AsNoTracking().ToListAsync());
+        Assert.Empty(await _db.Reveals.AsNoTracking().ToListAsync());
+        Assert.Single(await _db.BrokerNotifications.AsNoTracking().Where(item => item.Type == "confirm_expired").ToListAsync());
     }
 
     private static MatchConfirmationRequestDto Confirmation(int matchId, int brokerId) => new()
@@ -165,6 +203,10 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
                    ('22222222-2222-2222-2222-222222222222', 2, '9222222222', 'two@example.test');
             INSERT INTO matches (matchid, listing_id, requirement_id, listing_broker_id, requirement_broker_id, match_score, status, state, created_at)
             VALUES ({matchId}, 10, 20, 1, 2, 95, 'matched', 'matched', NOW());
+            INSERT INTO listings (listingid, broker_id, content_version, embedding_version, embedding_status, status, isavailable)
+            VALUES (10, 1, 1, 1, 'completed', 'active', true);
+            INSERT INTO requirements (requirementid, broker_id, content_version, embedding_version, embedding_status, status, isavailable)
+            VALUES (20, 2, 1, 1, 'completed', 'active', true);
             INSERT INTO credit_wallets ("Id", broker_id, free_credits_balance, paid_credits_balance, created_at, updated_at)
             VALUES (1, 1, {firstBalance}, 0, NOW(), NOW()),
                    (2, 2, {secondBalance}, 0, NOW(), NOW());
@@ -215,18 +257,50 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
             ai_validated_at timestamptz NULL
         );
 
+        CREATE TABLE listings (
+            listingid integer PRIMARY KEY,
+            broker_id integer NOT NULL,
+            content_version integer NOT NULL DEFAULT 1,
+            embedding_version integer NULL,
+            embedding_status varchar(20) NOT NULL DEFAULT 'queued',
+            status text NULL,
+            isavailable boolean NOT NULL DEFAULT true,
+            expires_at timestamptz NULL,
+            last_confirmed_at timestamptz NULL,
+            freshness_updated_at timestamptz NULL,
+            freshness_score integer NULL,
+            freshness_category varchar(50) NULL
+        );
+
+        CREATE TABLE requirements (
+            requirementid integer PRIMARY KEY,
+            broker_id integer NOT NULL,
+            content_version integer NOT NULL DEFAULT 1,
+            embedding_version integer NULL,
+            embedding_status varchar(20) NOT NULL DEFAULT 'queued',
+            status text NULL,
+            isavailable boolean NOT NULL DEFAULT true,
+            expires_at timestamptz NULL,
+            last_confirmed_at timestamptz NULL,
+            freshness_updated_at timestamptz NULL,
+            freshness_score integer NULL,
+            freshness_category varchar(50) NULL
+        );
+
         CREATE TABLE match_confirmations (
             "Id" integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            connection_request_id bigint NOT NULL,
             match_id integer NOT NULL,
             broker_id integer NOT NULL,
             availability_confirmed boolean NULL,
             price_valid boolean NULL,
             price_negotiable boolean NULL,
             ready_to_connect boolean NULL,
+            availability_date timestamptz NULL,
             confirmed_at timestamptz NULL,
             window_expires_at timestamptz NULL,
             created_at timestamptz NOT NULL,
-            UNIQUE (match_id, broker_id)
+            UNIQUE (connection_request_id, broker_id)
         );
 
         CREATE TABLE match_connection_requests (
@@ -234,6 +308,8 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
             match_id integer NOT NULL,
             requesting_broker_id integer NOT NULL,
             receiving_broker_id integer NOT NULL,
+            listing_version integer NOT NULL DEFAULT 1,
+            requirement_version integer NOT NULL DEFAULT 1,
             status varchar(30) NOT NULL,
             delivery_channel varchar(20) NOT NULL,
             delivery_status varchar(30) NOT NULL,
@@ -247,6 +323,7 @@ public sealed class UnlockFlowIntegrationTests : IAsyncLifetime
         CREATE TABLE reveals (
             "Id" integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
             match_id integer NOT NULL UNIQUE,
+            connection_request_id bigint NULL,
             revealed_at timestamptz NOT NULL
         );
 

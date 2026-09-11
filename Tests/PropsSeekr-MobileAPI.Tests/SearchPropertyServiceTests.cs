@@ -101,12 +101,7 @@ public sealed class SearchPropertyLiveSmokeTests
     [LiveSearchFact]
     public async Task ConfiguredDatabase_AcceptsCanonicalFiveKilometreQuery()
     {
-        var appSettingsPath = FindAppSettings();
-        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(appSettingsPath));
-        var connectionString = document.RootElement
-            .GetProperty("ConnectionStrings")
-            .GetProperty("DefaultConnection")
-            .GetString();
+        var connectionString = await GetConnectionStringAsync();
         Assert.False(string.IsNullOrWhiteSpace(connectionString));
 
         var options = new DbContextOptionsBuilder<AppDbContext>()
@@ -135,12 +130,7 @@ public sealed class SearchPropertyLiveSmokeTests
     [LiveSearchFact]
     public async Task ConfiguredDatabase_AcceptsCanonicalFileProcessorMatchesQuery()
     {
-        var appSettingsPath = FindAppSettings();
-        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(appSettingsPath));
-        var connectionString = document.RootElement
-            .GetProperty("ConnectionStrings")
-            .GetProperty("DefaultConnection")
-            .GetString();
+        var connectionString = await GetConnectionStringAsync();
         Assert.False(string.IsNullOrWhiteSpace(connectionString));
 
         var service = new MatchesApiService(connectionString!);
@@ -175,6 +165,19 @@ public sealed class SearchPropertyLiveSmokeTests
             directory = directory.Parent;
         }
         throw new FileNotFoundException("Could not locate API appsettings.json for the live smoke test.");
+    }
+
+    private static async Task<string?> GetConnectionStringAsync()
+    {
+        var environmentValue = Environment.GetEnvironmentVariable("PROPSEEKR_LIVE_DATABASE_URL");
+        if (!string.IsNullOrWhiteSpace(environmentValue)) return environmentValue;
+
+        var appSettingsPath = FindAppSettings();
+        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(appSettingsPath));
+        return document.RootElement
+            .GetProperty("ConnectionStrings")
+            .GetProperty("DefaultConnection")
+            .GetString();
     }
 }
 

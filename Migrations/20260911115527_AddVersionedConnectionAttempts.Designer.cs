@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using PropSeekr.Data;
@@ -11,9 +12,11 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260911115527_AddVersionedConnectionAttempts")]
+    partial class AddVersionedConnectionAttempts
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -280,16 +283,6 @@ namespace PropSeekr.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("Active");
 
-                    b.Property<long>("AmountInPaise")
-                        .HasColumnType("bigint")
-                        .HasColumnName("AmountInPaise");
-
-                    b.Property<string>("Code")
-                        .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)")
-                        .HasColumnName("Code");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("CreatedAt");
@@ -297,24 +290,6 @@ namespace PropSeekr.Migrations
                     b.Property<int>("Credits")
                         .HasColumnType("integer")
                         .HasColumnName("Credits");
-
-                    b.Property<string>("Currency")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)")
-                        .HasDefaultValue("INR")
-                        .HasColumnName("Currency");
-
-                    b.Property<DateTime>("EffectiveFrom")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("EffectiveFrom")
-                        .HasDefaultValueSql("NOW()");
-
-                    b.Property<DateTime?>("EffectiveTo")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("EffectiveTo");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -326,23 +301,9 @@ namespace PropSeekr.Migrations
                         .HasColumnType("numeric")
                         .HasColumnName("Price");
 
-                    b.Property<int>("Version")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1)
-                        .HasColumnName("Version");
-
                     b.HasKey("Id");
 
-                    b.HasIndex("Code", "Version")
-                        .IsUnique();
-
-                    b.ToTable("credit_packs", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_credit_packs_amount_positive", "\"AmountInPaise\" > 0");
-
-                            t.HasCheckConstraint("CK_credit_packs_credits_positive", "\"Credits\" > 0");
-                        });
+                    b.ToTable("credit_packs", (string)null);
                 });
 
             modelBuilder.Entity("PropSeekr.Models.CreditTransaction", b =>
@@ -370,30 +331,9 @@ namespace PropSeekr.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("CreatedAt");
 
-                    b.Property<int?>("FreeBalanceAfter")
-                        .HasColumnType("integer")
-                        .HasColumnName("free_balance_after");
-
-                    b.Property<int?>("FreeCreditsAmount")
-                        .HasColumnType("integer")
-                        .HasColumnName("free_credits_amount");
-
                     b.Property<string>("Notes")
                         .HasColumnType("text")
                         .HasColumnName("Notes");
-
-                    b.Property<int?>("PaidBalanceAfter")
-                        .HasColumnType("integer")
-                        .HasColumnName("paid_balance_after");
-
-                    b.Property<int?>("PaidCreditsAmount")
-                        .HasColumnType("integer")
-                        .HasColumnName("paid_credits_amount");
-
-                    b.Property<string>("PeriodKey")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("period_key");
 
                     b.Property<long?>("ReferenceId")
                         .HasColumnType("bigint")
@@ -421,12 +361,7 @@ namespace PropSeekr.Migrations
                         .IsUnique()
                         .HasFilter("reference_key IS NOT NULL");
 
-                    b.ToTable("credit_transactions", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_credit_transactions_allocation_valid", "(free_credits_amount IS NULL AND paid_credits_amount IS NULL) OR (free_credits_amount >= 0 AND paid_credits_amount >= 0 AND free_credits_amount + paid_credits_amount = \"Amount\")");
-
-                            t.HasCheckConstraint("CK_credit_transactions_amount_positive", "\"Amount\" > 0");
-                        });
+                    b.ToTable("credit_transactions", (string)null);
                 });
 
             modelBuilder.Entity("PropSeekr.Models.CreditWallet", b =>
@@ -467,12 +402,7 @@ namespace PropSeekr.Migrations
                     b.HasIndex("BrokerId")
                         .IsUnique();
 
-                    b.ToTable("credit_wallets", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_credit_wallets_free_nonnegative", "free_credits_balance >= 0");
-
-                            t.HasCheckConstraint("CK_credit_wallets_paid_nonnegative", "paid_credits_balance >= 0");
-                        });
+                    b.ToTable("credit_wallets", (string)null);
                 });
 
             modelBuilder.Entity("PropSeekr.Models.EmailOtpRecord", b =>
@@ -2322,18 +2252,11 @@ namespace PropSeekr.Migrations
 
             modelBuilder.Entity("PropSeekr.Models.Reveal", b =>
                 {
-                    b.HasOne("PropSeekr.Models.MatchConnectionRequest", "ConnectionRequest")
-                        .WithMany()
-                        .HasForeignKey("ConnectionRequestId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("PropSeekr.Models.Match", "Match")
                         .WithMany()
                         .HasForeignKey("MatchId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("ConnectionRequest");
 
                     b.Navigation("Match");
                 });

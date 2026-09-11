@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Amazon.S3;
 using PropSeekr.Data;
 using PropSeekr.FileProcessing;
 
@@ -8,7 +9,8 @@ public sealed class BulkImportJobWorker(
     IServiceScopeFactory scopeFactory,
     ILogger<BulkImportJobWorker> logger,
     IConfiguration configuration,
-    IHostEnvironment environment) : BackgroundService
+    IHostEnvironment environment,
+    IAmazonS3 s3) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -55,6 +57,14 @@ public sealed class BulkImportJobWorker(
                 ? "local-development"
                 : configuration["FileProcessor:S3BucketName"] ?? Environment.GetEnvironmentVariable("S3_BUCKET_NAME")
                     ?? throw new InvalidOperationException("Bulk import storage is not configured.");
+            if (!isLocal)
+            {
+                if (string.IsNullOrWhiteSpace(job.UploadETag) || !job.UploadSizeBytes.HasValue || !job.UploadVerifiedAt.HasValue)
+                    throw new InvalidOperationException("The S3 upload was not verified before processing.");
+                var metadata = await s3.GetObjectMetadataAsync(bucket, job.StorageKey, cancellationToken);
+                if (!string.Equals(metadata.ETag, job.UploadETag, StringComparison.Ordinal) || metadata.ContentLength != job.UploadSizeBytes.Value)
+                    throw new InvalidOperationException("The uploaded object changed after it was submitted.");
+            }
             var host = scope.ServiceProvider.GetRequiredService<FileProcessorHost>();
             var result = await host.Processor.RunBulkImportAsync(
                 bucket,

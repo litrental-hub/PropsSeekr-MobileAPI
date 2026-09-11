@@ -161,16 +161,6 @@ public class AuthController : ControllerBase
         return Ok(response);
     }
 
-    [HttpPost("refresh")]
-    public IActionResult RefreshToken()
-    {
-        return StatusCode(StatusCodes.Status410Gone, new
-        {
-            success = false,
-            message = "Refresh token endpoint is retired. Access tokens are single-use session tokens; please authenticate via login or OTP."
-        });
-    }
-
     private static bool IsDatabaseConnectivityFailure(Exception exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)

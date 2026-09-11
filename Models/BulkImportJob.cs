@@ -17,6 +17,9 @@ public sealed class BulkImportJob
     [Column("available_at")] public DateTime AvailableAt { get; set; } = DateTime.UtcNow;
     [Column("locked_at")] public DateTime? LockedAt { get; set; }
     [Column("lock_token")] public Guid? LockToken { get; set; }
+    [Column("upload_etag"), MaxLength(200)] public string? UploadETag { get; set; }
+    [Column("upload_size_bytes")] public long? UploadSizeBytes { get; set; }
+    [Column("upload_verified_at")] public DateTime? UploadVerifiedAt { get; set; }
     [Column("completed_at")] public DateTime? CompletedAt { get; set; }
     [Column("listings_inserted")] public int ListingsInserted { get; set; }
     [Column("requirements_inserted")] public int RequirementsInserted { get; set; }

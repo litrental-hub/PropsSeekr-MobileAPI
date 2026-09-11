@@ -50,7 +50,7 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
         _config = config;
         _emailOtp = new EmailOtpService(_db, config, _email, NullLogger<EmailOtpService>.Instance);
         _auth = new AuthService(_db, config, _sms, _emailOtp,
-            new BrokerIdentityService(_db), new ProductionEnvironment(), _widget);
+            new BrokerIdentityService(_db, new WalletAccountingService(_db)), new ProductionEnvironment(), _widget);
     }
 
     public async Task DisposeAsync()
@@ -250,7 +250,7 @@ public sealed class RegistrationOtpIntegrationTests : IAsyncLifetime
         await using var otherDb = new RegistrationDbContext(new DbContextOptionsBuilder<AppDbContext>()
             .UseNpgsql(_db!.Database.GetConnectionString()).Options);
         var otherAuth = new AuthService(otherDb, _config, _sms, _emailOtp,
-            new BrokerIdentityService(otherDb), new ProductionEnvironment(), _widget);
+            new BrokerIdentityService(otherDb, new WalletAccountingService(otherDb)), new ProductionEnvironment(), _widget);
         static async Task<bool> Complete(AuthService auth, Guid challengeId)
         {
             try { await auth.VerifyWidgetOtpAsync(new() { ChallengeId = challengeId, AccessToken = "valid-proof" }); return true; }

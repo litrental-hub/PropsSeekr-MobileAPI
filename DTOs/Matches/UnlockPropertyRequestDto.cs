@@ -29,6 +29,7 @@ public class MatchConfirmationRequestDto
     public bool PriceValid { get; set; }
     public bool PriceNegotiable { get; set; }
     public bool ReadyToConnect { get; set; }
+    public DateTime? AvailabilityDate { get; set; }
 }
 
 public class MatchConfirmationResponseDto
@@ -41,6 +42,8 @@ public class MatchConfirmationResponseDto
     public int CreditsRequired { get; set; }
     public string? ErrorCode { get; set; }
     public long? ConnectionRequestId { get; set; }
+    public int? ListingVersion { get; set; }
+    public int? RequirementVersion { get; set; }
     public string? ConnectionRequestStatus { get; set; }
     public string? DeliveryChannel { get; set; }
     public string? DeliveryStatus { get; set; }

@@ -11,6 +11,25 @@
 --   * full rebuilds retain up to 50 matches per requirement rather than 50
 --     matches globally.
 
+CREATE OR REPLACE FUNCTION public.haversine_km(
+    lat1 double precision, lon1 double precision,
+    lat2 double precision, lon2 double precision)
+RETURNS double precision
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+    SELECT CASE
+        WHEN lat1 IS NULL OR lon1 IS NULL OR lat2 IS NULL OR lon2 IS NULL THEN NULL
+        WHEN lat1 NOT BETWEEN -90 AND 90 OR lat2 NOT BETWEEN -90 AND 90
+          OR lon1 NOT BETWEEN -180 AND 180 OR lon2 NOT BETWEEN -180 AND 180 THEN NULL
+        ELSE 6371.0088 * 2 * asin(sqrt(LEAST(1.0, GREATEST(0.0,
+            power(sin(radians(lat2 - lat1) / 2), 2)
+            + cos(radians(lat1)) * cos(radians(lat2))
+              * power(sin(radians(lon2 - lon1) / 2), 2)))))
+    END;
+$$;
+
 ALTER TABLE public.listings
     ADD COLUMN IF NOT EXISTS embedding_model text;
 
@@ -29,12 +48,29 @@ CREATE OR REPLACE PROCEDURE public.sp_run_matching_engine(
 LANGUAGE plpgsql
 AS $procedure$
 BEGIN
-    -- Rebuild only automatic matches in the requested scope. Confirmed,
-    -- requested, unlocked, or otherwise progressed matches are preserved.
-    DELETE FROM public.matches m
+    -- Serialize procedure rebuilds with match-state updates. Normal application
+    -- updates take a ROW EXCLUSIVE lock, which conflicts with this lock.
+    LOCK TABLE public.matches IN SHARE ROW EXCLUSIVE MODE;
+
+    -- Keep stable match IDs: automatic matches become hidden/stale before the
+    -- candidate upsert reactivates those that remain eligible. Confirmed,
+    -- requested, revealed, or otherwise progressed matches are never changed.
+    UPDATE public.matches m
+    SET status = 'STALE',
+        status_updated_at = NOW()
     WHERE UPPER(COALESCE(m.status, '')) = 'MATCHED'
+      AND LOWER(COALESCE(m.state, 'matched')) = 'matched'
       AND (p_requirement_id IS NULL OR m.requirement_id = p_requirement_id)
-      AND (p_listing_id IS NULL OR m.listing_id = p_listing_id);
+      AND (p_listing_id IS NULL OR m.listing_id = p_listing_id)
+      AND NOT EXISTS (
+          SELECT 1 FROM public.match_connection_requests request
+          WHERE request.match_id = m.matchid)
+      AND NOT EXISTS (
+          SELECT 1 FROM public.match_confirmations confirmation
+          WHERE confirmation.match_id = m.matchid)
+      AND NOT EXISTS (
+          SELECT 1 FROM public.reveals reveal
+          WHERE reveal.match_id = m.matchid);
 
     INSERT INTO public.matches (
         listing_id,
@@ -82,7 +118,7 @@ BEGIN
             UPPER(BTRIM(COALESCE(r.budget_unit, ''))) AS raw_budget_unit,
             r.size,
             r.size_max,
-            COALESCE(NULLIF(r.radius_km, 0), 3.0) AS radius_km,
+            COALESCE(r.radius_km, 3.0) AS radius_km,
             r.preferred_project_names,
             CASE REGEXP_REPLACE(UPPER(COALESCE(r.furnishing_pref, 'ANY')), '[^A-Z0-9]', '', 'g')
                 WHEN 'BARE' THEN 'UNFURNISHED'
@@ -110,10 +146,17 @@ BEGIN
             COALESCE(NULLIF(first_locality.geocoding_status, ''), 'pending') AS locality_geocoding_status,
             UPPER(COALESCE(r.budget_type, '')) IN ('FLEXIBLE', 'NOBUDGET') AS budget_is_flexible
         FROM public.requirements r
-        LEFT JOIN public.master first_locality
-            ON first_locality.masterid = r.preferred_locality_ids[1]
+        LEFT JOIN LATERAL (
+            SELECT locality.*
+            FROM public.master locality
+            WHERE locality.masterid = ANY(r.preferred_locality_ids)
+              AND COALESCE(NULLIF(locality.geocoding_status, ''), 'pending') IN ('resolved', 'verified')
+            ORDER BY array_position(r.preferred_locality_ids, locality.masterid)
+            LIMIT 1
+        ) first_locality ON TRUE
         WHERE UPPER(COALESCE(r.status, '')) = 'ACTIVE'
           AND COALESCE(r.isavailable, TRUE)
+          AND (r.expires_at IS NULL OR r.expires_at > NOW())
           AND (p_requirement_id IS NULL OR r.requirementid = p_requirement_id)
     ),
     requirement_scope AS (
@@ -145,11 +188,8 @@ BEGIN
         FROM requirement_base r
         WHERE r.resolved_city IS NOT NULL
           AND (r.budget_is_flexible OR r.budget IS NOT NULL)
-          AND (
-              r.preferred_locality_ids IS NULL
-              OR array_length(r.preferred_locality_ids, 1) IS NULL
-              OR r.locality_geocoding_status IN ('resolved', 'verified')
-          )
+          AND COALESCE(cardinality(r.preferred_locality_ids), 0) > 0
+          AND r.locality_geocoding_status IN ('resolved', 'verified')
     ),
     requirement_computed AS (
         SELECT
@@ -158,7 +198,6 @@ BEGIN
                 WHEN r.budget_is_flexible THEN NULL
                 WHEN r.normalized_budget_unit IN ('TOTAL', 'PER_MONTH') THEN r.normalized_budget
                 WHEN r.normalized_budget_unit = 'PER_SQFT' AND r.size > 0 THEN r.normalized_budget * r.size
-                WHEN r.normalized_budget_unit = 'PER_BIGHA' AND r.size > 0 THEN r.normalized_budget * (r.size / 12000.0)
                 WHEN r.normalized_budget_unit = 'PER_ACRE' AND r.size > 0 THEN r.normalized_budget * (r.size / 43560.0)
                 ELSE NULL
             END AS computed_budget,
@@ -166,7 +205,6 @@ BEGIN
                 WHEN r.normalized_budget_min IS NULL THEN NULL
                 WHEN r.normalized_budget_unit IN ('TOTAL', 'PER_MONTH') THEN r.normalized_budget_min
                 WHEN r.normalized_budget_unit = 'PER_SQFT' AND r.size > 0 THEN r.normalized_budget_min * r.size
-                WHEN r.normalized_budget_unit = 'PER_BIGHA' AND r.size > 0 THEN r.normalized_budget_min * (r.size / 12000.0)
                 WHEN r.normalized_budget_unit = 'PER_ACRE' AND r.size > 0 THEN r.normalized_budget_min * (r.size / 43560.0)
                 ELSE NULL
             END AS computed_budget_min
@@ -238,6 +276,7 @@ BEGIN
         LEFT JOIN public.master locality ON locality.masterid = l.master_id
         WHERE UPPER(COALESCE(l.status, '')) = 'ACTIVE'
           AND COALESCE(l.isavailable, TRUE)
+          AND (l.expires_at IS NULL OR l.expires_at > NOW())
           AND (p_listing_id IS NULL OR l.listingid = p_listing_id)
     ),
     listing_scope AS (
@@ -271,7 +310,6 @@ BEGIN
             CASE
                 WHEN l.normalized_price_unit IN ('TOTAL', 'PER_MONTH') THEN l.normalized_price
                 WHEN l.normalized_price_unit = 'PER_SQFT' AND l.size > 0 THEN l.normalized_price * l.size
-                WHEN l.normalized_price_unit = 'PER_BIGHA' AND l.size > 0 THEN l.normalized_price * (l.size / 12000.0)
                 WHEN l.normalized_price_unit = 'PER_ACRE' AND l.size > 0 THEN l.normalized_price * (l.size / 43560.0)
                 ELSE NULL
             END AS computed_price
@@ -327,6 +365,10 @@ BEGIN
             FROM public.master pm
             WHERE pm.masterid = ANY(r.preferred_locality_ids)
               AND COALESCE(NULLIF(pm.geocoding_status, ''), 'pending') IN ('resolved', 'verified')
+              AND (
+                  pm.masterid = l.master_id
+                  OR public.haversine_km(pm.lat, pm.lng, l.listing_lat, l.listing_lng) <= r.radius_km
+              )
             ORDER BY
                 (pm.masterid = l.master_id) DESC,
                 similarity(LOWER(COALESCE(pm.area, '')), LOWER(COALESCE(l.listing_area, ''))) DESC,
@@ -363,10 +405,7 @@ BEGIN
               )
           )
           AND (
-              r.preferred_locality_ids IS NULL
-              OR array_length(r.preferred_locality_ids, 1) IS NULL
-              OR preferred.is_exact
-              OR preferred.locality_similarity >= 0.60
+              preferred.is_exact
               OR preferred.distance_km <= r.radius_km
           )
           AND (
@@ -377,7 +416,9 @@ BEGIN
                   AND (
                       (l.normalized_price_unit = r.normalized_budget_unit
                        AND l.normalized_price <= r.normalized_budget * 1.10)
-                      OR (l.computed_price IS NOT NULL AND r.computed_budget IS NOT NULL
+                      OR (l.normalized_price_unit <> 'PER_MONTH'
+                          AND r.normalized_budget_unit <> 'PER_MONTH'
+                          AND l.computed_price IS NOT NULL AND r.computed_budget IS NOT NULL
                           AND l.computed_price <= r.computed_budget * 1.10)
                   )
               )
@@ -409,7 +450,9 @@ BEGIN
                 WHEN c.normalized_price_unit = c.normalized_budget_unit
                      AND (c.normalized_budget_min IS NULL OR c.normalized_price >= c.normalized_budget_min)
                      AND c.normalized_price <= c.normalized_budget THEN 20
-                WHEN c.computed_price IS NOT NULL AND c.computed_budget IS NOT NULL
+                WHEN c.normalized_price_unit <> 'PER_MONTH'
+                     AND c.normalized_budget_unit <> 'PER_MONTH'
+                     AND c.computed_price IS NOT NULL AND c.computed_budget IS NOT NULL
                      AND (c.computed_budget_min IS NULL OR c.computed_price >= c.computed_budget_min)
                      AND c.computed_price <= c.computed_budget THEN 20
                 WHEN c.normalized_budget_min IS NOT NULL
@@ -417,7 +460,9 @@ BEGIN
                      AND c.normalized_price < c.normalized_budget_min THEN 15
                 WHEN c.normalized_price_unit = c.normalized_budget_unit
                      AND c.normalized_price <= c.normalized_budget * 1.10 THEN 13
-                WHEN c.computed_price IS NOT NULL AND c.computed_budget IS NOT NULL
+                WHEN c.normalized_price_unit <> 'PER_MONTH'
+                     AND c.normalized_budget_unit <> 'PER_MONTH'
+                     AND c.computed_price IS NOT NULL AND c.computed_budget IS NOT NULL
                      AND c.computed_price <= c.computed_budget * 1.10 THEN 13
                 ELSE 6
             END::numeric AS price_score,
@@ -438,7 +483,8 @@ BEGIN
                 WHEN EXISTS (
                     SELECT 1
                     FROM unnest(c.requirement_configurations) configuration
-                    WHERE UPPER(BTRIM(configuration)) = UPPER(BTRIM(c.listing_configuration))
+                    WHERE REGEXP_REPLACE(UPPER(BTRIM(configuration)), '[^A-Z0-9]', '', 'g')
+                          = REGEXP_REPLACE(UPPER(BTRIM(c.listing_configuration)), '[^A-Z0-9]', '', 'g')
                 ) THEN 10
                 ELSE 0
             END::numeric AS configuration_score,
@@ -552,6 +598,17 @@ BEGIN
         match_tier = EXCLUDED.match_tier,
         score_breakdown = EXCLUDED.score_breakdown,
         status = 'MATCHED',
-        status_updated_at = NOW();
+        status_updated_at = NOW()
+    WHERE UPPER(COALESCE(matches.status, '')) IN ('MATCHED', 'STALE')
+      AND LOWER(COALESCE(matches.state, 'matched')) = 'matched'
+      AND NOT EXISTS (
+          SELECT 1 FROM public.match_connection_requests request
+          WHERE request.match_id = matches.matchid)
+      AND NOT EXISTS (
+          SELECT 1 FROM public.match_confirmations confirmation
+          WHERE confirmation.match_id = matches.matchid)
+      AND NOT EXISTS (
+          SELECT 1 FROM public.reveals reveal
+          WHERE reveal.match_id = matches.matchid);
 END;
 $procedure$;

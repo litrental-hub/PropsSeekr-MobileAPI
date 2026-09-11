@@ -2,6 +2,8 @@ namespace PropSeekr.DTOs.Payment;
 
 public class CreateOrderResponseDto
 {
+    public int PackId { get; set; }
+    public int Credits { get; set; }
     public string RazorpayOrderId { get; set; } = string.Empty;
     public long AmountInPaise { get; set; }
     public string Currency { get; set; } = "INR";

@@ -20,24 +20,19 @@ public class RazorpayService : IRazorpayService
     private readonly string _keyId;
     private readonly string _keySecret;
     private readonly string _webhookSecret;
-
-    // Predefined pricing tiers to prevent price tampering
-    private static readonly Dictionary<string, (int Credits, long PriceInPaise)> PricingTiers = new()
-    {
-        { "CREDITS_10", (10, 300000) },   // ₹3,000 (300,000 Paise)
-        { "CREDITS_20", (20, 560000) },   // ₹5,600 (560,000 Paise)
-        { "CREDITS_50", (50, 1250000) }   // ₹12,500 (1,250,000 Paise)
-    };
+    private readonly IWalletAccountingService _walletAccounting;
 
     public RazorpayService(
         AppDbContext context,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
-        ILogger<RazorpayService> logger)
+        ILogger<RazorpayService> logger,
+        IWalletAccountingService walletAccounting)
     {
         _context = context;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _walletAccounting = walletAccounting;
 
         _keyId = configuration["Razorpay:KeyId"] ?? throw new ArgumentNullException("Razorpay:KeyId config is missing");
         _keySecret = configuration["Razorpay:KeySecret"] ?? throw new ArgumentNullException("Razorpay:KeySecret config is missing");
@@ -46,20 +41,38 @@ public class RazorpayService : IRazorpayService
 
     public async Task<CreateOrderResponseDto> CreateOrderAsync(Guid userId, CreateOrderRequestDto request)
     {
-        // 1. Validate package tier
-        if (!PricingTiers.TryGetValue(request.TierId, out var tierDetails))
+        var now = DateTime.UtcNow;
+        var activePacks = _context.CreditPacks.AsNoTracking().Where(pack => pack.Active &&
+            pack.EffectiveFrom <= now && (!pack.EffectiveTo.HasValue || pack.EffectiveTo > now));
+        CreditPack? pack;
+        if (request.PackId.HasValue)
         {
-            throw new ArgumentException($"Invalid subscription tier: {request.TierId}");
+            pack = await activePacks.SingleOrDefaultAsync(item => item.Id == request.PackId.Value);
+        }
+        else if (!string.IsNullOrWhiteSpace(request.TierId) &&
+                 request.TierId.StartsWith("CREDITS_", StringComparison.OrdinalIgnoreCase) &&
+                 int.TryParse(request.TierId["CREDITS_".Length..], out var legacyCredits))
+        {
+            var matches = await activePacks.Where(item => item.Credits == legacyCredits).Take(2).ToListAsync();
+            pack = matches.Count == 1 ? matches[0] : null;
+        }
+        else
+        {
+            pack = null;
         }
 
-        var (credits, priceInPaise) = tierDetails;
+        if (pack is null || pack.Credits <= 0 || pack.AmountInPaise <= 0 || string.IsNullOrWhiteSpace(pack.Currency))
+            throw new ArgumentException("Select a valid active credit pack.");
+
+        var credits = pack.Credits;
+        var priceInPaise = pack.AmountInPaise;
         var receipt = $"receipt_{Guid.NewGuid().ToString("N").Substring(0, 12)}";
 
         // 2. Prepare payload for Razorpay Orders API
         var orderPayload = new
         {
             amount = priceInPaise,
-            currency = "INR",
+            currency = pack.Currency,
             receipt = receipt
         };
 
@@ -111,10 +124,10 @@ public class RazorpayService : IRazorpayService
             UserId = userId,
             RazorpayOrderId = razorpayOrderId,
             AmountInPaise = priceInPaise,
-            Currency = "INR",
+            Currency = pack.Currency,
             Receipt = receipt,
             Status = PaymentStatus.Pending.ToString(),
-            TierId = request.TierId,
+            TierId = $"{pack.Code}:v{pack.Version}:id{pack.Id}",
             CreditsAwarded = credits,
             Description = $"Purchase of {credits} credits"
         };
@@ -127,9 +140,11 @@ public class RazorpayService : IRazorpayService
         // 6. Return response to mobile client
         return new CreateOrderResponseDto
         {
+            PackId = pack.Id,
+            Credits = credits,
             RazorpayOrderId = razorpayOrderId,
             AmountInPaise = priceInPaise,
-            Currency = "INR",
+            Currency = pack.Currency,
             Receipt = receipt,
             KeyId = _keyId
         };
@@ -143,7 +158,7 @@ public class RazorpayService : IRazorpayService
         var payload = $"{request.RazorpayOrderId}|{request.RazorpayPaymentId}";
         var computedSignature = ComputeHmacSha256(payload, _keySecret);
 
-        if (!string.Equals(computedSignature, request.RazorpaySignature, StringComparison.OrdinalIgnoreCase))
+        if (!SignaturesMatch(computedSignature, request.RazorpaySignature))
         {
             _logger.LogWarning("Signature verification failed for order {OrderId}.", request.RazorpayOrderId);
 
@@ -195,6 +210,8 @@ public class RazorpayService : IRazorpayService
             };
         }
 
+        await VerifyCapturedPaymentWithProviderAsync(transaction, request.RazorpayPaymentId);
+
         await using var databaseTransaction = await _context.Database.BeginTransactionAsync();
         var claimed = await _context.PaymentTransactions
             .Where(item => item.Id == transaction.Id && item.Status != PaymentStatus.Success.ToString())
@@ -228,21 +245,22 @@ public class RazorpayService : IRazorpayService
     {
         _logger.LogInformation("Processing Razorpay Webhook notification");
 
-        // 1. Verify Webhook Signature (if WebhookSecret is configured)
-        if (!string.IsNullOrEmpty(_webhookSecret))
-        {
-            if (string.IsNullOrEmpty(signatureHeader))
-            {
-                _logger.LogWarning("Webhook request is missing X-Razorpay-Signature header");
-                throw new UnauthorizedAccessException("Missing webhook signature header");
-            }
+        // A missing server-side webhook secret must never turn this public
+        // endpoint into an unsigned wallet-credit path.
+        if (string.IsNullOrWhiteSpace(_webhookSecret))
+            throw new InvalidOperationException("Razorpay webhook authentication is not configured.");
 
-            var computedWebhookSig = ComputeHmacSha256(rawJson, _webhookSecret);
-            if (!string.Equals(computedWebhookSig, signatureHeader, StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogWarning("Webhook signature verification failed.");
-                throw new UnauthorizedAccessException("Invalid webhook signature");
-            }
+        if (string.IsNullOrWhiteSpace(signatureHeader))
+        {
+            _logger.LogWarning("Webhook request is missing X-Razorpay-Signature header");
+            throw new UnauthorizedAccessException("Missing webhook signature header");
+        }
+
+        var computedWebhookSig = ComputeHmacSha256(rawJson, _webhookSecret);
+        if (!SignaturesMatch(computedWebhookSig, signatureHeader))
+        {
+            _logger.LogWarning("Webhook signature verification failed.");
+            throw new UnauthorizedAccessException("Invalid webhook signature");
         }
 
         // 2. Parse Webhook Event
@@ -289,6 +307,29 @@ public class RazorpayService : IRazorpayService
 
         if (eventType == "payment.captured" || eventType == "order.paid")
         {
+            var providerStatus = entityProp.TryGetProperty("status", out var statusProp)
+                ? statusProp.GetString()
+                : null;
+            var providerCurrency = entityProp.TryGetProperty("currency", out var currencyProp)
+                ? currencyProp.GetString()
+                : null;
+            long providerAmount = 0;
+            var hasAmount = entityProp.TryGetProperty("amount", out var amountProp) && amountProp.TryGetInt64(out providerAmount);
+
+            if (string.IsNullOrWhiteSpace(paymentId) ||
+                !string.Equals(providerStatus, "captured", StringComparison.OrdinalIgnoreCase) ||
+                !hasAmount || providerAmount != transaction.AmountInPaise ||
+                !string.Equals(providerCurrency, transaction.Currency, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Rejected inconsistent captured-payment webhook for order {OrderId}. Status={Status}, Amount={Amount}, Currency={Currency}.",
+                    orderId,
+                    providerStatus,
+                    hasAmount ? providerAmount : (long?)null,
+                    providerCurrency);
+                throw new InvalidOperationException("Webhook payment details do not match the pending order.");
+            }
+
             var user = await _context.Users.FirstOrDefaultAsync(item => item.Id == transaction.UserId);
             if (user?.BrokerId is null)
             {
@@ -342,35 +383,13 @@ public class RazorpayService : IRazorpayService
             return await GetWalletTotalAsync(brokerId);
         }
 
-        var wallet = await _context.CreditWallets
-            .FromSqlInterpolated($@"SELECT * FROM credit_wallets WHERE broker_id = {brokerId} FOR UPDATE")
-            .SingleOrDefaultAsync();
-        if (wallet is null)
-        {
-            wallet = new CreditWallet
-            {
-                BrokerId = brokerId,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-            _context.CreditWallets.Add(wallet);
-        }
-
-        wallet.PaidCreditsBalance += payment.CreditsAwarded;
-        wallet.UpdatedAt = DateTime.UtcNow;
+        var wallet = (await _walletAccounting.LockAsync([brokerId])).SingleOrDefault()
+            ?? throw new KeyNotFoundException("Credit wallet not found.");
+        var now = DateTime.UtcNow;
+        await _walletAccounting.SettleFreeCreditsAsync(wallet, now);
+        _walletAccounting.CreditPaid(wallet, payment.CreditsAwarded, "payment", null, referenceKey,
+            $"Razorpay order {payment.RazorpayOrderId}", now);
         var total = wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
-
-        _context.CreditTransactions.Add(new CreditTransaction
-        {
-            BrokerId = brokerId,
-            Type = "purchase",
-            Amount = payment.CreditsAwarded,
-            BalanceAfter = total,
-            ReferenceType = "payment",
-            ReferenceKey = referenceKey,
-            Notes = $"Razorpay order {payment.RazorpayOrderId}",
-            CreatedAt = DateTime.UtcNow
-        });
 
         user.ModifiedDate = DateTime.UtcNow;
 
@@ -386,6 +405,60 @@ public class RazorpayService : IRazorpayService
         return wallet.FreeCreditsBalance + wallet.PaidCreditsBalance;
     }
 
+    private async Task VerifyCapturedPaymentWithProviderAsync(PaymentTransaction transaction, string paymentId)
+    {
+        if (string.IsNullOrWhiteSpace(paymentId))
+            throw new ArgumentException("Razorpay payment ID is required.", nameof(paymentId));
+
+        var client = _httpClientFactory.CreateClient();
+        var authBytes = Encoding.ASCII.GetBytes($"{_keyId}:{_keySecret}");
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await client.GetAsync($"https://api.razorpay.com/v1/payments/{Uri.EscapeDataString(paymentId)}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to validate Razorpay payment {PaymentId} with the provider.", paymentId);
+            throw new InvalidOperationException("Could not validate the payment with the payment gateway.", ex);
+        }
+
+        var responseContent = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning(
+                "Razorpay payment lookup failed for {PaymentId} with status {StatusCode}.",
+                paymentId,
+                response.StatusCode);
+            throw new InvalidOperationException("The payment gateway did not confirm this payment.");
+        }
+
+        using var document = JsonDocument.Parse(responseContent);
+        var payment = document.RootElement;
+        var providerPaymentId = payment.TryGetProperty("id", out var idProperty) ? idProperty.GetString() : null;
+        var providerOrderId = payment.TryGetProperty("order_id", out var orderProperty) ? orderProperty.GetString() : null;
+        var providerStatus = payment.TryGetProperty("status", out var statusProperty) ? statusProperty.GetString() : null;
+        var providerCurrency = payment.TryGetProperty("currency", out var currencyProperty) ? currencyProperty.GetString() : null;
+        long providerAmount = 0;
+        var hasAmount = payment.TryGetProperty("amount", out var amountProperty) && amountProperty.TryGetInt64(out providerAmount);
+
+        if (!string.Equals(providerPaymentId, paymentId, StringComparison.Ordinal) ||
+            !string.Equals(providerOrderId, transaction.RazorpayOrderId, StringComparison.Ordinal) ||
+            !string.Equals(providerStatus, "captured", StringComparison.OrdinalIgnoreCase) ||
+            !hasAmount || providerAmount != transaction.AmountInPaise ||
+            !string.Equals(providerCurrency, transaction.Currency, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "Razorpay payment {PaymentId} did not match order {OrderId} or was not captured.",
+                paymentId,
+                transaction.RazorpayOrderId);
+            throw new InvalidOperationException("The payment gateway did not confirm a matching captured payment.");
+        }
+    }
+
     private static string ComputeHmacSha256(string message, string secret)
     {
         var keyBytes = Encoding.UTF8.GetBytes(secret);
@@ -396,5 +469,15 @@ public class RazorpayService : IRazorpayService
         
         // Convert to lowercase hex string
         return Convert.ToHexString(hashBytes).ToLowerInvariant();
+    }
+
+    private static bool SignaturesMatch(string expected, string? provided)
+    {
+        if (string.IsNullOrWhiteSpace(provided)) return false;
+
+        var expectedBytes = Encoding.ASCII.GetBytes(expected);
+        var providedBytes = Encoding.ASCII.GetBytes(provided.Trim().ToLowerInvariant());
+        return expectedBytes.Length == providedBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
     }
 }

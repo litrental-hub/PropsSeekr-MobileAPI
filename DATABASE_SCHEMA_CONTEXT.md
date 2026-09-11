@@ -1,7 +1,24 @@
 # PropSeekr canonical database design
 
-Last audited against the `propseekr_v2` DEV database, EF model, migrations, and
-canonical runtime paths on 2026-09-03.
+Last audited and updated against `propseekr_v2` DEV on 2026-09-11. The original read-only audit remains the historical baseline below; the deployment checkpoint records the subsequent authorized writes.
+
+## 2026-09-11 development deployment checkpoint
+
+Applied and verified migrations `20260911114149_HardenAsyncInventoryJobs`, `20260911115527_AddVersionedConnectionAttempts`, and `20260911120704_VersionWalletLedgerAndCreditCatalogue`. Installed `scripts/matching-engine-schema.sql` followed by the preservation-safe `scripts/harden-matching-engine.sql` in one transaction. An empty-target procedure call succeeded before commit, and a post-deployment body comparison produced the same SHA-256 (`4d6d91e5b6469eafe457b7168902cde5efe78ff93db5a782227722185102f6ec`) for installed and source procedure bodies. No broad matching rebuild ran.
+
+The async migration assigned content version 1 to existing inventory, marked 3,754 listing and 1,061 requirement embeddings completed at version 1, and created four version-1 queued jobs for the two listings and two requirements lacking embeddings. The connection migration linked all five confirmations and the existing reveal to attempts; no evidence remains unlinked and the new active-attempt uniqueness constraints are valid. The canonical expiry transition then closed the three overdue pending requests without deductions, leaving zero overdue active attempts, one accepted request, and four expired requests. Reveal accounting still has exactly two one-credit debits and wallet/latest-ledger reconciliation has zero mismatches.
+
+The catalogue migration produced versioned INR packs with authoritative paise amounts and validated positive-balance/allocation constraints. Five historical wallets still have null reset dates. They were deliberately not backfilled because the audited ledger cannot establish their opening period; an approved reconciliation decision is required before assigning dates or expiring balances. Historical unresolved locations, three broker-less users, four queued embeddings, freshness backfill, outcomes/disputes/outbox, and infrastructure/provider validation remain separate review or implementation cohorts—not safe blanket database updates.
+
+## 2026-09-11 verified audit (supersedes dated counts below)
+
+PostgreSQL 17.9; PostGIS 3.5.1, vector 0.8.1, pg_trgm 1.6. All 26 EF tables/columns match existence, type and nullability. There are 114 public indexes, 66 validated constraints, 26 zero-orphan FK checks and 17 sequences at or beyond table maxima; no non-internal triggers or exact duplicate public indexes were found.
+
+At the original audit, the installed matching procedure body was not preservation-safe. All 3,670 matches retained `status=MATCHED`, including three pending and one revealed; its status-only deletion could cascade through confirmations, connection requests and reveals. The deployment checkpoint above supersedes that installed routine: the current procedure protects progressed rows in both stale-marking and conflict-update paths. No global recomputation has been performed.
+
+Original audit counts: 3,756 listings, 1,063 requirements, 728 brokers, 8 users; 2,014 listings and 452 requirements lacked locality links; two records on each inventory side lacked embeddings. Three regular users lacked broker links. Five wallets had null reset dates and could not be reconstructed from the current ledger starting at zero; do not reset balances without approved opening-balance reconciliation. Three active requests were overdue and were later repaired as recorded above. No listing or requirement had a populated last-confirmed timestamp. These are time-bound observations, not hardcoded repair targets.
+
+API cleanup removed unused controller routes only; `listing_requirements` and all other tables/models remain. See workspace `PropSeekr Database Audit.md`, `PropSeekr API Route Audit.md`, and Section 12 of `PropSeekr Architecture and Implementation Plan.md` for complete evidence and execution gates. Older dated audit details below are historical, not current verification.
 
 This file is the schema-level companion to `APPLICATION_CONTEXT.md`. Do not put
 credentials, connection strings, customer text, or tokens here.
@@ -33,7 +50,7 @@ therefore also requires application/audit validation rather than a normal FK.
 
 ## Canonical entities
 
-- Widget verification: additive migration `20260909075218_AddWidgetOtpChallenges` creates `widget_otp_challenges`. Its UUID challenge targets one existing user or pending registration and expires after 15 minutes. Target IDs are application-validated rather than foreign keys because pending records are deleted on promotion and consumed proof must survive. `ConsumedTokenHash` is a nullable SHA-256 hex string with a unique index (multiple unconsumed nulls allowed). Consumption, user/broker creation and wallet initialization commit together. Retain consumed hashes to reject cross-challenge replay; raw MSG91 tokens are never stored. This source change has not been applied to any application database.
+- Widget verification: migration `20260909075218_AddWidgetOtpChallenges` creates `widget_otp_challenges` and is present in the verified development migration history. Its UUID challenge targets one existing user or pending registration and expires after 15 minutes. Target IDs are application-validated rather than foreign keys because pending records are deleted on promotion and consumed proof must survive. `ConsumedTokenHash` is a nullable SHA-256 hex string with a unique index (multiple unconsumed nulls allowed). Consumption, user/broker creation and wallet initialization commit together. Retain consumed hashes to reject cross-challenge replay; raw MSG91 tokens are never stored.
 - Identity: `pending_registrations`, `Users`, `brokers`, OTP/email OTP records.
   `pending_registrations` expires after 24 hours and has unique mobile, email,
   Aadhaar, and PAN indexes. It is never an authenticated identity; only a
