@@ -23,9 +23,79 @@ service_updated=false
 previous_task_definition=""
 new_task_definition=""
 deployment_arn=""
+deployment_details=""
 
 task_definition_file="task-definition.json"
 register_file="task-definition-register.json"
+
+print_failure_diagnostics() {
+    echo ""
+    echo "ECS failure diagnostics:"
+
+    if [[ -n "${deployment_details}" ]]; then
+        jq -r '
+            .serviceDeployments[0]
+            | "Deployment status: \(.status // \"unknown\")\nLifecycle stage: \(.lifecycleStage // \"unknown\")\nStatus reason: \(.statusReason // \"not provided\")"
+        ' <<< "${deployment_details}" 2>/dev/null || true
+    fi
+
+    local stopped_task_output
+    stopped_task_output="$(
+        aws ecs list-tasks \
+            --region "${AWS_REGION}" \
+            --cluster "${ECS_CLUSTER}" \
+            --service-name "${ECS_SERVICE}" \
+            --desired-status STOPPED \
+            --max-items 20 \
+            --query 'taskArns' \
+            --output text \
+            2>/dev/null || true
+    )"
+
+    if [[ -z "${stopped_task_output}" || "${stopped_task_output}" == "None" ]]; then
+        echo "No recently stopped service tasks were available."
+        return
+    fi
+
+    local -a stopped_task_arns
+    read -r -a stopped_task_arns <<< "${stopped_task_output}"
+
+    local stopped_tasks_json
+    stopped_tasks_json="$(
+        aws ecs describe-tasks \
+            --region "${AWS_REGION}" \
+            --cluster "${ECS_CLUSTER}" \
+            --tasks "${stopped_task_arns[@]}" \
+            --output json \
+            2>/dev/null || true
+    )"
+
+    if [[ -z "${stopped_tasks_json}" ]]; then
+        echo "Stopped-task details were unavailable to the deployment role."
+        return
+    fi
+
+    local matching_task_count
+    matching_task_count="$(
+        jq --arg task_definition "${new_task_definition}" \
+            '[.tasks[] | select(.taskDefinitionArn == $task_definition)] | length' \
+            <<< "${stopped_tasks_json}" 2>/dev/null || echo 0
+    )"
+
+    if [[ "${matching_task_count}" -eq 0 ]]; then
+        echo "No recently stopped tasks matched ${new_task_definition}."
+        return
+    fi
+
+    jq -r --arg task_definition "${new_task_definition}" '
+        [.tasks[] | select(.taskDefinitionArn == $task_definition)]
+        | sort_by(.stoppedAt)
+        | reverse
+        | .[:5][]
+        | "Task: \(.taskArn)\n  stopCode: \(.stopCode // \"unknown\")\n  stoppedReason: \(.stoppedReason // \"not provided\")\n" +
+          (.containers[] | "  container=\(.name) lastStatus=\(.lastStatus // \"unknown\") health=\(.healthStatus // \"unknown\") exitCode=\(.exitCode // \"not reported\") reason=\(.reason // \"not provided\")")
+    ' <<< "${stopped_tasks_json}"
+}
 
 rollback() {
     local status=$?
@@ -407,6 +477,7 @@ while true; do
             echo ""
             echo "ECS Express automatically rolled back."
             echo "Reason: ${deployment_reason}"
+            print_failure_diagnostics
             exit 1
             ;;
 
@@ -414,6 +485,7 @@ while true; do
             echo ""
             echo "ECS Express rollback FAILED."
             echo "Reason: ${deployment_reason}"
+            print_failure_diagnostics
             exit 1
             ;;
 
@@ -421,6 +493,7 @@ while true; do
             echo ""
             echo "ECS Express deployment stopped."
             echo "Reason: ${deployment_reason}"
+            print_failure_diagnostics
             exit 1
             ;;
 
