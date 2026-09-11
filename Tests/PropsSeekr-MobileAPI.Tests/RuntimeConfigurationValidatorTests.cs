@@ -16,7 +16,7 @@ public sealed class RuntimeConfigurationValidatorTests
     }
 
     [Fact]
-    public void Validate_LoadedSecretMissingSecurityValues_FailsStartup()
+    public void Validate_LoadedSecretMissingCoreValues_FailsStartup()
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -26,8 +26,24 @@ public sealed class RuntimeConfigurationValidatorTests
 
         var error = Assert.Throws<InvalidOperationException>(() =>
             RuntimeConfigurationValidator.Validate(configuration, new TestEnvironment("Development")));
-        Assert.Contains("InternalService:ApiKey", error.Message);
-        Assert.Contains("Razorpay:WebhookSecret", error.Message);
+        Assert.Contains("Jwt:Key", error.Message);
+        Assert.Contains("Jwt:Issuer", error.Message);
+        Assert.Contains("Jwt:Audience", error.Message);
+    }
+
+    [Fact]
+    public void Validate_LoadedSecretMissingProtectedIntegrationValues_AllowsStartup()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            [AwsSecretsConfigurationLoader.SecretsLoadedKey] = bool.TrueString,
+            ["ConnectionStrings:DefaultConnection"] = "Host=example",
+            ["Jwt:Key"] = "test-key",
+            ["Jwt:Issuer"] = "test-issuer",
+            ["Jwt:Audience"] = "test-audience"
+        }).Build();
+
+        RuntimeConfigurationValidator.Validate(configuration, new TestEnvironment("Production"));
     }
 
     private sealed class TestEnvironment(string name) : IHostEnvironment
