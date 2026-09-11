@@ -13,15 +13,8 @@ public static class FileProcessorConfigurationBridge
     private static readonly (string Setting, string EnvironmentVariable)[] Mappings =
     {
         ("OpenAiApiKey", "OPENAI_API_KEY"),
-        ("DbConnectionString", "DB_CONNECTION_STRING"),
-        ("DbHost", "DB_HOST"),
-        ("DbPort", "DB_PORT"),
-        ("DbName", "DB_NAME"),
-        ("DbUsername", "DB_USERNAME"),
-        ("DbPassword", "DB_PASSWORD"),
         ("S3BucketName", "S3_BUCKET_NAME"),
         ("GoogleMapsApiKey", "GOOGLE_MAPS_API_KEY"),
-        ("GoogleApiKey", "GOOGLE_API_KEY"),
         ("PrimaryLlm", "PRIMARY_LLM"),
         ("VertexLocation", "GOOGLE_CLOUD_LOCATION"),
         ("EmbeddingModel", "VERTEX_EMBEDDING_MODEL"),
@@ -45,6 +38,8 @@ public static class FileProcessorConfigurationBridge
     {
         var awsSecretsLoaded = configuration.GetValue<bool>(
             PropSeekr.Configuration.AwsSecretsConfigurationLoader.SecretsLoadedKey);
+
+        ApplyConnectionString(configuration, awsSecretsLoaded);
 
         foreach (var (setting, environmentVariable) in Mappings)
         {
@@ -77,5 +72,19 @@ public static class FileProcessorConfigurationBridge
             if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION")))
                 Environment.SetEnvironmentVariable("AWS_DEFAULT_REGION", awsRegion);
         }
+    }
+
+    private static void ApplyConnectionString(IConfiguration configuration, bool awsSecretsLoaded)
+    {
+        const string environmentVariable = "DB_CONNECTION_STRING";
+        var value = configuration.GetConnectionString("DefaultConnection");
+
+        if (!awsSecretsLoaded &&
+            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(environmentVariable)))
+            return;
+
+        Environment.SetEnvironmentVariable(
+            environmentVariable,
+            string.IsNullOrWhiteSpace(value) ? null : value);
     }
 }

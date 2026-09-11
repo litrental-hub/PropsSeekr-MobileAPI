@@ -37,17 +37,6 @@ builder.Logging.AddDebug();
 // Database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
-var dbHost = builder.Configuration["FileProcessor:DbHost"]?.Trim();
-var dbPort = builder.Configuration["FileProcessor:DbPort"]?.Trim();
-var dbName = builder.Configuration["FileProcessor:DbName"]?.Trim();
-var dbUser = builder.Configuration["FileProcessor:DbUsername"]?.Trim();
-var dbPass = builder.Configuration["FileProcessor:DbPassword"]?.Trim();
-
-if (string.IsNullOrWhiteSpace(connectionString) && !string.IsNullOrWhiteSpace(dbHost))
-{
-    connectionString = $"Host={dbHost};Port={dbPort ?? "5432"};Database={dbName ?? "postgres"};Username={dbUser ?? "postgres"};Password={dbPass}";
-}
-
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(
         connectionString,
@@ -55,6 +44,10 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Services
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient<IMsg91WidgetVerifier, Msg91WidgetVerifier>(client =>
+    client.Timeout = TimeSpan.FromSeconds(15))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false })
+    .RedactLoggedHeaders(new[] { "authkey" });
 builder.Services.AddSingleton<FileProcessorHost>();
 builder.Services.AddScoped<IOtpDeliveryService, Msg91OtpDeliveryService>();
 builder.Services.AddScoped<IEmailService, AmazonSesEmailService>();
@@ -83,12 +76,13 @@ builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.AddFixedWindowLimiter("OtpPolicy", opt =>
-    {
-        opt.PermitLimit = 5;
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.QueueLimit = 0;
-    });
+    options.AddPolicy("OtpPolicy", context =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10, Window = TimeSpan.FromMinutes(1), QueueLimit = 0
+            }));
 });
 
 // Controllers

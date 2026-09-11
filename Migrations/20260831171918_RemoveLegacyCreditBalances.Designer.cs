@@ -2,7 +2,9 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using PropSeekr.Data;
 
@@ -11,9 +13,11 @@ using PropSeekr.Data;
 namespace PropSeekr.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260831171918_RemoveLegacyCreditBalances")]
+    partial class RemoveLegacyCreditBalances
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -384,6 +388,94 @@ namespace PropSeekr.Migrations
                         .IsUnique();
 
                     b.ToTable("credit_wallets", (string)null);
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Deal", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime?>("ClosedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("closed_at");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal?>("DealValue")
+                        .HasColumnType("numeric")
+                        .HasColumnName("deal_value");
+
+                    b.Property<int>("MarkedByBrokerId")
+                        .HasColumnType("integer")
+                        .HasColumnName("marked_by_broker_id");
+
+                    b.Property<int>("MatchId")
+                        .HasColumnType("integer")
+                        .HasColumnName("match_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MarkedByBrokerId");
+
+                    b.HasIndex("MatchId")
+                        .IsUnique();
+
+                    b.ToTable("deals");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Dispute", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("BrokerId")
+                        .HasColumnType("integer")
+                        .HasColumnName("broker_id");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ResolutionType")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("resolution_type");
+
+                    b.Property<int?>("ResolvedAmount")
+                        .HasColumnType("integer")
+                        .HasColumnName("resolved_amount");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("resolved_at");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<long?>("TransactionId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("transaction_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TransactionId");
+
+                    b.HasIndex("BrokerId", "Status");
+
+                    b.ToTable("disputes");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.EmailOtpRecord", b =>
@@ -1256,6 +1348,95 @@ namespace PropSeekr.Migrations
                     b.ToTable("match_connection_requests");
                 });
 
+            modelBuilder.Entity("PropSeekr.Models.MatchStatus", b =>
+                {
+                    b.Property<int>("StatusId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("status_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("StatusId"));
+
+                    b.Property<string>("ColorCode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("color_code");
+
+                    b.Property<int>("DisplayOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("display_order");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("message");
+
+                    b.Property<string>("StatusName")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("status_name");
+
+                    b.HasKey("StatusId");
+
+                    b.ToTable("match_statuses");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Notification", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsContactUnlocked")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsRead")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("MetaJson")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("RequiresTokenUnlock")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("TokenCost")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Notifications");
+                });
+
             modelBuilder.Entity("PropSeekr.Models.NotificationPreference", b =>
                 {
                     b.Property<int>("Id")
@@ -1324,6 +1505,65 @@ namespace PropSeekr.Migrations
                     b.HasIndex("MobileNumber", "OtpCode");
 
                     b.ToTable("OtpVerifications", (string)null);
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Payment", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("Id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<decimal>("Amount")
+                        .HasColumnType("numeric")
+                        .HasColumnName("amount");
+
+                    b.Property<int>("BrokerId")
+                        .HasColumnType("integer")
+                        .HasColumnName("broker_id");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int?>("CreditPackId")
+                        .HasColumnType("integer")
+                        .HasColumnName("credit_pack_id");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("currency");
+
+                    b.Property<string>("Gateway")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("gateway");
+
+                    b.Property<string>("GatewayTxnId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("gateway_txn_id");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("status");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BrokerId");
+
+                    b.HasIndex("CreditPackId");
+
+                    b.ToTable("payments", (string)null);
                 });
 
             modelBuilder.Entity("PropSeekr.Models.PaymentTransaction", b =>
@@ -1400,113 +1640,123 @@ namespace PropSeekr.Migrations
                     b.ToTable("PaymentTransactions");
                 });
 
-            modelBuilder.Entity("PropSeekr.Models.PendingRegistration", b =>
+            modelBuilder.Entity("PropSeekr.Models.PropertyRequest", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
+                        .HasColumnType("uuid");
 
-                    b.Property<string>("AadharNumber")
+                    b.Property<string>("BudgetJson")
                         .IsRequired()
-                        .HasMaxLength(12)
-                        .HasColumnType("character varying(12)")
-                        .HasColumnName("aadhar_number");
+                        .HasColumnType("text");
 
-                    b.Property<string>("AddressLine1")
+                    b.Property<long?>("BudgetMax")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("BudgetMin")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Category")
                         .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("address_line1");
-
-                    b.Property<string>("AddressLine2")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("address_line2");
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
 
                     b.Property<string>("City")
                         .IsRequired()
                         .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("city");
+                        .HasColumnType("character varying(100)");
 
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at");
-
-                    b.Property<string>("Email")
+                    b.Property<string>("ClientPreferencesJson")
                         .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("email");
+                        .HasColumnType("text");
 
-                    b.Property<DateTime>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("expires_at");
-
-                    b.Property<string>("GstNumber")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("gst_number");
-
-                    b.Property<string>("MobileNumber")
+                    b.Property<string>("FiltersJson")
                         .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)")
-                        .HasColumnName("mobile_number");
+                        .HasColumnType("text");
 
-                    b.Property<string>("Name")
+                    b.Property<string>("ListingType")
                         .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("name");
-
-                    b.Property<string>("PanCard")
-                        .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)")
-                        .HasColumnName("pan_card");
-
-                    b.Property<string>("PasswordHash")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("password_hash");
-
-                    b.Property<string>("Pincode")
-                        .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)")
-                        .HasColumnName("pincode");
-
-                    b.Property<string>("ReraRegistrationNumber")
                         .HasMaxLength(50)
-                        .HasColumnType("character varying(50)")
-                        .HasColumnName("rera_registration_number");
+                        .HasColumnType("character varying(50)");
 
-                    b.Property<string>("State")
+                    b.Property<string>("Locality")
                         .IsRequired()
                         .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("state");
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Point>("Location")
+                        .HasColumnType("geography (point)");
+
+                    b.Property<DateTime>("ModifiedDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("PostedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PreferredLocationsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PropertyTypesJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<double>("RadiusKm")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("RequiredAreaJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SearchQueryJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("TransactionType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("UrgencyJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AadharNumber")
-                        .IsUnique();
+                    b.HasIndex("BudgetMax");
 
-                    b.HasIndex("Email")
-                        .IsUnique();
+                    b.HasIndex("BudgetMin");
 
-                    b.HasIndex("ExpiresAt");
+                    b.HasIndex("Category");
 
-                    b.HasIndex("MobileNumber")
-                        .IsUnique();
+                    b.HasIndex("Location");
 
-                    b.HasIndex("PanCard")
-                        .IsUnique();
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Location"), "GIST");
 
-                    b.ToTable("pending_registrations");
+                    b.HasIndex("PostedAt");
+
+                    b.HasIndex("PropertyTypesJson");
+
+                    b.HasIndex("TransactionType");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("City", "Locality");
+
+                    b.ToTable("PropertyRequests");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.Requirement", b =>
@@ -1730,6 +1980,31 @@ namespace PropSeekr.Migrations
                     b.ToTable("reveals", (string)null);
                 });
 
+            modelBuilder.Entity("PropSeekr.Models.UnlockedProperty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PropertyRequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UnlockedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PropertyRequestId");
+
+                    b.HasIndex("UserId", "PropertyRequestId")
+                        .IsUnique();
+
+                    b.ToTable("UnlockedProperties");
+                });
+
             modelBuilder.Entity("PropSeekr.Models.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1844,41 +2119,39 @@ namespace PropSeekr.Migrations
                     b.ToTable("Users");
                 });
 
-            modelBuilder.Entity("PropSeekr.Models.WidgetOtpChallenge", b =>
+            modelBuilder.Entity("PropSeekr.Models.Visit", b =>
                 {
-                    b.Property<Guid>("Id")
+                    b.Property<int>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("integer");
 
-                    b.Property<string>("ConsumedTokenHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<DateTime>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
+                    b.Property<int>("MarkedByBrokerId")
+                        .HasColumnType("integer")
+                        .HasColumnName("marked_by_broker_id");
 
-                    b.Property<string>("MobileNumber")
-                        .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)");
+                    b.Property<int>("MatchId")
+                        .HasColumnType("integer")
+                        .HasColumnName("match_id");
 
-                    b.Property<Guid?>("PendingRegistrationId")
-                        .HasColumnType("uuid");
+                    b.Property<string>("Notes")
+                        .HasColumnType("text");
 
-                    b.Property<Guid?>("UserId")
-                        .HasColumnType("uuid");
+                    b.Property<DateTime?>("VisitDate")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("visit_date");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ConsumedTokenHash")
-                        .IsUnique();
+                    b.HasIndex("MarkedByBrokerId");
 
-                    b.HasIndex("MobileNumber", "CreatedAt");
+                    b.HasIndex("MatchId");
 
-                    b.ToTable("widget_otp_challenges", (string)null);
+                    b.ToTable("visits");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.BrokerNotification", b =>
@@ -1931,6 +2204,42 @@ namespace PropSeekr.Migrations
                         .IsRequired();
 
                     b.Navigation("Broker");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Deal", b =>
+                {
+                    b.HasOne("PropSeekr.Models.Broker", "MarkedByBroker")
+                        .WithMany()
+                        .HasForeignKey("MarkedByBrokerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PropSeekr.Models.Match", "Match")
+                        .WithMany()
+                        .HasForeignKey("MatchId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MarkedByBroker");
+
+                    b.Navigation("Match");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Dispute", b =>
+                {
+                    b.HasOne("PropSeekr.Models.Broker", "Broker")
+                        .WithMany()
+                        .HasForeignKey("BrokerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PropSeekr.Models.CreditTransaction", "Transaction")
+                        .WithMany()
+                        .HasForeignKey("TransactionId");
+
+                    b.Navigation("Broker");
+
+                    b.Navigation("Transaction");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.Listing", b =>
@@ -2084,6 +2393,17 @@ namespace PropSeekr.Migrations
                     b.Navigation("RequestingBroker");
                 });
 
+            modelBuilder.Entity("PropSeekr.Models.Notification", b =>
+                {
+                    b.HasOne("PropSeekr.Models.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("PropSeekr.Models.NotificationPreference", b =>
                 {
                     b.HasOne("PropSeekr.Models.Broker", "Broker")
@@ -2095,7 +2415,35 @@ namespace PropSeekr.Migrations
                     b.Navigation("Broker");
                 });
 
+            modelBuilder.Entity("PropSeekr.Models.Payment", b =>
+                {
+                    b.HasOne("PropSeekr.Models.Broker", "Broker")
+                        .WithMany()
+                        .HasForeignKey("BrokerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PropSeekr.Models.CreditPack", "CreditPack")
+                        .WithMany()
+                        .HasForeignKey("CreditPackId");
+
+                    b.Navigation("Broker");
+
+                    b.Navigation("CreditPack");
+                });
+
             modelBuilder.Entity("PropSeekr.Models.PaymentTransaction", b =>
+                {
+                    b.HasOne("PropSeekr.Models.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.PropertyRequest", b =>
                 {
                     b.HasOne("PropSeekr.Models.User", "User")
                         .WithMany()
@@ -2128,6 +2476,25 @@ namespace PropSeekr.Migrations
                     b.Navigation("Match");
                 });
 
+            modelBuilder.Entity("PropSeekr.Models.UnlockedProperty", b =>
+                {
+                    b.HasOne("PropSeekr.Models.PropertyRequest", "PropertyRequest")
+                        .WithMany()
+                        .HasForeignKey("PropertyRequestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PropSeekr.Models.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PropertyRequest");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("PropSeekr.Models.User", b =>
                 {
                     b.HasOne("PropSeekr.Models.Broker", "Broker")
@@ -2135,6 +2502,25 @@ namespace PropSeekr.Migrations
                         .HasForeignKey("BrokerId");
 
                     b.Navigation("Broker");
+                });
+
+            modelBuilder.Entity("PropSeekr.Models.Visit", b =>
+                {
+                    b.HasOne("PropSeekr.Models.Broker", "MarkedByBroker")
+                        .WithMany()
+                        .HasForeignKey("MarkedByBrokerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("PropSeekr.Models.Match", "Match")
+                        .WithMany()
+                        .HasForeignKey("MatchId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MarkedByBroker");
+
+                    b.Navigation("Match");
                 });
 
             modelBuilder.Entity("PropSeekr.Models.Listing", b =>

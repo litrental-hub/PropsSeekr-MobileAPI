@@ -64,9 +64,10 @@ public class RequirementService : IRequirementService
         var limit = pagination.Limit > 0 ? pagination.Limit : 20;
         var skip = (pageNumber - 1) * limit;
 
+        #if false // Historical PropertyRequests projection retained only as a migration reference.
         // Do not materialize the legacy PropertyRequests projection. Canonical
         // Requirements is the sole source for this endpoint and for matching.
-        var requirements = new List<PropertyRequest>();
+        var requirements = new List<dynamic>();
 
         var legacyResponseItems = requirements.Select(p => {
             var requiredArea = p.RequiredAreaJson != null ? DeserializeJson<RequiredAreaDto>(p.RequiredAreaJson) : null;
@@ -107,6 +108,7 @@ public class RequirementService : IRequirementService
             };
         }).ToList();
 
+        #endif
         var canonicalQuery = _dbContext.Requirements.AsNoTracking();
         if (brokerId.HasValue)
             canonicalQuery = canonicalQuery.Where(requirement => requirement.BrokerId == brokerId.Value);

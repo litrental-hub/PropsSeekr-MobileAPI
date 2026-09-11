@@ -198,7 +198,9 @@ public class EmailOtpService : IEmailOtpService
             DateTime? expiresAt = null;
             AuthenticatedUserDto? userDto = null;
 
-            if (user != null)
+            if (user is { IsActive: true, IsMobileVerified: true, IsEmailVerified: true } &&
+                (user.BrokerId.HasValue || string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase)) &&
+                purpose != "PasswordReset")
             {
                 token = GenerateJwtToken(user, out var expDate);
                 refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
@@ -207,10 +209,13 @@ public class EmailOtpService : IEmailOtpService
                 userDto = new AuthenticatedUserDto
                 {
                     Id = user.Id,
+                    BrokerId = user.BrokerId,
                     Name = user.Name,
-                    MobileNumber = user.MobileNumber,
+                    MobileNumber = user.MobileNumber ?? string.Empty,
                     Email = user.Email,
                     IsMobileVerified = user.IsMobileVerified,
+                    IsEmailVerified = user.IsEmailVerified,
+                    Role = user.Role,
                 };
             }
 
@@ -291,8 +296,9 @@ public class EmailOtpService : IEmailOtpService
         {
             new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
             new Claim(ClaimTypes.Name, user.Name),
-            new Claim(ClaimTypes.MobilePhone, user.MobileNumber),
-            new Claim(ClaimTypes.Email, user.Email ?? string.Empty)
+            new Claim(ClaimTypes.MobilePhone, user.MobileNumber ?? string.Empty),
+            new Claim(ClaimTypes.Email, user.Email ?? string.Empty),
+            new Claim(ClaimTypes.Role, string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase) ? "Admin" : "User")
         };
 
         var token = new JwtSecurityToken(

@@ -469,22 +469,23 @@ namespace propseekr_file_processor
         // ─────────────────────────────────────────────────────
         //  BROKER RESOLUTION
         //  Lookup by phone_number. If not found, create new
-        //  broker with 10 free credits. Uses ON CONFLICT to
-        //  handle race conditions and duplicates.
+        //  broker. Wallet initialization belongs to the registration/broker
+        //  identity flow, not file ingestion. Uses ON CONFLICT to handle race
+        //  conditions and duplicates.
         // ─────────────────────────────────────────────────────
 
         private static async Task<(int brokerId, bool isNew)> ResolveOrCreateBrokerAsync(
             NpgsqlConnection conn, string phone, string name)
         {
             await using var cmd = new NpgsqlCommand(@"
-                INSERT INTO brokers (phone_number, name, credit_balance, status, created_at)
-                VALUES (@phone, @name, 10, 'ACTIVE', NOW())
+                INSERT INTO brokers (phone_number, name, status, created_at)
+                VALUES (@phone, @name, 'ACTIVE', NOW())
                 ON CONFLICT (phone_number) DO UPDATE SET
                     last_active_at = NOW(),
-                    name = CASE 
+                    name = CASE
                         WHEN LENGTH(EXCLUDED.name) > LENGTH(COALESCE(brokers.name, ''))
-                        THEN EXCLUDED.name 
-                        ELSE brokers.name 
+                        THEN EXCLUDED.name
+                        ELSE brokers.name
                     END
                 RETURNING brokerid, (xmax = 0) AS is_new
             ", conn);

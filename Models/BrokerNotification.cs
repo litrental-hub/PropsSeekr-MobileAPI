@@ -33,7 +33,7 @@ public class BrokerNotification
     [Column("channel_status")]
     [Required]
     [MaxLength(20)]
-    public string ChannelStatus { get; set; } = "pending"; // pending, sent, delivered, failed, read
+    public string ChannelStatus { get; set; } = "pending"; // pending, delivered, failed, read; read_at is the user-read authority
 
     [Column("read_at")]
     public DateTime? ReadAt { get; set; }

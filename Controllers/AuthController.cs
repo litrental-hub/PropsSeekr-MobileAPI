@@ -91,9 +91,11 @@ public class AuthController : ControllerBase
         }
     }
 
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("OtpPolicy")]
     [HttpPost("send-otp")]
     public async Task<IActionResult> SendOtp([FromBody] SendOtpRequestDto request)
     {
+        Response.Headers.CacheControl = "no-store";
         try
         {
             var response = await _authService.SendOtpAsync(request);
@@ -105,6 +107,7 @@ public class AuthController : ControllerBase
         }
     }
 
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("OtpPolicy")]
     [HttpPost("verify-otp")]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequestDto request)
     {
@@ -119,9 +122,26 @@ public class AuthController : ControllerBase
         }
     }
 
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("OtpPolicy")]
+    [HttpPost("verify-widget-otp")]
+    public async Task<IActionResult> VerifyWidgetOtp([FromBody] VerifyWidgetOtpRequestDto request, CancellationToken cancellationToken)
+    {
+        Response.Headers.CacheControl = "no-store";
+        try
+        {
+            return Ok(await _authService.VerifyWidgetOtpAsync(request, cancellationToken));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("OtpPolicy")]
     [HttpPost("resend-otp")]
     public async Task<IActionResult> ResendOtp([FromBody] SendOtpRequestDto request)
     {
+        Response.Headers.CacheControl = "no-store";
         try
         {
             var response = await _authService.ResendOtpAsync(request);

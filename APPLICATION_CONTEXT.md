@@ -1,6 +1,6 @@
 # PropSeekr API application context
 
-Last verified against the `Main` branch on 2026-08-29.
+Last verified against the current API and mobile contracts on 2026-09-07 (local review and isolated tests; not a target-database audit).
 
 This document is the backend source of truth for future feature work. Update it whenever a change alters a business rule, API contract, database source, state transition, external integration, or deployment requirement. Never add credentials, private keys, access tokens, connection strings, or customer data here.
 
@@ -35,17 +35,27 @@ Broker account -> broker identity -> listing or requirement
 
 ## Identity and authorization
 
-`Users` is the authentication source. A user has a persisted `Role` and may link to one numeric legacy/canonical `BrokerId`.
+`Users` is the authentication source. A user has a persisted `Role` and may link to one numeric legacy/canonical `BrokerId`. `pending_registrations` is a separate, short-lived staging table and is never an authenticated identity.
 
 - Login accepts username, mobile number, or email through `POST /api/v1/auth/login`.
-- Registration creates a `User`, creates or links a `Broker`, and initializes a wallet with ten free credits when needed.
+- `POST /auth/register` validates uniqueness and stores only a 24-hour pending registration. It sends the email OTP and returns `pendingRegistrationId`, not a user identity.
+- After email OTP verification, the client requests and verifies the mobile OTP. Only the successful mobile-OTP transaction creates the `User`, creates or claims the matching normalized-phone `Broker`, and initializes a wallet with ten free credits exactly once.
+- A normal regular user must therefore have verified email, verified mobile, and a persisted `BrokerId`. Admin accounts remain the explicit exception because they do not own broker inventory.
 - JWTs contain the user GUID as `NameIdentifier` and a normalized `Admin` or `User` role claim.
-- `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It first uses `User.BrokerId`, then falls back to the final ten digits of the mobile number and persists the link.
+- `BrokerIdentityService` is the bridge from a user GUID to broker-owned data. It uses only the persisted `User.BrokerId`; broker claiming is permitted only after mobile verification.
 - Broker-scoped actions must derive the broker ID from the authenticated user. Do not trust a client-supplied broker ID for authenticated create, match, wallet, or reveal operations.
 - Admin list endpoints intentionally remove broker ownership scope. Currently this applies to `/listings/mine`, `/requirements/mine`, `/user-matches`, and the admin search projection.
 - Internal service endpoints (file processor, matching run/expiration, monthly credit grant, credit deduction, and WhatsApp intake) require an `X-Internal-Service-Key` header matching `InternalService:ApiKey` or `INTERNAL_SERVICE_API_KEY`.
 
 The custom `Authentication/JwtAuthenticationHandler.cs` is not registered by `Program.cs`; the active implementation is ASP.NET's standard JWT bearer handler. Do not base new behavior on the custom handler unless registration is deliberately changed and tested.
+
+Pending registrations expire after 24 hours. They contain the same protected registration/KYC payload needed to finish account creation, including a password hash, but no JWT, role-bearing user row, broker link, or wallet. Do not use this table for login, authorization, or broker-scoped operations.
+
+Registration recovery preserves the durable pending row when email delivery fails and returns a verification-required response with resend guidance. A repeat submission may resume only the same mobile/email/Aadhaar/PAN identity with its original password; it does not overwrite staged fields or extend expiry. Email proof must have been issued and verified after that registration began. A mobile code issued before the current pending registration cannot promote it.
+
+Mobile OTP authentication rejects inactive accounts and regular accounts without verified email (except the existing Development-only bypass). Admin mobile authentication does not create a broker wallet. Email OTP returns a session only for active, fully verified accounts with a persisted broker link, or verified admins; it includes the persisted role and broker identity. Password-reset OTP does not return a session token.
+
+The Secrets Manager contract now accepts only the explicitly mapped flat string keys documented in `scripts/DEPLOYMENT_SETUP.md`. `DB_CONNECTION_STRING` maps to `ConnectionStrings:DefaultConnection`; old nested secrets and separate database fields are rejected. Verify the deployed secret shape before rolling out this branch; a local build does not validate AWS configuration.
 
 ## Canonical data model
 
@@ -80,12 +90,13 @@ Important sources of truth:
 - `match_connection_requests` records request direction and outcome.
 - `match_confirmations` records each broker's checklist and four-hour expiry.
 - `notifications` mapped as `BrokerNotification` is the canonical broker/matching notification stream used by the mobile UI.
+- `channel_status` tracks delivery (`pending` until an in-app poll returns it, then `delivered`); `read_at` alone tracks whether the broker has read it. A confirmation outcome is intentionally unread until the recipient marks it read.
 
 There are legacy parallel models that must not be mixed into new matching work:
 
 - `PropertyRequests` is an older combined supply/demand model. Marketplace search no longer queries it; canonical inventory and matching use `Listing` and `Requirement`.
 - `Notification` is a GUID user-notification model with an older unlock path; `BrokerNotification` is the numeric broker notification model used by the current match handshake.
-- `User.Credits` and `UnlockedProperty` belong to the legacy credit/unlock flow; the current match reveal uses `CreditWallet`, `CreditTransaction`, and `Reveal`.
+- `UnlockedProperty` belongs to the legacy credit/unlock flow; the current match reveal uses `CreditWallet`, `CreditTransaction`, and `Reveal`. Legacy `Users.Credits` and `brokers.credit_balance` were removed after wallet migration; `credit_wallets` is the sole balance store.
 
 New work should extend the canonical broker/listing/requirement/match/wallet graph unless it is explicitly a migration of legacy data.
 
@@ -131,7 +142,7 @@ The mobile listing and requirement forms geocode the property/preferred locality
 
 ## Bulk TXT import pipeline
 
-Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, including `defaultCity`, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The UI initializes the fallback from the user's selected city and uses `Indore` when none exists or the field is blank. This fallback is applied only when an extracted record has no explicit city; an explicitly named city always wins. The API records the fallback on the broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` parses the text file, ingests canonical listings/requirements, resolves locations with Google server-side Geocoding, embeds both targets, and runs matching asynchronously. Job status, fallback city, and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
+Mobile bulk uploads use the authenticated `POST /api/v1/bulk-imports/uploads` endpoint, including `defaultCity`, upload the returned presigned URL directly to S3, then call `POST /api/v1/bulk-imports/{jobId}/complete`. The UI initializes the fallback from the user's selected city and uses `Indore` when none exists or the field is blank. This fallback is applied only when an extracted record has no explicit city; an explicitly named city always wins. The API records the fallback and original filename on the broker-owned `bulk_import_jobs` row before issuing the URL. `BulkImportJobWorker` passes that original filename to the processor, so `listings.group_name` and `requirements.group_name` retain a human-readable import source rather than the generated storage key. It then resolves locations with Google server-side Geocoding, embeds both targets, and runs matching asynchronously. Job status, fallback city, and counts are available through `GET /api/v1/bulk-imports/{jobId}`; failed jobs can be requeued through `POST /api/v1/bulk-imports/{jobId}/retry`.
 
 Server geocoding uses a backend-only Google key from `FileProcessor:GoogleMapsApiKey`, `GOOGLE_MAPS_API_KEY`, or Secrets Manager. It is separate from the Android Maps SDK key, must be restricted to the Geocoding API and production server egress IPs, and must never be committed. New provider results are automatically accepted only when the expected city matches and the confidence score is at least 0.70; all other results retain no coordinates and are marked `review_required`. Canonical name similarity in import resolution is at least 0.75, and alias matching is exact by token rather than substring.
 
@@ -289,6 +300,10 @@ Important contract gap: the mobile Axios interceptor calls `POST /auth/refresh`,
 
 ## External integrations and operational boundaries
 
+- MSG91 OTP Widget support is disabled by default (`Msg91:WidgetEnabled`). With it enabled, mobile send/resend requires `supportsWidget: true` and returns `success`, legacy `status`, and a `widget` object containing `challengeId`, widget-scoped `tokenAuth`, `widgetId`, expected `identifier` and expiry. It does not generate or send a local OTP. Older apps receive an update-required error; legacy `/auth/verify-otp` is rejected while widget mode is active. Email verification and password login remain unchanged.
+- `POST /auth/verify-widget-otp` accepts only a challenge ID and transient MSG91 access token. The backend POSTs to MSG91 `/api/v5/widget/verifyAccessToken` with its private Authkey header, checks HTTP and application success and the exact `91`-prefixed Indian mobile, then checks authenticated JWT issuance/expiry. Proof must be issued after the challenge (whole-second precision), not future-issued or expired. Missing/malformed timestamps fail closed. This JWT contract needs a real-provider smoke test before rollout.
+- `widget_otp_challenges` binds a 15-minute challenge to a specific user or staged registration. Atomic consumption and a unique SHA-256 token-hash index prevent challenge/token replay across instances. No raw provider tokens or OTPs are stored. Promotion uses the same email-proof, active-account, broker-identity and wallet transaction as legacy verification. Consumed hashes must be retained; no automatic deletion is implemented. Per-number admission is capped at five challenges per 15 minutes under a PostgreSQL advisory lock; mobile endpoints also have a 10/minute per-remote-IP limiter per process. Provider-side client-token controls and edge/distributed rate limiting remain necessary because clients can call the SDK directly.
+- Apply additive migration `20260909075218_AddWidgetOtpChallenges` explicitly before enabling. Backend secrets are `MSG91_AUTH_KEY`, `MSG91_WIDGET_ID`, and `MSG91_WIDGET_TOKEN_AUTH`; the legacy `MSG91_OTP_TEMPLATE_ID` is not used in widget mode. See `scripts/MSG91_WIDGET_SETUP.md` for rollout, secure configuration and live-test requirements. No target database or provider-account configuration is changed by these source changes.
 - Google Maps SDK configuration in the mobile client, the backend Geocoding API key, and the Vertex AI service account are separate credentials with separate restrictions.
 - AWS credentials should come from workload roles/OIDC and Secrets Manager. Static AWS keys must not be committed.
 - Razorpay order verification and webhook handling must remain idempotent; successful payment credits the canonical wallet and ledger once.
